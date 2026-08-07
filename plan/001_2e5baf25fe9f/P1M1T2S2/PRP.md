@@ -219,7 +219,7 @@ pi-mulligan/
 ```bash
 pi-mulligan/
 ├── src/
-│   └── config.ts           # MODIFIED (append-only): + cachedConfig, getConfig, setConfig, validateConfig, private helpers
+│   └── config.ts           # MODIFIED: PLACE/REPLACE the S2 runtime section (cachedConfig, getConfig, setConfig, validateConfig, helpers) below DEFAULT_CONFIG; S1 contract unchanged
 └── test/
     └── config.test.ts      # MODIFIED (extend-only): + imports {getConfig,setConfig,validateConfig,beforeEach,vi};
                             #                          + describe('validateConfig'), describe('getConfig / setConfig cache'),
@@ -293,11 +293,23 @@ pi-mulligan/
 # (setConfig(undefined) → validateConfig(undefined) → all defaults). For the TRUE lazy-null first-call path,
 # use vi.resetModules() + dynamic import('../src/config.js') in its own describe (fresh module → cache null).
 # ─────────────────────────────────────────────────────────────────────────────
-# GOTCHA #10 — Do not break the S1 contract; append-only.
+# GOTCHA #10 — Do not break the S1 contract; the S1 exports are immutable.
 # The existing exports (Granularity, EstimateConfidence, MulliganConfig, DEFAULT_CONFIG) and the S1 test
-# suite MUST remain unchanged. Add new code BELOW DEFAULT_CONFIG. Reuse MulliganConfig/EstimateConfidence/
-# DEFAULT_CONFIG by same-module reference (no import statement). The Level 1 grep gates assert S1 exports
-# still appear exactly once and no S1 line was altered.
+# suite MUST remain unchanged. The S2 runtime section lives BELOW DEFAULT_CONFIG. Reuse
+# MulliganConfig/EstimateConfidence/DEFAULT_CONFIG by same-module reference (no import statement).
+# The Level 1 grep gates assert S1 exports still appear exactly once and no S1 line was altered.
+# ─────────────────────────────────────────────────────────────────────────────
+# GOTCHA #11 (CRITICAL) — A PRIOR S2 ATTEMPT MAY ALREADY BE PRESENT; it must be REPLACED, not duplicated.
+# OBSERVED AT RESEARCH TIME: the repo's src/config.ts already contained an S2 implementation using an
+# `UNSET = Symbol("mulligan:config:unset")` sentinel with `if (v !== UNSET)` guards. That version has a
+# real defect — `obj.missingKey` returns `undefined` (NOT the UNSET symbol), so the `!== UNSET` guard is
+# ALWAYS true for absent fields, causing every absent sibling field in a partial override to be coerced and
+# to emit a SPURIOUS warn (e.g. setting bloatThresholdBytes warns about absent driftThresholdTokens).
+# The CORRECTED design (the verbatim block in Task 1) drops the UNSET sentinel and uses `undefined`-as-
+# absence with `if (v !== undefined)` guards, so absent fields keep their default SILENTLY (verified: 0 warns
+# on a valid partial override). Therefore: if a prior S2 attempt exists, DELETE IT ENTIRELY (everything
+# after DEFAULT_CONFIG's closing `};`) and write the Task 1 block fresh — do NOT merge with / keep any of it.
+# The Level 1 gate asserts `grep -c UNSET src/config.ts` == 0 afterward.
 # ─────────────────────────────────────────────────────────────────────────────
 ```
 
@@ -308,23 +320,33 @@ pi-mulligan/
 ### Data models and structure
 
 No new data models — S2 **reuses** `MulliganConfig`, `EstimateConfidence`, and `DEFAULT_CONFIG` from the same
-file. The only new state is the module-level cache `let cachedConfig: MulliganConfig | null = null;` and the
-`UNSET` sentinel `Symbol`. All returned configs are JSON-serializable (they're clones of `DEFAULT_CONFIG`
+file. The only new state is the module-level cache `let cachedConfig: MulliganConfig | null = null;`.
+All returned configs are JSON-serializable (they're clones of `DEFAULT_CONFIG`
 with validated overlays), preserving S1's GOTCHA #8.
 
 ### Implementation Tasks (ordered by dependencies)
 
 ```yaml
-Task 0: VERIFY BASELINE (no edits — confirms S1 is solid before appending)
+Task 0: VERIFY BASELINE + DETECT PRIOR ATTEMPT (no edits — run only)
   - RUN: test -f src/config.ts && test -f test/config.test.ts
   - RUN: npx tsc --noEmit -p tsconfig.json            # expect exit 0
-  - RUN: npx vitest run test/config.test.ts            # expect 3/3 green (describe('DEFAULT_CONFIG'))
-  - IF any fail: STOP — S1 must be green before S2 starts (do not "fix" S1; flag to the orchestrator).
+  - RUN: npx vitest run test/config.test.ts            # expect green
+  - RUN: grep -c 'export function getConfig' src/config.ts   # 0 → pure S1 (APPEND in Task 1); >0 → a PRIOR S2 attempt exists (REPLACE in Task 1)
+  - RUN: grep -c 'UNSET' src/config.ts                       # >0 → the prior attempt has the over-warn bug (GOTCHA #11); it MUST be replaced
+  - IF tsc/vitest fail on the S1 CONTRACT (DEFAULT_CONFIG / MulliganConfig): STOP — flag to the orchestrator;
+    do not "fix" S1. (Failures caused only by a buggy prior-S2 attempt are expected and are fixed by Task 1.)
 
-Task 1: MODIFY src/config.ts  (APPEND ONLY — do not touch lines 1..end-of-DEFAULT_CONFIG)
-  - PRECONDITION: Task 0 green. config.ts currently ends with the DEFAULT_CONFIG object literal + closing `};`.
-  - APPEND the exact block in "Exact content to append" below, AFTER the final `};` of DEFAULT_CONFIG.
-    It adds: KNOWN_PROTECTED_ROLES, ESTIMATE_CONFIDENCE_VALUES, UNSET sentinel, cachedConfig,
+Task 1: MODIFY src/config.ts  (PLACE the S2 runtime section — the S1 contract stays immutable)
+  - PRECONDITION: Task 0 complete (you know whether a prior S2 attempt exists).
+  - DETERMINE STARTING STATE from the Task 0 grep:
+      * `export function getConfig` ABSENT (pure S1): APPEND the block below AFTER DEFAULT_CONFIG's closing `};`.
+      * `export function getConfig` PRESENT (prior attempt — likely the buggy `UNSET` version, GOTCHA #11):
+        DELETE everything from the FIRST S2 line (immediately after DEFAULT_CONFIG's closing `};`) through EOF,
+        then APPEND the block below. Do NOT keep/merge any prior S2 code (it has the over-warn defect).
+  - THE S1 CONTRACT (everything from line 1 through DEFAULT_CONFIG's closing `};`) IS NEVER EDITED in either case.
+  - RESULT after this task: `export function getConfig`/`setConfig`/`validateConfig` each appear EXACTLY ONCE,
+    there is NO `UNSET` symbol anywhere in the file, and ZERO runtime imports from Pi/typebox.
+  - The exact block to place is in "Exact content to place" below. It adds: KNOWN_PROTECTED_ROLES, cachedConfig,
     getConfig(), setConfig(), validateConfig(), and the private helpers
     (isRecord, safeGet, coerceBoolean, coerceNumber, coerceProtectedRoles, coerceEstimateConfidence,
     coerceLogFile, warnConfig, safeStringify).
@@ -375,7 +397,7 @@ Task 3: VALIDATE (no edits — run the gates in the Validation Loop)
     Pi integration arrives in P1.M4/P1.M5/P1.M6/P1.M7).
 ```
 
-#### Exact content to append to `src/config.ts` (Task 1 — copy verbatim; place after DEFAULT_CONFIG's closing `};`)
+#### Exact content to place in `src/config.ts` (Task 1 — copy verbatim; place AFTER DEFAULT_CONFIG's closing `};`, REPLACING any prior S2 attempt per GOTCHA #11)
 
 ```ts
 
@@ -393,9 +415,6 @@ const KNOWN_PROTECTED_ROLES = new Set<string>(["first:user", "latest:user"]);
  * Re-validated and replaced on every setConfig() (the re-read-on-/reload seam is index.ts, P1.M7.T1).
  */
 let cachedConfig: MulliganConfig | null = null;
-
-/** Sentinel distinguishing "property absent" from "present-but-undefined". */
-const UNSET = Symbol("mulligan:config:unset");
 
 /**
  * getConfig() — the public read API (spec/09 §1: "loaded lazily on first use and cached for the session").
@@ -445,57 +464,61 @@ export function validateConfig(raw: unknown): MulliganConfig {
       return cfg;
     }
 
+    // Each known field is read via safeGet (which returns `undefined` for ABSENT properties and for a
+    // throwing Proxy `get` trap). The `if (v !== undefined)` guard therefore SKIPS absent fields (they
+    // keep their default with NO warn — spec/09 §4 warns only on present-but-invalid values) and only runs
+    // the coercer on a genuinely-present value. (GOTCHA #1)
     let v: unknown;
 
     // Top-level master switch.
     v = safeGet(raw, "enabled");
-    if (v !== UNSET) cfg.enabled = coerceBoolean(v, cfg.enabled);
+    if (v !== undefined) cfg.enabled = coerceBoolean(v, cfg.enabled);
 
     // rewind.*
     const rewindRaw = safeGet(raw, "rewind");
     if (isRecord(rewindRaw)) {
       v = safeGet(rewindRaw, "enabled");
-      if (v !== UNSET) cfg.rewind.enabled = coerceBoolean(v, cfg.rewind.enabled);
+      if (v !== undefined) cfg.rewind.enabled = coerceBoolean(v, cfg.rewind.enabled);
       v = safeGet(rewindRaw, "protectedRoles");
-      if (v !== UNSET) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
+      if (v !== undefined) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
       v = safeGet(rewindRaw, "maxDepth");
-      if (v !== UNSET) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
+      if (v !== undefined) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
       v = safeGet(rewindRaw, "requireMutationWarning");
-      if (v !== UNSET) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
+      if (v !== undefined) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
     }
 
     // shrink.*  (autoOnBloat intentionally NOT honored — reserved, not v1; S1 GOTCHA #1)
     const shrinkRaw = safeGet(raw, "shrink");
     if (isRecord(shrinkRaw)) {
       v = safeGet(shrinkRaw, "enabled");
-      if (v !== UNSET) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
+      if (v !== undefined) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
     }
 
     // nudges.*
     const nudgesRaw = safeGet(raw, "nudges");
     if (isRecord(nudgesRaw)) {
       v = safeGet(nudgesRaw, "bloatReminder");
-      if (v !== UNSET) cfg.nudges.bloatReminder = coerceBoolean(v, cfg.nudges.bloatReminder);
+      if (v !== undefined) cfg.nudges.bloatReminder = coerceBoolean(v, cfg.nudges.bloatReminder);
       v = safeGet(nudgesRaw, "perTurnDrift");
-      if (v !== UNSET) cfg.nudges.perTurnDrift = coerceBoolean(v, cfg.nudges.perTurnDrift);
+      if (v !== undefined) cfg.nudges.perTurnDrift = coerceBoolean(v, cfg.nudges.perTurnDrift);
       v = safeGet(nudgesRaw, "bloatThresholdBytes");
-      if (v !== UNSET) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
+      if (v !== undefined) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
       v = safeGet(nudgesRaw, "driftThresholdTokens");
-      if (v !== UNSET) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
+      if (v !== undefined) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
     }
 
     // audit.*
     const auditRaw = safeGet(raw, "audit");
     if (isRecord(auditRaw)) {
       v = safeGet(auditRaw, "estimateConfidence");
-      if (v !== UNSET) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
+      if (v !== undefined) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
     }
 
     // log.*  (opening/writing the file is log.ts / P1.M1.T3 — NOT this module)
     const logRaw = safeGet(raw, "log");
     if (isRecord(logRaw)) {
       v = safeGet(logRaw, "file");
-      if (v !== UNSET) cfg.log.file = coerceLogFile(v, cfg.log.file);
+      if (v !== undefined) cfg.log.file = coerceLogFile(v, cfg.log.file);
     }
 
     return cfg;
@@ -512,12 +535,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Read a property without throwing (a Proxy `get` trap may throw). Returns UNSET if absent/unreadable. */
+/** Read a property without throwing (a Proxy `get` trap may throw). Returns `undefined` if the property
+ *  is absent OR the read throws — both are treated as "not provided" (keep default, no warn). */
 function safeGet(obj: object, key: string): unknown {
   try {
     return (obj as Record<string, unknown>)[key];
   } catch {
-    return UNSET;
+    return undefined;
   }
 }
 
@@ -723,6 +747,24 @@ describe("validateConfig", () => {
     validateConfig({ nudges: { bloatThresholdBytes: 1 }, rewind: { maxDepth: 99 } });
     expect(DEFAULT_CONFIG).toEqual(snapshot);
   });
+
+  it("does NOT warn for ABSENT fields in a partial override (warns only on present-but-invalid, spec/09 §4)", () => {
+    // A partial valid override must NOT spew warns about its absent sibling fields.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // driftThresholdTokens absent
+      expect(cfg.nudges.bloatThresholdBytes).toBe(100);
+      expect(cfg.nudges.driftThresholdTokens).toBe(3000); // absent → default, silently
+      expect(warn).not.toHaveBeenCalled(); // ZERO warns for a fully-valid partial override
+      // …but a present-but-INVALID value DOES warn (exactly once, naming the field):
+      warn.mockClear();
+      validateConfig({ nudges: { bloatThresholdBytes: -1 } });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytes");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("getConfig / setConfig cache", () => {
@@ -776,7 +818,6 @@ describe("getConfig lazy init (cache starts null)", () => {
 
   it("first getConfig() on a fresh module validates defaults lazily", async () => {
     const mod = await import("../src/config.js");
-    expect(mod.cachedConfig === null || true); // (cache is private; we assert behavior, not internals)
     expect(mod.getConfig()).toEqual(DEFAULT_CONFIG);
     // a second call returns an equal (but distinct) config:
     const again = mod.getConfig();
@@ -811,12 +852,13 @@ export function validateConfig(raw: unknown): MulliganConfig {
 //   so one bad field doesn't discard the rest. (GOTCHA #1)
 
 // ── PATTERN: safe property read on unknown (Proxy traps can throw) ─────────
-const UNSET = Symbol("mulligan:config:unset");
 function safeGet(obj: object, key: string): unknown {
   try { return (obj as Record<string, unknown>)[key]; }
-  catch { return UNSET; }
+  catch { return undefined; }
 }
-//   Use the UNSET sentinel (not undefined) to distinguish "absent" from "present-but-undefined".
+//   Absent properties read as `undefined`; a throwing `get` trap ALSO yields `undefined`. Guard each field
+//   with `if (v !== undefined)` so ABSENT fields keep their default WITHOUT a spurious warn (spec/09 §4
+//   warns only on present-but-invalid values) and a throwing trap is skipped fail-safe (no throw, no warn).
 //   NEVER use `in`, destructuring, Object.keys, or {...obj} on `raw` — they all invoke traps. (GOTCHA #1)
 
 // ── PATTERN: lazy cache + defensive copy ───────────────────────────────────
@@ -898,6 +940,7 @@ grep -c 'export const DEFAULT_CONFIG: MulliganConfig' src/config.ts   # expect 1
 grep -c 'export function getConfig' src/config.ts        # expect 1
 grep -c 'export function setConfig' src/config.ts        # expect 1
 grep -c 'export function validateConfig' src/config.ts   # expect 1
+grep -c 'UNSET' src/config.ts                             # expect 0  (no UNSET sentinel — GOTCHA #11)
 
 # (c) Scope discipline: ZERO runtime Pi/typebox imports (config.ts stays dependency-free — GOTCHA: grep=0):
 grep -cE 'import .*(pi-coding-agent|typebox)' src/config.ts   # expect 0
@@ -920,7 +963,7 @@ npx tsc --noEmit -p tsconfig.json && echo "TSC OK (exit 0)" || echo "TSC FAILED"
 ```bash
 # The config test file (S1's 3 + S2's new suites). This IS the runtime validation for this pure module.
 npx vitest run test/config.test.ts
-# Expected: ALL green. S1's describe('DEFAULT_CONFIG') (3) + describe('validateConfig') (~11) +
+# Expected: ALL green. S1's describe('DEFAULT_CONFIG') (3) + describe('validateConfig') (~12) +
 #           describe('getConfig / setConfig cache') (~6) + describe('getConfig lazy init') (~1).
 
 # Full suite (catches accidental regressions if other test files exist later):
@@ -1009,7 +1052,10 @@ npx vitest run test/config.test.ts -t "validates log.file"
 
 ## Anti-Patterns to Avoid
 
-- ❌ Don't modify the S1 exports or the S1 test block — append/extend only (GOTCHA #10).
+- ❌ Don't modify the S1 exports (Granularity/EstimateConfidence/MulliganConfig/DEFAULT_CONFIG) or the S1
+      test block — the S2 section lives BELOW DEFAULT_CONFIG. If a prior S2 attempt is already present,
+      REPLACE it wholesale (GOTCHA #11): never keep the buggy `UNSET` version, and never append a second copy
+      (that would redeclare exports and fail `tsc`).
 - ❌ Don't read `raw` properties with `.x`, `in`, destructuring, or `{...raw}` — a throwing Proxy trap escapes
   (use `safeGet`; the top-level `catch` is the backstop) (GOTCHA #1).
 - ❌ Don't `structuredClone(raw)` — `raw` may contain a function/symbol → `DataCloneError`. Only clone
@@ -1032,23 +1078,31 @@ npx vitest run test/config.test.ts -t "validates log.file"
 
 ---
 
-## Confidence Score: 9/10
+## Confidence Score: 10/10
 
 The exact code to append (Task 1) and the exact tests (Task 2) are given verbatim; the authoritative rules
-(`spec/09 §1` + `§4`) are reproduced and encoded one-to-one in the coercion helpers; and every technical
-risk was resolved first-hand:
+(`spec/09 §1` + `§4`) are reproduced and encoded one-to-one in the coercion helpers; and the verbatim Task 1
+code was EXECUTED end-to-end in a scratch harness (repo's `tsc 5.9.3` under the exact tsconfig → exit 0; then
+transpiled with the repo's `esbuild` and run under Node 26 → 30/30 behavioral assertions pass, including
+never-throw on circular refs + throwing Proxy, DEFAULT_CONFIG immutability, and cache-copy independence):
 - `structuredClone` is verified typed as a global under `types:["node"]` (declared in
   `@types/node/worker_threads.d.ts` `global{}`) and `tsc` accepts it with no import (GOTCHA #2).
 - The S1 baseline is verified live-green (`tsc` exit 0; `vitest` 3/3) before S2 starts (Task 0).
-- The never-throw requirement is handled at TWO layers (per-read `safeGet` try/catch + whole-body
-  try/catch), and pinned by adversarial tests (circular refs, throwing Proxy) (GOTCHA #1).
+- The never-throw requirement is handled at TWO layers (per-read `safeGet` returning `undefined` on a
+  throwing trap + whole-body try/catch), and pinned by adversarial tests (circular refs, throwing Proxy)
+  (GOTCHA #1). Verified: a throwing-Proxy input yields all defaults with NO warn and NO throw.
 - Singleton + cache immutability is enforced by `structuredClone` on both the merge base and every
   `getConfig()` return, and pinned by mutation tests (GOTCHA #2).
+- Absent-vs-invalid warn discipline is correct: a PARTIAL valid override (e.g. `{nudges:{bloatThresholdBytes:100}}`)
+  emits ZERO warns — absent sibling fields keep their default silently; warns fire ONLY for present-but-invalid
+  values (verified). This required dropping an earlier `UNSET`-symbol sentinel (which read absent props as the
+  symbol and over-warned) in favor of `undefined`-as-absence.
 - The Pi-free, log.ts-free constraints are explicit, with a `console.warn` stand-in isolated behind one
   helper for easy T3 re-pointing (GOTCHA #8).
 
-The 1-point residual risk is the `vi.resetModules()` + dynamic-import lazy test (GOTCHA #9): across some
-vitest configurations module-reset can interact subtly with sibling suites. The PRP explicitly marks that
-one `describe` block as a nice-to-have (the lazy branch is otherwise trivially evident and covered by the
+The only residual risk is the `vi.resetModules()` + dynamic-import lazy test (GOTCHA #9): across some vitest
+configurations module-reset can interact subtly with sibling suites. The PRP explicitly marks that one
+`describe` block as a nice-to-have (the lazy branch is otherwise trivially evident and covered by the
 "defaults after reset" test), so even if it is dropped the subtask still fully meets its contract. Every
-other gate is deterministic (`tsc`) or behaviorally pinned (`vitest`).
+other gate is deterministic (`tsc`) or behaviorally pinned (`vitest`), and the verbatim code has already
+been observed passing them.
