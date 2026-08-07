@@ -1,0 +1,20 @@
+{
+  "name": "pi-mulligan",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "pi": { "extensions": ["./src/index.ts"] },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^1",
+    "@types/node": "^22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "smoke": "pi -e ./src/index.ts -p \"$(cat test/integration/scenarios.md)\""
+  }
+}

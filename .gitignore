@@ -1,0 +1,13 @@
+# Build artifacts
+dist/
+build/
+
+# Dependency directories
+node_modules/
+venv/
+
+# Environment files
+.env
+
+# OS-specific files
+.DS_Store
