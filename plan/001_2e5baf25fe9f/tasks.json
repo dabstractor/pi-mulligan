@@ -118,14 +118,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Per-Session Runtime State Map (runtime.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the per-session in-memory state map that holds the monotonic marker counter (seq), token baseline for drift measurement, last filtered message list for audit, and pending bloat hits.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Implement SessionRuntime map with session_start initialization",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
