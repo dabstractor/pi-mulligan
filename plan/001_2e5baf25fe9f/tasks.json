@@ -56,14 +56,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Configuration System (config.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the configuration loader that reads 'mulligan' from Pi settings.json, validates and coerces all fields with safe defaults, and never throws. Works with zero configuration.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Define MulliganConfig interface and DEFAULT_CONFIG constant",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -78,7 +78,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Implement getConfig() with validation, coercion, and fail-safe defaults",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"
