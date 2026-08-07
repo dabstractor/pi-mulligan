@@ -111,3 +111,212 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     file: null,
   },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 (P1.M1.T2.S2) — lazy cache + fail-safe validation (spec/09-configuration.md §1, §4)
+// APPENDED below the S1 exports (Granularity, EstimateConfidence, MulliganConfig, DEFAULT_CONFIG),
+// which are UNCHANGED. This module still imports NOTHING from Pi — settings are handed in via setConfig().
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Known protectedRoles selector strings (spec/09 §4). v1 supports exactly these two. */
+const KNOWN_PROTECTED_ROLES = new Set<string>(["first:user", "latest:user"]);
+
+/**
+ * Session cache of the validated config. `null` until the first getConfig()/setConfig().
+ * Re-validated and replaced on every setConfig() (the re-read-on-/reload seam is index.ts, P1.M7.T1).
+ */
+let cachedConfig: MulliganConfig | null = null;
+
+/** Sentinel distinguishing "property absent" from "present-but-undefined". */
+const UNSET = Symbol("mulligan:config:unset");
+
+/**
+ * getConfig() — the public read API (spec/09 §1: "loaded lazily on first use and cached for the session").
+ *
+ * LAZY: on the first call (cache empty) it validates DEFAULT_CONFIG and caches the result.
+ * DEFENSIVE COPY: a fresh structuredClone is returned on EVERY call, so a caller can never mutate the
+ * shared session cache (or DEFAULT_CONFIG). The clone is cheap (~10 fields, microseconds) relative to an
+ * LLM inference. Callers MUST still treat the result as read-only.
+ */
+export function getConfig(): MulliganConfig {
+  let cfg = cachedConfig;
+  if (cfg === null) {
+    cfg = validateConfig(undefined);
+    cachedConfig = cfg;
+  }
+  return structuredClone(cfg);
+}
+
+/**
+ * setConfig() — initialize / replace the session cache from a raw settings object (spec/09 §1).
+ * Called from the index.ts factory / session_start handler (and again on /reload). Accepts the merged Pi
+ * settings object (or settings.mulligan); the caller is responsible for extraction (config.ts is Pi-free).
+ * NEVER throws: any error resets the cache to validated defaults.
+ */
+export function setConfig(raw: unknown): void {
+  try {
+    cachedConfig = validateConfig(raw);
+  } catch {
+    cachedConfig = validateConfig(undefined);
+  }
+}
+
+/**
+ * validateConfig() — the pure, fail-safe validation engine (spec/09 §4).
+ *
+ * Deep-merges `raw` over a clone of DEFAULT_CONFIG, validates + coerces each known field per the §4 rules,
+ * ignores unknown keys (forward-compat), and returns a fully-valid MulliganConfig. NEVER throws: the entire
+ * body is wrapped in try/catch; on ANY error (e.g. a Proxy with a throwing trap) it returns a fresh clone
+ * of DEFAULT_CONFIG. Exported so unit tests can exercise it directly.
+ */
+export function validateConfig(raw: unknown): MulliganConfig {
+  try {
+    // Start from a deep clone so the shared DEFAULT_CONFIG singleton is NEVER mutated (GOTCHA #2a).
+    const cfg: MulliganConfig = structuredClone(DEFAULT_CONFIG);
+    if (!isRecord(raw)) {
+      // null / primitive / array / non-record → all defaults.
+      return cfg;
+    }
+
+    let v: unknown;
+
+    // Top-level master switch.
+    v = safeGet(raw, "enabled");
+    if (v !== UNSET) cfg.enabled = coerceBoolean(v, cfg.enabled);
+
+    // rewind.*
+    const rewindRaw = safeGet(raw, "rewind");
+    if (isRecord(rewindRaw)) {
+      v = safeGet(rewindRaw, "enabled");
+      if (v !== UNSET) cfg.rewind.enabled = coerceBoolean(v, cfg.rewind.enabled);
+      v = safeGet(rewindRaw, "protectedRoles");
+      if (v !== UNSET) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
+      v = safeGet(rewindRaw, "maxDepth");
+      if (v !== UNSET) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
+      v = safeGet(rewindRaw, "requireMutationWarning");
+      if (v !== UNSET) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
+    }
+
+    // shrink.*  (autoOnBloat intentionally NOT honored — reserved, not v1; S1 GOTCHA #1)
+    const shrinkRaw = safeGet(raw, "shrink");
+    if (isRecord(shrinkRaw)) {
+      v = safeGet(shrinkRaw, "enabled");
+      if (v !== UNSET) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
+    }
+
+    // nudges.*
+    const nudgesRaw = safeGet(raw, "nudges");
+    if (isRecord(nudgesRaw)) {
+      v = safeGet(nudgesRaw, "bloatReminder");
+      if (v !== UNSET) cfg.nudges.bloatReminder = coerceBoolean(v, cfg.nudges.bloatReminder);
+      v = safeGet(nudgesRaw, "perTurnDrift");
+      if (v !== UNSET) cfg.nudges.perTurnDrift = coerceBoolean(v, cfg.nudges.perTurnDrift);
+      v = safeGet(nudgesRaw, "bloatThresholdBytes");
+      if (v !== UNSET) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
+      v = safeGet(nudgesRaw, "driftThresholdTokens");
+      if (v !== UNSET) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
+    }
+
+    // audit.*
+    const auditRaw = safeGet(raw, "audit");
+    if (isRecord(auditRaw)) {
+      v = safeGet(auditRaw, "estimateConfidence");
+      if (v !== UNSET) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
+    }
+
+    // log.*  (opening/writing the file is log.ts / P1.M1.T3 — NOT this module)
+    const logRaw = safeGet(raw, "log");
+    if (isRecord(logRaw)) {
+      v = safeGet(logRaw, "file");
+      if (v !== UNSET) cfg.log.file = coerceLogFile(v, cfg.log.file);
+    }
+
+    return cfg;
+  } catch {
+    // NEVER throw (spec/09 §4). Adversarial input (e.g. a throwing Proxy trap) → all defaults.
+    return structuredClone(DEFAULT_CONFIG);
+  }
+}
+
+// ── private helpers (module-local; not exported) ─────────────────────────────
+
+/** True for plain records and Object.create(null); false for null, primitives, and arrays. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Read a property without throwing (a Proxy `get` trap may throw). Returns UNSET if absent/unreadable. */
+function safeGet(obj: object, key: string): unknown {
+  try {
+    return (obj as Record<string, unknown>)[key];
+  } catch {
+    return UNSET;
+  }
+}
+
+/** Boolean: coerce with `!!` (spec/09 §4). Absent (undefined) → fallback. Present (incl. null) → `!!value`. */
+function coerceBoolean(value: unknown, fallback: boolean): boolean {
+  return value === undefined ? fallback : !!value;
+}
+
+/** Number: must be a finite number; `mustBePositive` enforces `> 0` (else `>= 0`). Invalid-present → fallback + warn. */
+function coerceNumber(field: string, value: unknown, fallback: number, mustBePositive: boolean): number {
+  if (typeof value === "number" && Number.isFinite(value) && (mustBePositive ? value > 0 : value >= 0)) {
+    return value;
+  }
+  warnConfig(field, value);
+  return fallback;
+}
+
+/** protectedRoles: array of known selectors; unknown entries dropped (per-entry warn). Non-array → fallback + warn. */
+function coerceProtectedRoles(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) {
+    warnConfig("rewind.protectedRoles", value);
+    return fallback;
+  }
+  const known: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string" && KNOWN_PROTECTED_ROLES.has(entry)) {
+      known.push(entry);
+    } else {
+      warnConfig("rewind.protectedRoles entry", entry);
+    }
+  }
+  return known;
+}
+
+/** estimateConfidence: must be one of low|medium|high; else fallback + warn. */
+function coerceEstimateConfidence(value: unknown, fallback: EstimateConfidence): EstimateConfidence {
+  if (value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  warnConfig("audit.estimateConfidence", value);
+  return fallback;
+}
+
+/** log.file: null (off — no warn) or any string (opening deferred); non-string → fallback + warn. */
+function coerceLogFile(value: unknown, fallback: string | null): string | null {
+  if (value === null) return fallback; // explicit "off" — valid
+  if (typeof value === "string") return value;
+  warnConfig("log.file", value);
+  return fallback;
+}
+
+/** Fail-safe warn (spec/09 §4: "log a warn naming the field and the value"). Uses console.warn until the
+ *  structured JSONL logger (log.ts, P1.M1.T3) ships; that task should re-point this single helper. */
+function warnConfig(field: string, value: unknown): void {
+  try {
+    console.warn(`[mulligan] config: invalid "${field}"=${safeStringify(value)}, using default`);
+  } catch {
+    /* never throw — logging must not crash the extension */
+  }
+}
+
+/** JSON.stringify that never throws (circular refs / BigInt → String()). */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
