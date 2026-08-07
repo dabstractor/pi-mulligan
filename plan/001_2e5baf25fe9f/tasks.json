@@ -151,14 +151,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Token Estimation Helpers (tokens.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement pure token estimation functions: estimateTokens for message arrays (character/structure-based heuristic with confidence flag), resultBytes for content blocks (UTF-8 byte length), and approxTokens for byte-to-token conversion.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Implement estimateTokens(messages, model?) with confidence flag",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -173,7 +173,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Implement resultBytes(content) and approxTokens(bytes) helpers",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T1.S1"
