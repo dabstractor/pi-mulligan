@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Project Scaffold & Type Infrastructure",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create the project skeleton: package.json, tsconfig.json, directory layout (src/, src/tools/, test/, test/integration/), and a minimal index.ts stub that loads via jiti without error.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Create minimal index.ts stub that loads without error",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -63,7 +63,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Define MulliganConfig interface and DEFAULT_CONFIG constant",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
