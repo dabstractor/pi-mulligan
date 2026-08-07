@@ -1,0 +1,265 @@
+# 04 — Data model
+
+> Authoritative schemas for every shape Mulligan persists or passes internally. Implement these **exactly** (field names, casing, optionality) — the filter, the tools, and the tests all depend on them. All persisted shapes are JSON-serializable (they live in JSONL).
+
+---
+
+## 1. Versioning
+
+Every persisted `CustomEntry` written by Mulligan includes a `v` (schema version, integer) and a `schema: "pi-mulligan"` tag inside its `data`. This lets future versions migrate or ignore unknown entries. **v1** is the version specified here.
+
+```ts
+interface MulliganEnvelope {
+  schema: "pi-mulligan";
+  v: 1;
+  kind: "rewind" | "shrink" | "turn-metric";
+  // ...kind-specific fields...
+}
+```
+
+All `customType` strings are namespaced under `mulligan:`. The `customType` is the entry's *Pi-level* discriminator (what `getEntries()` filters on); `kind` is the *Mulligan-level* discriminator inside `data`.
+
+| Pi `customType` | Pi entry type | `data.kind` | In LLM context? |
+|---|---|---|---|
+| `mulligan:rewind` | `custom` | `"rewind"` | no |
+| `mulligan:shrink` | `custom` | `"shrink"` | no |
+| `mulligan:turn-metric` | `custom` | `"turn-metric"` | no |
+| `mulligan:note` | `custom_message` | (n/a — it's a message) | **yes** |
+| (checkpoint) | `label` | (n/a) | no |
+
+## 2. The note (input + rendered)
+
+### 2.1 `NoteInput` — what the agent passes to `mulligan_rewind`
+
+All four fields are **required and non-empty** (enforced by the tool; see `@05-tools.md`). Free text, but each field has a mandated purpose. This structure is the primary defense against confabulation (D/D17): the resumed model is told explicitly what happened, what to avoid, what the true state is, and what to do next.
+
+```ts
+interface NoteInput {
+  /** What went wrong, concretely. Past tense. e.g. "Ran `grep -r auth .` and
+   *  dumped ~40k tokens of output I didn't need." */
+  what_happened: string;
+
+  /** What NOT to do again. Imperative. e.g. "Do not run grep without --quiet,
+   *  -c, or piping to head; prefer the built-in grep tool which truncates." */
+  avoid: string;
+
+  /** The current TRUE world state as of the rewind — files changed, commands
+   *  run, decisions made on the abandoned span. This is the state-ledger that
+   *  prevents redoing side-effectful work. The tool AUGMENTS this with a
+   *  deterministic file ledger (see §3) before rendering. */
+  true_current_state: string;
+
+  /** The immediate next action to take on resume. Imperative. e.g. "Re-run the
+   *  search as `grep -rl auth src/` and read only the 3 relevant files." */
+  next: string;
+}
+```
+
+### 2.2 `FileLedger` — deterministically extracted, appended to the note
+
+Extracted from the tool calls in the rewound span (NOT a model call). Feeds `true_current_state`. Mirrors the shape Pi's own compaction uses for cumulative file tracking, so it is familiar.
+
+```ts
+interface FileLedger {
+  readFiles: string[];      // paths appearing in read/grep tool calls in the span
+  modifiedFiles: string[];  // paths appearing in write/edit tool calls in the span
+  bashSideEffects: string[];// non-read bash commands (heuristic: commands with >, rm, mv, mkdir, git, curl, etc.)
+}
+```
+
+Extraction rules (`extractFileLedger` in `ledger.ts`, pure):
+- `readFiles`: union of `path`/`file_path` args from tool calls whose `name` ∈ {`read`, `grep`, `rg`, `glob`}.
+- `modifiedFiles`: union of `path`/`file_path` args from tool calls whose `name` ∈ {`write`, `edit`, `bash`} (for bash, only when the command matches a write heuristic AND a path can be parsed — best-effort; uncertain entries go to `bashSideEffects`).
+- `bashSideEffects`: bash commands in the span that are not provably read-only (regex heuristic; when in doubt, include).
+- De-duplicated, sorted. Relative to `cwd`.
+
+### 2.3 Rendered note (the `CustomMessage` content)
+
+The tool composes the note the model sees from `NoteInput` + `FileLedger`:
+
+```md
+## 🔄 Mulligan rewind (<granularity>)
+
+**What happened:** <what_happened>
+
+**Avoid:** <avoid>
+
+**Current true state:** <true_current_state>
+
+<files-read>
+path/a.ts
+path/b.ts
+</files-read>
+
+<files-modified>
+path/c.ts
+</files-modified>
+
+<bash-side-effects>
+git commit -m "wip"
+</bash-side-effects>
+
+**Next:** <next>
+```
+
+The `<files-read>` / `<files-modified>` / `<bash-side-effects>` block tags mirror Pi's compaction summary convention, so a model accustomed to compaction summaries parses them naturally. If a ledger list is empty, omit its block. The agent-supplied `true_current_state` text is rendered as-is (the agent may already mention files; the ledger is the authoritative extracted set, presented separately for machine-readability).
+
+`renderNote(note: NoteInput, ledger: FileLedger, granularity: Granularity): string` is pure and unit-tested with snapshot-style cases.
+
+## 3. Marker: rewind
+
+Stored via `pi.appendEntry("mulligan:rewind", data)`. The `data`:
+
+```ts
+interface RewindMarker extends MulliganEnvelope {
+  kind: "rewind";
+  id: string;                 // mulligan-internal uuid; also used to correlate with the note
+  granularity: "last_tool_call_group" | "last_turn";
+  options: {
+    to_previous_prompt?: boolean;   // only meaningful for "last_turn"; default false
+    protect?: string[];             // role list that must not be crossed (default from config)
+  };
+  /** toolCallId of THIS rewind's own tool call, so the filter can exclude the
+   *  rewind's own group when resolving "last tool-call group". Captured from the
+   *  tool execute()'s toolCallId argument. */
+  excludeToolCallId?: string;
+  /** Monotonic per-session counter, so the filter can order markers reliably
+   *  even if timestamps tie. Maintained in memory + snapshotted in the marker. */
+  seq: number;
+  /** The note payload, duplicated here for self-containment (the rendered note
+   *  also lives in the mulligan:note CustomMessage; this is the structured form
+   *  for audit/debugging and potential future tooling). */
+  note: NoteInput;
+  ledger: FileLedger;
+  ts: number;                 // Date.now() at append
+}
+```
+
+**Why store the note in the marker too?** The marker is control state (not in context); the note is a context message. Storing the structured note in the marker makes the marker self-describing for `/tree` inspection and future tooling, at no context cost. It is a duplicate-by-design.
+
+The `mulligan:note` `CustomMessage` is appended **immediately after** the marker, via `pi.sendMessage`, with `display: true`. Its `details` (the `CustomMessage` details field) carries `{ schema:"pi-mulligan", v:1, kind:"note", rewindId: <marker.id> }` for correlation.
+
+## 4. Marker: shrink
+
+Stored via `pi.appendEntry("mulligan:shrink", data)`:
+
+```ts
+type ShrinkTarget =
+  | { by_tool_call_id: string }
+  | { by_tool_name: string; occurrence: "last" | "first" }
+  | { by_content_includes: string };
+
+interface ShrinkMarker extends MulliganEnvelope {
+  kind: "shrink";
+  id: string;
+  target: ShrinkTarget;
+  /** The replacement content (text). The filter substitutes the matched
+   *  ToolResultMessage's content with [{type:"text", text: replacement}] and
+   *  preserves isError/toolName/toolCallId so the API stays valid. */
+  replacement: string;
+  /** Optional reason, surfaced in audit. */
+  reason?: string;
+  seq: number;
+  ts: number;
+}
+```
+
+**Matching semantics** (`@06-context-filter.md` §5): targets resolve against the *current* `event.messages` each inference (compaction-robust). If multiple markers match the same target, the **last** one wins (applied last in order). If a target matches nothing (already removed/compacted), the marker is a no-op for that inference (and silently retried next inference, in case the content reappears — e.g. before a compaction settles).
+
+## 5. Turn metric (for the nudge)
+
+Appended at `turn_end` via `pi.appendEntry("mulligan:turn-metric", data)`. Only the **latest** one on the branch is consulted by the filter (older ones are ignored but persist).
+
+```ts
+interface TurnMetric extends MulliganEnvelope {
+  kind: "turn-metric";
+  seq: number;
+  ts: number;
+  deltaTokens: number;        // signed estimate of how much context grew this turn
+  bloatHit: boolean;          // any tool_result this turn exceeded bloatThreshold
+  bloatHits: { toolName: string; approxTokens: number }[];
+  grewOverThreshold: boolean; // deltaTokens > driftThresholdTokens
+  /** The turn index this metric describes (from turn_end event.turnIndex). */
+  turnIndex: number;
+}
+```
+
+Because `turn_end` does not receive the message list, `deltaTokens` is computed from the **in-memory token baseline** (captured at `turn_start`/previous `turn_end`) compared to an estimate at `turn_end`. This is inherently approximate; the nudge is advisory, so approximation is acceptable. The baseline is keyed per-session in a module-scoped map, reset on `session_start`. If the baseline is missing (e.g. first turn, or post-reload), `deltaTokens` is `null` and the nudge falls back to `bloatHit`-only signaling.
+
+## 6. Checkpoint
+
+A checkpoint is **not** a `CustomEntry`; it is a Pi `LabelEntry` created by `pi.setLabel(leafId, "mulligan:checkpoint:<name>")`. Names MUST match `/^[a-z0-9_-]{1,40}$/`. The `mulligan:checkpoint:` prefix distinguishes Mulligan checkpoints from user/bookmark labels.
+
+```ts
+// To set:    pi.setLabel(currentLeafId, `mulligan:checkpoint:${name}`);
+// To read:   ctx.sessionManager.getLabel(id)  → string | undefined
+// To list:   scan getEntries() for label entries whose label starts with the prefix
+```
+
+Checkpoints are **referenced by `mulligan_rewind`** as an alternative targeting mode (see `@05-tools.md`): `granularity: "checkpoint", checkpoint: "<name>"`. The filter resolves a checkpoint target by finding the labeled entry, then mapping it to a position in `event.messages` (see `@06-context-filter.md` §6 for the entry→message mapping algorithm). This is the one place Mulligan must do entry↔message mapping; the relative granularities avoid it.
+
+## 7. Configuration (`mulligan` in settings.json)
+
+Full defaults + rationale in `@09-configuration.md`. Schema summary here so data shapes are co-located:
+
+```ts
+interface MulliganConfig {
+  enabled: boolean;                  // master switch; default true
+  rewind: {
+    enabled: boolean;                // default true
+    protectedRoles: string[];        // never rewind past; default ["user" (first), "user" (latest)]
+    maxDepth: number;                // max simultaneous active rewind markers; default 5
+    requireMutationWarning: boolean; // warn (in tool result) if rewinding a span with write tools; default true
+  };
+  shrink: {
+    enabled: boolean;                // default true
+  };
+  nudges: {
+    bloatReminder: boolean;          // tool_result annotation; default true
+    perTurnDrift: boolean;           // context nudge; default true
+    bloatThresholdBytes: number;     // default 8192 (in-context bytes of a single result)
+    driftThresholdTokens: number;    // default 3000 (turn delta that triggers the nudge)
+  };
+  audit: {
+    estimateConfidence: "low" | "medium" | "high"; // reported with estimates; default "medium"
+  };
+  log: {
+    file: string | null;             // structured log path; default null (off). Set for debugging.
+  };
+}
+```
+
+## 8. In-memory (non-persisted) state
+
+```ts
+interface SessionRuntime {
+  sessionId: string;
+  seq: number;                       // monotonic marker counter; persisted INTO each marker
+  tokenBaseline: number | null;      // for turn metric delta
+  lastTurnIndex: number | null;
+}
+```
+
+Held in a `Map<string, SessionRuntime>` keyed by `ctx.sessionManager.getSessionId()`. Reset/created on `session_start`. **Never** cache a `sessionManager` handle (C12) — only primitive values.
+
+## 9. Logging shape (for `log.file`)
+
+One JSON line per event, append-only:
+
+```ts
+interface LogLine {
+  ts: string;                        // ISO
+  level: "debug" | "info" | "warn" | "error";
+  event: string;                     // e.g. "rewind.applied", "filter.fire", "nudge.inject"
+  sessionId: string;
+  data?: unknown;
+}
+```
+
+The logger is the primary observability surface in non-TUI modes and is what the test suite asserts against (`@10-testing.md`).
+
+## 10. Cross-references
+
+- Tools that produce these shapes → `@05-tools.md`
+- How the filter consumes them → `@06-context-filter.md`
+- Defaults & where config is read from → `@09-configuration.md`
