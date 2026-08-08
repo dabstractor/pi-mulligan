@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "pi-mulligan v1.0 — Agent Context Self-Rewind Extension",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Build pi-mulligan, a Pi extension that gives an LLM agent autonomous, token-cheap control over its own context window. The agent can shed context it produced by mistake (bloated tool output, wrong-direction work) and redo a turn with a self-authored note — without a human in the loop and without extra model requests. Core mechanism: persist markers as Pi CustomEntries that a context-event handler reads on every inference to rewrite the message copy sent to the model (permanent soft-delete: hidden from model view, retained on disk, visible in /tree).",
       "milestones": [
         {
@@ -695,7 +695,7 @@
           "type": "Milestone",
           "id": "P1.M7",
           "title": "Integration, Hardening & Documentation",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Wire all components together in the factory (index.ts), build the integration smoke harness adapted from the proven looper-smoke prototype, harden against all 20 edge cases from spec/08, and sync changeset-level documentation (README.md). This milestone delivers the complete, tested, documented v1.0.",
           "tasks": [
             {
@@ -781,7 +781,7 @@
               "type": "Task",
               "id": "P1.M7.T4",
               "title": "Sync Changeset-Level Documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Create the README.md documenting installation, configuration, the four tools, the soft-delete/visible-in-tree guarantee, and known limitations. This is the Mode B final documentation task that sweeps all changeset-level docs.",
               "subtasks": [
                 {
@@ -809,7 +809,7 @@
                   "type": "Subtask",
                   "id": "P1.M7.T4.S2",
                   "title": "Verify zero-config default behavior and finalize",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M7.T4.S1"
