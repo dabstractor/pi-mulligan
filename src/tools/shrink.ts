@@ -228,8 +228,11 @@ async function shrinkExecute(
   ctx: ExtensionContext,
 ): Promise<AgentToolResult<ShrinkDetails>> {
   try {
-    // (1) config (spec/05 §2 step 1; E14). GOTCHA #10: read getConfig() ONCE.
+    // (1) config (spec/05 §2 step 1; E14). GOTCHA #10: read getConfig() ONCE. Master switch FIRST
+    //     (E14 master-disable), then the sub-feature gate. The master `enabled:false` makes the WHOLE
+    //     extension a no-op (context pass-through + nudges no-op + tools refuse "Mulligan is disabled").
     const config = getConfig();
+    if (!config.enabled) return refusal("Mulligan is disabled"); // E14 master switch
     if (!config.shrink.enabled) return refusal("shrink is disabled");
 
     // (2) replacement non-empty (spec/05 §2 step 2).

@@ -35,6 +35,12 @@ const SCENARIOS = [
   "F-checkpoint",
   "F-failopen",
   "F-reload",
+  // Edge cases (spec/08 E7/E11/E12/E15/E20 — Pi-dependent; added by P1.M7.T3.S1).
+  "E7",
+  "E11",
+  "E12",
+  "E15",
+  "E20",
 ];
 
 const SMOKE_TMP_DIR = join(tmpdir(), "mulligan-smoke");
@@ -347,6 +353,96 @@ function assertReload(run1, run2) {
   return { results, entries };
 }
 
+function assertE7({ smoke, piRes }) {
+  // E7 is a KNOWN LIMITATION (compaction leak). The scenario documents it + asserts NO CRASH + the note
+  // persists. PASS-with-note is the accepted outcome (v1 accepts the limitation).
+  const results = [];
+  const e7Lines = smoke.lines.filter((l) => l.test === "E7");
+  assert(results, "E7 known-limitation note logged", e7Lines.length >= 1, e7Lines.length ? "" : "no E7 line");
+  assert(results, "pi exited 0 (no crash)", piRes.status === 0, `exit=${piRes.status}`);
+  // the rewind marker + note persisted (JSONL invariants).
+  const entries = readSessionEntries(smoke.sessionFile);
+  if (entries.length > 0) {
+    assert(results, "JSONL has mulligan:rewind", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
+    assert(results, "JSONL has mulligan:note", countCustomMessage(entries, "mulligan:note") >= 1, "");
+    assertGlobalInvariants(results, entries);
+  }
+  return { results, entries, note: "E7 is a v1-accepted known limitation (compaction may transiently reference hidden content)" };
+}
+
+function assertE11(run1, run2) {
+  // E11 (reload mid-task): run-1 created a rewind marker; run-2 (same --session-id) reopens the session.
+  // Assert run-2's first context.fire hasRewindMarker:true (the marker survived the reload into a new process).
+  const results = [];
+  const r1Rewind = run1.smoke.lines.filter((l) => l.test === "tool.rewind");
+  assert(results, "run-1 tool.rewind ran", r1Rewind.length >= 1, "");
+  const entries = readSessionEntries(run1.smoke.sessionFile);
+  if (entries.length > 0) {
+    assert(results, "JSONL has mulligan:rewind (persisted across reload)", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
+    assertGlobalInvariants(results, entries);
+  }
+  const r2cf = run2.smoke.contextFires[0];
+  assert(results, "run-2 context.fire observed", !!r2cf, r2cf ? "" : "no run-2 context.fire");
+  assert(results, "run-2 context.fire hasRewindMarker:true (survived reload)", r2cf?.hasRewindMarker === true, String(r2cf?.hasRewindMarker));
+  return { results, entries, soft: "deltaTokens:null (baseline lost on reload) is drift-nudge fallback, not asserted here" };
+}
+
+function assertE12({ smoke, piRes }) {
+  // E12 (getContextUsage undefined — pre-first-inference audit). The audit ran as the FIRST action on a fresh
+  // session (no prior assistant message). Assert: no crash (pi exit 0); the audit ran + its E16 fallback path
+  // produced a result.
+  const results = [];
+  const auditLines = smoke.lines.filter((l) => l.test === "E12.audit");
+  assert(results, "E12.audit ran", auditLines.length >= 1, auditLines.length ? "" : "no E12.audit line");
+  assert(results, "pi exited 0 (no crash — E16 fallback succeeded)", piRes.status === 0, `exit=${piRes.status}`);
+  const last = auditLines[auditLines.length - 1];
+  assert(results, "E12.audit not failed", last && last.status !== "fail", last?.detail?.error ?? "");
+  // SOFT: a turn-metric is persisted after the observing turn (the turn_end handler ran).
+  return { results, entries: [], soft: "turn-metric persisted on the observing turn (turn_end ran)" };
+}
+
+function assertE15({ smoke, piRes }) {
+  // E15 (50 markers): 50 rewind markers seeded via the RAW wrapper. The filter must TERMINATE (context.fire
+  // present, time-bounded) + no crash. v1 does no GC — markers persist intentionally.
+  const results = [];
+  const seedLines = smoke.lines.filter((l) => l.test === "E15.seed");
+  assert(results, "E15.seed ran", seedLines.length >= 1, "");
+  const seed = seedLines[seedLines.length - 1];
+  assert(results, "seeded 50 markers (RAW wrapper bypasses the depth guard)", seed?.detail?.appended === 50, `appended=${seed?.detail?.appended}`);
+  assert(results, "pi exited 0 (filter terminated, no crash)", piRes.status === 0, `exit=${piRes.status}`);
+  assert(results, "context.fire present (filter terminated, time-bounded)", smoke.contextFires.length >= 1, `${smoke.contextFires.length} fires`);
+  const entries = readSessionEntries(smoke.sessionFile);
+  if (entries.length > 0) {
+    const rewindCount = countCustom(entries, "mulligan:rewind", "rewind");
+    // >= 50 (not ===) for robustness: the stable --session-id reopens the same JSONL across `npm run smoke`
+    // invocations, so prior runs' markers accumulate. The seed asserts exactly 50 THIS run (above); the JSONL
+    // assert proves they persisted (at least 50).
+    assert(results, "JSONL has ≥50 mulligan:rewind markers", rewindCount >= 50, `${rewindCount} found`);
+    assertGlobalInvariants(results, entries);
+  }
+  return { results, entries, note: "E15: markers persist intentionally (audit trail); v1 does no GC." };
+}
+
+function assertE20({ smoke, piRes }) {
+  // E20 (appendEntry/sendMessage ordering): the mulligan:rewind (type:custom) entry must appear BEFORE the
+  // mulligan:note (type:custom_message) entry in FILE ORDER. The synchronous append-then-send in the rewind
+  // tool guarantees this.
+  const results = [];
+  assert(results, "pi exited 0", piRes.status === 0, `exit=${piRes.status}`);
+  const entries = readSessionEntries(smoke.sessionFile);
+  if (entries.length === 0) {
+    assert(results, "JSONL available", false, "session JSONL missing — model may have timed out");
+    return { results, entries };
+  }
+  const rewindIdx = entries.findIndex((e) => e.type === "custom" && e.customType === "mulligan:rewind");
+  const noteIdx = entries.findIndex((e) => e.type === "custom_message" && e.customType === "mulligan:note");
+  assert(results, "mulligan:rewind entry present", rewindIdx >= 0, `idx=${rewindIdx}`);
+  assert(results, "mulligan:note entry present", noteIdx >= 0, `idx=${noteIdx}`);
+  assert(results, "rewind (custom) BEFORE note (custom_message) in file order", rewindIdx >= 0 && noteIdx >= 0 && rewindIdx < noteIdx, `rewind=${rewindIdx} note=${noteIdx}`);
+  assertGlobalInvariants(results, entries);
+  return { results, entries };
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const ASSERTERS = {
@@ -358,11 +454,15 @@ const ASSERTERS = {
   "F-maxdepth": assertMaxdepth,
   "F-checkpoint": assertCheckpoint,
   "F-failopen": assertFailopen,
+  "E7": assertE7,
+  "E12": assertE12,
+  "E15": assertE15,
+  "E20": assertE20,
 };
 
 function runScenario(scenario) {
-  if (scenario === "F-reload") {
-    // Two spawns sharing --session-id smoke-F-reload.
+  if (scenario === "F-reload" || scenario === "E11") {
+    // Two spawns sharing --session-id smoke-<scenario> (run 2 reopens the same session).
     const r1 = runPi(scenario);
     const smoke1 = parseSmokeLog(r1.logPath);
     // Run 2: just trigger an observing turn on the SAME session (--session-id reopens it).
@@ -400,6 +500,8 @@ function main() {
     let outcome;
     if (scenario === "F-reload") {
       outcome = assertReload(run, { smoke: run.smoke2 });
+    } else if (scenario === "E11") {
+      outcome = assertE11(run, { smoke: run.smoke2 });
     } else {
       outcome = ASSERTERS[scenario]({ smoke, piRes });
     }

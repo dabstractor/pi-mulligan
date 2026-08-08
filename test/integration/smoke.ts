@@ -35,6 +35,8 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { makeRewindTool } from "../../src/tools/rewind.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js";
 import { makeCheckpointTool } from "../../src/tools/checkpoint.js";
+import { auditTool } from "../../src/tools/audit.js";
+import { appendRewindMarker, type RewindMarkerInput } from "../../src/markers.js";
 
 // ── Log destination (per-scenario isolation via env; orchestrator sets MULLIGAN_SMOKE_LOG) ───────────
 const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";
@@ -262,6 +264,75 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // orchestrator asserts the marker survived reload (hasRewindMarker:true + canary hidden). The
         // orchestrator runs both; this body only does run 1.
         await rewindNow(pi, ctx, "smoke-reload-1", "last_turn");
+        break;
+      }
+      // ── Edge cases (E7/E11/E12/E15/E20) — spec/08 Pi-dependent cases that cannot be unit-tested ──────
+      case "E7": {
+        // E7 (compaction leak — KNOWN LIMITATION): create a rewind, then log the known-limitation note.
+        // v1 accepts that compaction may transiently reference hidden content; no code mitigation exists.
+        // This scenario documents + smoke-tests the NO-CRASH property (the turn survives). PASS-with-note.
+        await rewindNow(pi, ctx, "smoke-e7-1", "last_turn");
+        smokeLog("E7", "info", {
+          note:
+            "known limitation — compaction may transiently reference hidden content (v1 accepted; mitigated by later compaction). Note survives.",
+        });
+        break;
+      }
+      case "E11": {
+        // E11 (reload mid-task): run 1 creates a rewind marker. Run 2 (same --session-id, spawned by the
+        // orchestrator) reopens the session → the orchestrator asserts run-2's first context.fire has
+        // hasRewindMarker:true (the marker survived the reload into a new process). This body does run 1.
+        await rewindNow(pi, ctx, "smoke-e11-1", "last_turn");
+        break;
+      }
+      case "E12": {
+        // E12 (getContextUsage undefined — pre-first-inference audit): call mulligan_audit as the FIRST action
+        // (before any assistant message) on a fresh session. The audit's E16 fallback path must succeed with
+        // NO crash. The orchestrator asserts pi exit 0 + the audit ran.
+        try {
+          const res = await auditTool.execute("smoke-e12-1", { top: 8 }, undefined, undefined, ctx);
+          const text = resultText(res.content as unknown as { type: string; text?: string }[]);
+          smokeLog("E12.audit", "info", { text: text.slice(0, 120), source: res.details.source });
+        } catch (e) {
+          smokeLog("E12.audit", "fail", { error: String(e) });
+        }
+        break;
+      }
+      case "E15": {
+        // E15 (50 markers): seed N=50 rewind markers via the RAW appendRewindMarker wrapper (NOT the tool —
+        // the tool's depth guard refuses the 6th; GOTCHA #9). Then the orchestrator's second `-p` triggers
+        // an observing inference; assert the filter TERMINATES (context.fire present) + no crash. v1 does no
+        // GC — markers persist intentionally (audit trail).
+        try {
+          let appended = 0;
+          for (let i = 0; i < 50; i++) {
+            // Build a widened payload (checkpoint is NOT in the frozen RewindMarkerInput TYPE, but the wrapper
+            // spread preserves it at runtime — mirrors src/tools/rewind.ts GOTCHA #1; cast at the call site).
+            const payload = {
+              granularity: "last_tool_call_group",
+              options: {},
+              excludeToolCallId: `smoke-e15-${i}`,
+              note: SMOKE_NOTE,
+              ledger: { readFiles: [], modifiedFiles: [], bashSideEffects: [] },
+            };
+            const id = appendRewindMarker(pi, ctx, payload as RewindMarkerInput);
+            if (id !== null) appended++;
+          }
+          smokeLog("E15.seed", "info", {
+            appended,
+            note: "markers persist intentionally (audit trail); v1 does no GC.",
+          });
+        } catch (e) {
+          smokeLog("E15.seed", "fail", { error: String(e) });
+        }
+        break;
+      }
+      case "E20": {
+        // E20 (appendEntry/sendMessage ordering): call mulligan_rewind (the REAL tool) then the orchestrator
+        // reads the session JSONL + asserts the mulligan:rewind (type:custom) entry appears BEFORE the
+        // mulligan:note (type:custom_message) entry in FILE ORDER. The synchronous append-then-send in the
+        // rewind tool guarantees marker-before-note.
+        await rewindNow(pi, ctx, "smoke-e20-1", "last_turn");
         break;
       }
       default: {

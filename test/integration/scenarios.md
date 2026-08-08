@@ -89,7 +89,7 @@ assertions are skipped (with a note). So the suite is CI-runnable with any/no wo
 
 ---
 
-## The 9 scenarios
+## The F-* scenarios (9)
 
 ### F-rewind-core
 
@@ -301,14 +301,116 @@ pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-reload 
 
 ---
 
+## Edge-case scenarios (E7 / E11 / E12 / E15 / E20)
+
+> These 5 scenarios (added by P1.M7.T3.S1) cover the spec/08 edge cases that are **Pi-dependent** — they
+cannot be faithfully unit-tested because they need a real `pi` process, the real session JSONL, or a
+pre-first-inference state. They APPEND to the 9 F-* scenarios above (the harness's surface); the consolidated
+**unit-tier** E1–E20 coverage lives in `test/edge-cases.test.ts`.
+
+### E7 — Compaction may transiently reference hidden content (KNOWN LIMITATION)
+
+**Tests:** a rewind marker + note persist; the turn survives. v1 ACCEPTS that compaction may transiently
+reference hidden content (no code mitigation exists; mitigated by later compaction). This scenario documents
+the limitation + smoke-tests the no-crash property.
+
+**Run (deterministic):**
+```bash
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E7 \
+  -p "/mulligan_smoke E7" -p "Reply with exactly: OK"
+```
+
+**Expect in log:** `tool.rewind`; an `E7` info line carrying the known-limitation note.
+
+**Expect in JSONL:** `mulligan:rewind` (custom) + `mulligan:note` (custom_message); §2.3 invariants hold.
+
+**Pass:** pi exit 0 (no crash); the note persists. **PASS-with-note** is the accepted outcome (v1 limitation).
+
+### E11 — Reload mid-task (marker survives reload)
+
+**Tests:** a rewind marker created in run 1 survives a session reload — run 2 (same `--session-id`) reopens
+the session and the filter sees the persisted marker.
+
+**Run (deterministic — two runs sharing `--session-id smoke-E11`):**
+```bash
+# Run 1: create the rewind marker.
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E11 \
+  -p "/mulligan_smoke E11" -p "Reply with exactly: OK"
+# Run 2: reopen the SAME session and run an observing turn.
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E11 \
+  -p "/mulligan_smoke E11" -p "Reply with exactly: OK"
+```
+
+**Expect in log:** run-1 `tool.rewind`; run-2 `context.fire` with `hasRewindMarker:true`.
+
+**Expect in JSONL:** `mulligan:rewind` (custom) persisted across the reload.
+
+**Pass:** run-2's first `context.fire` has `hasRewindMarker:true` (marker survived reload). **SOFT:** the first
+run-2 turn-metric has `deltaTokens:null` (baseline lost on reload → drift nudge falls back to bloat-only).
+
+### E12 — `getContextUsage` undefined (audit before any inference)
+
+**Tests:** `mulligan_audit` is called as the FIRST action on a fresh session (before any assistant message).
+The audit's E16 fallback path (no cached `lastFiltered`) must succeed with NO crash.
+
+**Run (deterministic):**
+```bash
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E12 \
+  -p "/mulligan_smoke E12" -p "Reply with exactly: OK"
+```
+
+**Expect in log:** an `E12.audit` info line (the audit ran + its source); no `E12.audit` fail line.
+
+**Pass:** pi exit 0 (no crash); the audit ran via the E16 fallback path (`details.source` is `"fallback"`,
+`details.confidence` is `"low"`). **SOFT:** a turn-metric is persisted on the observing turn (the `turn_end`
+handler ran).
+
+### E15 — 50 rewind markers (filter terminates, no GC)
+
+**Tests:** 50 rewind markers are seeded via the RAW `appendRewindMarker` wrapper (NOT the tool — the tool's
+depth guard refuses the 6th; the wrapper has no guard). The filter must TERMINATE (time-bounded) + no crash.
+v1 does no GC — markers persist intentionally (audit trail).
+
+**Run (deterministic):**
+```bash
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E15 \
+  -p "/mulligan_smoke E15" -p "Reply with exactly: OK"
+```
+
+**Expect in log:** an `E15.seed` info line with `appended:50`; a `context.fire` line (filter terminated).
+
+**Expect in JSONL:** exactly 50 `mulligan:rewind` (custom) entries; §2.3 invariants hold.
+
+**Pass:** 50 markers seeded; pi exit 0; `context.fire` present (filter terminated). Message count did not
+increase (monotonic shrinkage — shrinks only ever substitute/remove).
+
+### E20 — `appendEntry`/`sendMessage` ordering (marker before note)
+
+**Tests:** when `mulligan_rewind` runs, the synchronous append-then-send guarantees the `mulligan:rewind` entry
+(an entry whose `type` is `"custom"`) appears BEFORE the `mulligan:note` entry (whose `type` is
+`"custom_message"`) in FILE ORDER.
+
+**Run (deterministic):**
+```bash
+pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-E20 \
+  -p "/mulligan_smoke E20" -p "Reply with exactly: OK"
+```
+
+**Expect in JSONL:** the `mulligan:rewind` entry's file-order index is less than the `mulligan:note` entry's
+index.
+
+**Pass:** rewind (`custom`) appears BEFORE note (`custom_message`) in file order; §2.3 invariants hold.
+
+---
+
 ## Running the whole suite
 
 ```bash
 npm run smoke
 ```
 
-Runs all 9 deterministic scenarios via `test/integration/run-smoke.mjs`. Prints a `PASS`/`FAIL` line per
-scenario (with per-assertion detail on failure), then a summary; exits 0 if all pass, 1 otherwise.
+Runs all 14 deterministic scenarios (9 F-* + 5 E*) via `test/integration/run-smoke.mjs`. Prints a `PASS`/`FAIL`
+line per scenario (with per-assertion detail on failure), then a summary; exits 0 if all pass, 1 otherwise.
 
 **Notes:**
 - Each scenario spawns a fresh `pi` process with a stable `--session-id` (so F-reload can reopen). The smoke

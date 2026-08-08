@@ -315,8 +315,11 @@ async function rewindExecute(
       ? params.granularity
       : "last_tool_call_group";
   try {
-    // (1) config gate (step 1; E14). GOTCHA #14: read ONCE.
+    // (1) config gate (step 1; E14). GOTCHA #14: read ONCE. Master switch FIRST (E14 master-disable),
+    //     then the sub-feature gate. The master `enabled:false` makes the WHOLE extension a no-op
+    //     (context pass-through + nudges no-op + tools refuse "Mulligan is disabled").
     const config = getConfig();
+    if (!config.enabled) return refusal("Mulligan is disabled", granularity); // E14 master switch
     if (!config.rewind.enabled) return refusal("rewind is disabled", granularity);
 
     // (2) note validation (step 2; E9). validateNote never throws; NOTE_INVALID_REASON has NO trailing period
