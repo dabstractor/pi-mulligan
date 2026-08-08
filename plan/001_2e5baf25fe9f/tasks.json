@@ -189,14 +189,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "File Ledger Extraction (ledger.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement the deterministic file ledger extraction that scans tool calls in a message span to produce {readFiles, modifiedFiles, bashSideEffects}. This is the state-ledger that prevents the resumed agent from redoing side-effectful work.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Implement extractFileLedger with deterministic read/modified/bash classification",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -220,7 +220,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Implement validateNote(note) — all 4 fields required non-empty",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
