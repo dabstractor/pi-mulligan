@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, type Unit, type MessageLike } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, type Unit, type MessageLike } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -529,5 +529,205 @@ describe("resolveLastToolCallGroup — ordering, purity, types", () => {
   it("returns number[] | null", () => {
     expectTypeOf(resolveLastToolCallGroup([], [])).toEqualTypeOf<number[] | null>();
     expectTypeOf(resolveLastToolCallGroup([], [], "x")).toEqualTypeOf<number[] | null>();
+  });
+});
+
+// ── resolveLastTurn — spec/10 §1.3 + corner + defensive + parallel + types ────
+
+describe("resolveLastTurn — spec/10 §1.3 PINNED contract", () => {
+  // [u0, a, r, u1, a, r] — indices 0..5; iLastUser = 3.
+  const twoTurns = (): MessageLike[] => [
+    user("u0"), asst("c0"), result("c0"),
+    user("u1"), asst("c1"), result("c1"),
+  ];
+
+  it("default → remove indices AFTER u1 (keep u1): remove = [4,5]", () => {
+    expect(resolveLastTurn(twoTurns(), {}).remove).toEqual([4, 5]);
+    expect(resolveLastTurn(twoTurns(), undefined).remove).toEqual([4, 5]); // opts may be undefined
+  });
+
+  it("to_previous_prompt:true → ALSO remove u1: remove = [3,4,5] (iLastUser=3, iFirstUser=0 → allowed)", () => {
+    expect(resolveLastTurn(twoTurns(), { to_previous_prompt: true }).remove).toEqual([3, 4, 5]);
+  });
+
+  it("u1 is the FIRST user → nuclear refused by protected check: { remove: [] }", () => {
+    // only one user message → iLastUser === iFirstUser === 0
+    const singleTurn: MessageLike[] = [user("only"), asst("c"), result("c")];
+    expect(resolveLastTurn(singleTurn, { to_previous_prompt: true })).toEqual({ remove: [] });
+  });
+});
+
+describe("resolveLastTurn — the rewind's OWN unit survives (default)", () => {
+  it("rewind's assistant+result after iLastUser are kept; prior-turn work is removed", () => {
+    // iLastUser=3. The rewind's own unit (assistant issued "REW") = [6,7]. Prior turn work [4,5] is removed.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("prev"), result("prev"), asst("REW"), result("REW"),
+    ];
+    expect(resolveLastTurn(msgs, {}, "REW").remove).toEqual([4, 5]); // [6,7] kept (rewind's own unit)
+  });
+
+  it("rewind's own unit is kept WHOLE even if it shares a message (parallel-tool — spec/06 §9 / spec/08 E6)", () => {
+    // one assistant carries a sibling call 'sib' AND the rewind call 'REW'; both results follow.
+    // iLastUser=3. rewindOwnUnit (assistant issued "REW") = the shared toolGroup [6,7,8] → all kept.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("prev"), result("prev"), asst("sib", "REW"), result("sib"), result("REW"),
+    ];
+    // prior-turn work [4,5] removed; shared unit [6,7,8] kept whole (siblings survive)
+    expect(resolveLastTurn(msgs, {}, "REW").remove).toEqual([4, 5]);
+  });
+});
+
+describe("resolveLastTurn — mulligan:* notes survive at the tail", () => {
+  it("a mulligan:note after iLastUser is NOT removed", () => {
+    // iLastUser=3; note at 6 → kept; assistant/result [4,5] removed.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("c1"), result("c1"), custom("mulligan:note"),
+    ];
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([4, 5]);
+  });
+
+  it("a mulligan:nudge (ephemeral) after iLastUser is also kept", () => {
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("c1"), result("c1"), custom("mulligan:nudge"),
+    ];
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([4, 5]);
+  });
+
+  it("multiple mulligan:* notes interspersed with removed work all survive", () => {
+    // iLastUser=3; indices 4(asst),5(result) removed; 6(note),7(note) kept.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("c1"), result("c1"), custom("mulligan:note"), custom("mulligan:note"),
+    ];
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([4, 5]);
+  });
+});
+
+describe("resolveLastTurn — no-op cases", () => {
+  it("no user message at all → { remove: [] }", () => {
+    const msgs: MessageLike[] = [asst("c"), result("c"), custom("mulligan:note")];
+    expect(resolveLastTurn(msgs, {})).toEqual({ remove: [] });
+    expect(resolveLastTurn(msgs, { to_previous_prompt: true })).toEqual({ remove: [] });
+  });
+
+  it("nothing after iLastUser → { remove: [] }", () => {
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), user("u1")];
+    expect(resolveLastTurn(msgs, {})).toEqual({ remove: [] });
+    // nuclear still allowed here (iLastUser=3 !== iFirstUser=0) and removes just u1
+    expect(resolveLastTurn(msgs, { to_previous_prompt: true }).remove).toEqual([3]);
+  });
+});
+
+describe("resolveLastTurn — excludeToolCallId semantics", () => {
+  it("excludeToolCallId absent → rewind's own unit is NOT kept (removed with the rest); note survives", () => {
+    // no exclude → rewindOwnIndices empty → [4,5,6,7] all removed except the note at 8.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("REW"), result("REW"), asst("c2"), result("c2"), custom("mulligan:note"),
+    ];
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([4, 5, 6, 7]);
+  });
+
+  it("excludeToolCallId empty string / non-string → never keeps an own unit", () => {
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("REW"), result("REW"),
+    ];
+    expect(resolveLastTurn(msgs, {}, "").remove).toEqual([4, 5]);
+    expect(resolveLastTurn(msgs, {}, 123 as unknown as string).remove).toEqual([4, 5]);
+  });
+
+  it("excludeToolCallId matching NO unit → nothing kept (same as absent)", () => {
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u1"), asst("c1"), result("c1"),
+    ];
+    expect(resolveLastTurn(msgs, {}, "DOES-NOT-EXIST").remove).toEqual([4, 5]);
+  });
+});
+
+describe("resolveLastTurn — nuclear edge cases", () => {
+  it("two user messages, nuclear on the 2nd → removes iLastUser + after (previous prompt remains)", () => {
+    // iLastUser=3, iFirstUser=0 (differ) → allowed. remove = [3,4,5].
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), user("u1"), asst("c1"), result("c1")];
+    expect(resolveLastTurn(msgs, { to_previous_prompt: true }).remove).toEqual([3, 4, 5]);
+  });
+
+  it("three user messages, nuclear → removes only the LAST user + after (earlier users protected by position)", () => {
+    // indices: u0=0,a=1,r=2, u3=3,a=4,r=5, u5=6,a=7,r=8. iLastUser=6, iFirstUser=0 (differ) → allowed.
+    // nuclear removes [6,7,8]; u0 and u3 survive (protected by position).
+    const msgs: MessageLike[] = [
+      user("u0"), asst("c0"), result("c0"),
+      user("u3"), asst("c1"), result("c1"),
+      user("u5"), asst("c2"), result("c2"),
+    ];
+    expect(resolveLastTurn(msgs, { to_previous_prompt: true }).remove).toEqual([6, 7, 8]);
+  });
+
+  it("default is NEVER refused on a single-user list (keeps that user)", () => {
+    const msgs: MessageLike[] = [user("only"), asst("c"), result("c")];
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([1, 2]); // removes the turn work, keeps the user
+  });
+});
+
+describe("resolveLastTurn — defensive (NEVER throws — spec/08 E13)", () => {
+  it("non-array messages → { remove: [] } (no throw)", () => {
+    expect(resolveLastTurn(null as unknown as MessageLike[], {})).toEqual({ remove: [] });
+    expect(resolveLastTurn(undefined as unknown as MessageLike[], {})).toEqual({ remove: [] });
+    expect(resolveLastTurn("nope" as unknown as MessageLike[], {})).toEqual({ remove: [] });
+  });
+
+  it("malformed opts (non-object / missing field) → treated as default (not nuclear)", () => {
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), user("u1"), asst("c1"), result("c1")];
+    expect(resolveLastTurn(msgs, "bad" as unknown as { to_previous_prompt?: boolean }).remove).toEqual([4, 5]);
+    expect(resolveLastTurn(msgs, { to_previous_prompt: false }).remove).toEqual([4, 5]);
+  });
+
+  it("a throwing-Proxy user message is skipped (readOwn swallows) — no throw", () => {
+    const trap: MessageLike = new Proxy(
+      { role: "user", content: "boom" } as MessageLike,
+      new Proxy({}, { get() { throw new Error("trap"); } }),
+    );
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), trap];
+    expect(() => resolveLastTurn(msgs, {})).not.toThrow();
+    // trap reads throw → not seen as a user message → iLastUser stays at 0 → remove = [1,2] (trap at 3 also removed)
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([1, 2, 3]);
+  });
+
+  it("a throwing-Proxy mulligan message is removed (cannot confirm it is mulligan:*) — no throw, no crash", () => {
+    const trap: MessageLike = new Proxy(
+      { role: "custom", customType: "mulligan:note", content: "n" } as MessageLike,
+      new Proxy({}, { get() { throw new Error("trap"); } }),
+    );
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c"), trap];
+    expect(() => resolveLastTurn(msgs, {})).not.toThrow();
+    expect(resolveLastTurn(msgs, {}).remove).toEqual([1, 2, 3]); // trap unreadable → not exempted → removed
+  });
+});
+
+describe("resolveLastTurn — purity, ordering, types", () => {
+  it("is pure / idempotent — same input → same output, no mutation", () => {
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), user("u1"), asst("c1"), result("c1")];
+    const a = resolveLastTurn(msgs, {});
+    const b = resolveLastTurn(msgs, {});
+    expect(a).toEqual(b);
+    expect(JSON.stringify(msgs)).toBe(JSON.stringify(msgs)); // unchanged (no mutation by construction)
+  });
+
+  it("remove is ASCENDING (deterministic) for the nuclear case", () => {
+    const msgs: MessageLike[] = [user("u0"), asst("c0"), result("c0"), user("u1"), asst("c1"), result("c1")];
+    const remove = resolveLastTurn(msgs, { to_previous_prompt: true }).remove;
+    const sorted = [...remove].sort((x, y) => x - y);
+    expect(remove).toEqual(sorted);
+  });
+
+  it("returns { remove: number[] } (the object wrapper, not a bare array or null)", () => {
+    expectTypeOf(resolveLastTurn([], {})).toEqualTypeOf<{ remove: number[] }>();
+    expectTypeOf(resolveLastTurn([], { to_previous_prompt: true })).toEqualTypeOf<{ remove: number[] }>();
+    expectTypeOf(resolveLastTurn([], undefined, "x")).toEqualTypeOf<{ remove: number[] }>();
   });
 });

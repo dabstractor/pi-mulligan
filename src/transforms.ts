@@ -274,3 +274,111 @@ function assistantIssuedCall(
   }
   return false;
 }
+
+/**
+ * resolveLastTurn — find the removal set for a "last_turn" rewind (spec/06-context-filter.md §4).
+ *
+ * A TURN = a user message plus everything after it up to (not including) the next user message. The last turn
+ * begins at iLastUser = index of the last message with role "user".
+ *
+ * ALGORITHM (spec/06 §4, steps 1–3):
+ *   1. Find iLastUser = index of the last "user" message. If none → { remove: [] } (nothing to rewind — protected).
+ *   2. DEFAULT (opts.to_previous_prompt !== true): KEEP the user message; remove every message AFTER iLastUser
+ *      EXCEPT (a) the rewind's OWN unit (the assistant message that issued `excludeToolCallId` + its results —
+ *      partitioned via partitionIntoUnits, detected via assistantIssuedCall from S1), and (b) any `mulligan:*`
+ *      custom messages at the tail (the note MUST survive so the resumed model reads it). The surviving tail is
+ *      [user message] + [mulligan:note] + [rewind assistant + result]; the model resumes at the current prompt.
+ *   3. NUCLEAR (opts.to_previous_prompt === true): ALSO remove the user message at iLastUser (plus the same
+ *      after-iLastUser removal with the same exclusions). The model resumes at the PREVIOUS user prompt. REFUSED
+ *      (returns { remove: [] }) when iLastUser is the FIRST user message (iFirstUser === iLastUser) — that would
+ *      cross the protected first-user / original-task boundary (spec/06 §8, spec/08 E3). The default case is always
+ *      protected-safe by construction (min(remove) > iLastUser >= iFirstUser).
+ *
+ * PAIRING (spec/06 §4 pt 4): removal is index-based but pairing-safe in well-formed input — every assistant+result
+ * pair produced in the rewound turn lives entirely after iLastUser, so both sides are removed together. The
+ * rewind's OWN unit is kept WHOLE (assistant + all its results via rewindOwnIndices), which ALSO resolves the
+ * parallel-tool case conservatively (spec/06 §9, spec/08 E6): if mulligan_rewind shares an assistant message with
+ * sibling calls, the entire shared unit is kept (siblings + results survive in the view). excludeToolCallId
+ * absent/empty/non-string → the rewind's own unit is not identified → it is removed with the rest (pairing still
+ * safe; the note still survives — a real rewind marker always carries a valid excludeToolCallId).
+ *
+ * RETURNS `{ remove: number[] }` (NOT number[] | null — empty array = no-op/refusal). The single consumer
+ * `filterPipeline` (P1.M3.T5.S1) uses `remove = resolveLastTurn(m, rw.options, rw.excludeToolCallId).remove`
+ * (spec/06 §12). `rw.options` carries `to_previous_prompt` (snake_case — the persisted marker field, spec/04 §3);
+ * this function reads it VERBATIM (NOT spec/06 §4's `toPreviousPrompt`, which is a spec typo — see D1).
+ *
+ * Pure + defensive: a non-array `messages` → { remove: [] }; malformed messages, throwing-Proxy messages, a
+ * non-string/empty `excludeToolCallId`, and malformed `opts` are all handled gracefully — NEVER throws (E13;
+ * context-handler hot path). Every field read goes through the module-private isRecord/readOwn.
+ *
+ * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → { remove: [] }
+ * @param opts { to_previous_prompt?: boolean } — the rewind marker's options, passed verbatim by filterPipeline
+ * @param excludeToolCallId the rewind's own toolCall id (its unit is kept); undefined/empty/non-string → not kept
+ * @returns { remove: number[] } — ascending message indices to remove; [] for no-op/refusal
+ */
+export function resolveLastTurn(
+  messages: MessageLike[],
+  opts: { to_previous_prompt?: boolean } | undefined,
+  excludeToolCallId?: string,
+): { remove: number[] } {
+  // Defensive: a non-array messages (shouldn't happen) → nothing to rewind.
+  if (!Array.isArray(messages)) return { remove: [] };
+
+  // 1) iLastUser = index of the LAST "user" message.
+  let iLastUser = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") iLastUser = i;
+  }
+  if (iLastUser === -1) return { remove: [] }; // no user message → nothing to rewind (protected)
+
+  const nuclear = opts !== undefined && opts.to_previous_prompt === true;
+
+  // 3) Nuclear protected check: refuse if iLastUser is the FIRST user message (would cross the original-task line).
+  if (nuclear) {
+    let iFirstUser = -1;
+    for (let i = 0; i < messages.length; i++) {
+      if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") {
+        iFirstUser = i;
+        break;
+      }
+    }
+    if (iFirstUser === iLastUser) return { remove: [] }; // nuclear refused (spec/06 §8, spec/08 E3)
+  }
+
+  // 2) rewindOwnIndices = the set of message indices in the rewind's OWN unit (kept whole). Only when
+  //    excludeToolCallId is a non-empty string; the unit is found via partitionIntoUnits + assistantIssuedCall (S1).
+  //    This single rule ALSO keeps a parallel-shared assistant message whole (§9/E6) — no special branching.
+  const rewindOwnIndices = new Set<number>();
+  const hasExclude = typeof excludeToolCallId === "string" && excludeToolCallId.length > 0;
+  if (hasExclude) {
+    const units = partitionIntoUnits(messages);
+    for (const unit of units) {
+      if (unit.kind === "toolGroup" && assistantIssuedCall(messages, unit.indices, excludeToolCallId)) {
+        for (const idx of unit.indices) rewindOwnIndices.add(idx); // keep the WHOLE unit (parallel-safe — §9)
+      }
+    }
+  }
+
+  // 4) Build the removal set, ASCENDING. Nuclear removes iLastUser too (pushed first); then every index > iLastUser
+  //    except the rewind's own unit and mulligan:* custom messages.
+  const remove: number[] = [];
+  if (nuclear) remove.push(iLastUser);
+  for (let j = iLastUser + 1; j < messages.length; j++) {
+    if (rewindOwnIndices.has(j)) continue; // the rewind's own assistant + results survive
+    if (isMulliganCustomMessage(messages[j])) continue; // the note / nudge survives
+    remove.push(j);
+  }
+  return { remove };
+}
+
+/**
+ * Module-private: is this message a `mulligan:*` custom message (the note / nudge that MUST survive a rewind)?
+ * Detected by a `customType` string with the `mulligan:` prefix (a real Pi CustomMessage carries role "custom" +
+ * customType — spec/01 line156; the looper-smoke proto detects custom messages by m.customType). Defensive
+ * (isRecord/readOwn; never throws).
+ */
+function isMulliganCustomMessage(msg: unknown): boolean {
+  if (!isRecord(msg)) return false;
+  const customType = readOwn(msg, "customType");
+  return typeof customType === "string" && customType.startsWith("mulligan:");
+}
