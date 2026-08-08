@@ -1,0 +1,12 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: last_tool_call_group rewind is not permanent: hidden content leaks back once the agent does any further tool work (and the new work is hidden instead)
+  h3.1 Issue 2: last_turn rewind traps the agent in an infinite loop: the agent's own 'redo' work is hidden on every inference, so it can never recover within the turn (and content leaks across turns)
+  h3.2 Issue 3: checkpoint rewind hides nothing in real sessions — resolveCheckpoint always returns an empty removal set (feature is silently non-functional)
+ h2.2 Major Issues (Should Fix)
+ h2.3 Minor Issues (Nice to Fix)
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:15 list:2

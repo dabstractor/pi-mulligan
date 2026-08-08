@@ -1,0 +1,239 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Fix Rewind Hiding Permanence",
+      "status": "Researching",
+      "description": "Fix the three critical bugs where rewind hiding is not permanent: BUG-001 (last_tool_call_group leaks back after new work), BUG-002 (last_turn traps agent in infinite loop), BUG-003 (checkpoint hides nothing). The shared root cause is that rewind markers store relative specs re-resolved against the growing message list every context fire. The fix pins stable entry IDs at marker-creation time and fixes the checkpoint resolution path.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Fix Checkpoint Resolution (BUG-003)",
+          "status": "Planned",
+          "description": "Fix the three checkpoint issues: (1) resolveCheckpoint branch ordering bug (tests use leaf→root but getBranch returns root→leaf), (2) setCheckpoint labels a transient/wrong entry via getLeafId(), (3) orphaned toolCall when checkpoint target is an assistant with toolCalls. These must be fixed before pinning because resolvePreview (at rewind-creation time) calls resolveCheckpoint to compute the removal set.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Fix resolveCheckpoint branch ordering",
+              "status": "Planned",
+              "description": "resolveCheckpoint's docstring says branchEntries is LEAF→ROOT, but getBranch() returns ROOT→LEAF. The internal .reverse() therefore produces leaf→root — the walk goes backwards. Fix the ordering so the entry→message walk goes root→leaf (matching message array order), and fix all existing resolveCheckpoint tests to construct branchEntries in root→leaf order (matching real getBranch() output).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Fix resolveCheckpoint walk direction + update tests",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/research_findings.md §CRITICAL FINDING. getBranch() (session-manager.js:943-952) returns ROOT→LEAF order (it walks leaf→root then .reverse()). But resolveCheckpoint's docstring (transforms.ts ~line 490) says '@param branchEntries getBranch() output, LEAF→ROOT (we reverse to root→leaf internally)'. The tests (transforms.test.ts:758) construct branchEntries in LEAF→ROOT order: [entry('e4'...), entry('e3'...), ..., entry('e1'...)]. This is WRONG — getBranch() returns root→leaf. The internal [...branchEntries].reverse() converts root→leaf to leaf→root, making the walk go BACKWARDS.\n2. INPUT: The existing resolveCheckpoint function at src/transforms.ts (~line 450-530). It receives branchEntries from filterPipeline, which gets them from filter.ts: `ctx.sessionManager.getBranch()` (ROOT→LEAF order, verified).\n3. LOGIC: Fix the walk to go ROOT→LEAF. Two options: (a) Remove the .reverse() call at line ~496 since branchEntries is already root→leaf, or (b) keep the reverse but fix the walk direction. Option (a) is simpler — just remove `[...branchEntries].reverse()` and use `[...branchEntries]` directly, since getBranch() already returns root→leaf. Then update the docstring to say 'ROOT→LEAF (getBranch order; no internal reverse needed)'. ALSO fix the label-search loop (step 2, ~line 460): it iterates branchEntries root→leaf, so it finds the OLDEST matching label, not the most-recent. For a single checkpoint this is fine, but for correctness, iterate from the END to find the most-recent label. CRITICAL: Fix ALL existing resolveCheckpoint tests in test/transforms.test.ts to construct branchEntries in ROOT→LEAF order (entry('e1'...) first, entry('e4'...) last). The test at line 758 currently has them backwards.\n4. OUTPUT: resolveCheckpoint correctly maps checkpoint label targetId → message index when fed real getBranch() output (root→leaf). All existing tests pass with corrected fixtures.\n5. DOCS: [Mode A] Update the resolveCheckpoint JSDoc (src/transforms.ts) to correctly state ROOT→LEAF order. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Fix setCheckpoint to label a stable entry",
+              "status": "Planned",
+              "description": "setCheckpoint (markers.ts:327) labels getLeafId() which may return a transient or wrong entry at tool-execute time. Fix it to walk getBranch() backwards and label the last stable message entry (type 'message' with a real message.role). This ensures the checkpoint label points to a real context-producing entry that resolveCheckpoint can map correctly.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Fix setCheckpoint to walk getBranch for stable entry",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/pi_session_model.md. setCheckpoint (src/markers.ts:327) currently does `const leafId = ctx.sessionManager.getLeafId(); pi.setLabel(leafId, ...)`. At tool-execute time, getLeafId() may return a transient entry (PRD BUG-003) or simply not the ideal entry to checkpoint. The fix: walk ctx.sessionManager.getBranch() (returns ROOT→LEAF array) backwards from the end, and find the last entry where type==='message' AND entry.message exists AND entry.message.role is a non-empty string. That is the last real committed message — the correct checkpoint anchor. If no such entry exists, return {error:'no stable entry to checkpoint'}.\n2. INPUT: The existing setCheckpoint function at src/markers.ts:327-339. It has access to ctx.sessionManager.getBranch().\n3. LOGIC: Replace `const leafId = ctx.sessionManager.getLeafId()` with a branch walk: `const branch = ctx.sessionManager.getBranch(); let stableId = null; for (let i = branch.length-1; i >= 0; i--) { const e = branch[i]; if (e.type === 'message' && e.message && typeof e.message.role === 'string' && e.message.role.length > 0) { stableId = e.id; break; } }`. Then `if (!stableId) return {error:'no stable entry to checkpoint'}; pi.setLabel(stableId, ...)`. Return {entryId: stableId}. NEVER throws (keep the existing try/catch). Update test/tools/checkpoint.test.ts: the makeCtx fake must return a getBranch() array with realistic entries. Assert that the labeled entry is a stable message, not getLeafId().\n4. OUTPUT: setCheckpoint labels a real message entry. The checkpoint rewind's resolveCheckpoint (after P1.M1.T1.S1 fix) maps it to the correct message index.\n5. DOCS: [Mode A] Update the setCheckpoint JSDoc (src/markers.ts) to document the stable-entry walk. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "Add orphan prevention (unit-snap) to resolveCheckpoint",
+              "status": "Planned",
+              "description": "If the checkpoint target is an assistant message with toolCalls, resolveCheckpoint keeps the assistant (iTarget) but removes its toolResults (iTarget+1...) — orphaning the toolCall and violating the model API's pairing invariant. Fix by snapping iTarget to the END of its unit via partitionIntoUnits, so the whole toolGroup (assistant + results) is kept together.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Snap iTarget to unit boundary in resolveCheckpoint",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/system_context.md §BUG-003 Secondary Issue. resolveCheckpoint (src/transforms.ts ~line 510-520) computes `remove = indices > iTarget` after finding iTarget. If iTarget is an assistant message index whose toolResults are at iTarget+1, iTarget+2, etc., those results get removed → orphaned toolCall → model API rejection (spec/06 §2 cardinal pairing rule, api_verification.md §6.4).\n2. INPUT: The resolveCheckpoint function (after P1.M1.T1.S1 ordering fix). The iTarget variable holds the checkpoint target's message index. partitionIntoUnits(messages) is already available in the same module (transforms.ts).\n3. LOGIC: After iTarget is computed (step 4 of resolveCheckpoint), add: `const units = partitionIntoUnits(messages); for (const unit of units) { if (unit.indices.includes(iTarget)) { iTarget = Math.max(...unit.indices); break; } }`. This snaps iTarget to the END of its unit. If iTarget is in a toolGroup [asst, result1, result2], iTarget becomes the last result's index, so remove = indices > last result = everything AFTER the whole unit. The assistant AND its results are all kept → pairing-safe. Write a test: messages = [user, asst('c1'), result('c1'), asstText('junk')], checkpoint targets asst('c1') at index 1. Without snap: iTarget=1, remove=[2,3] → asst('c1') kept but result('c1') removed → orphan! With snap: unit [1,2], iTarget=2, remove=[3] → whole unit kept.\n4. OUTPUT: resolveCheckpoint never produces a removal set that orphans a toolCall/toolResult. All checkpoint removals are unit-aligned.\n5. DOCS: [Mode A] Update resolveCheckpoint JSDoc to document the unit-snap step. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Pin Stable Anchors at Marker Creation (BUG-001 + BUG-002)",
+          "status": "Planned",
+          "description": "The core fix for BUG-001 and BUG-002: capture the session entry IDs of the messages to hide at rewind-creation time (when the session state is correct), store them in the marker as hideEntryIds, and resolve them at filter time via a new resolvePinnedHide function. This makes hiding stable across session growth because entry IDs are permanent anchors — new work produces new entries with new IDs that are NOT in the pinned set.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Add hideEntryIds field to marker data model",
+              "status": "Planned",
+              "description": "Add hideEntryIds?: string[] to RewindMarker and RewindMarkerInput (markers.ts) and RewindMarkerLike (transforms.ts). This is the stable anchor field that makes hiding permanent.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Add hideEntryIds to marker type interfaces",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/fix_design.md §Change 1. RewindMarker (src/markers.ts:54-69) and RewindMarkerInput (src/markers.ts:71) are the frozen data model. RewindMarkerLike (src/transforms.ts:790-807) is the structural slice filterPipeline reads. The existing `checkpoint` field already rides the spread mechanism (GOTCHA #1 in rewind.ts) without being in the frozen type — hideEntryIds should work identically, but we add it to the types properly for type safety.\n2. INPUT: The existing RewindMarker interface (markers.ts:54), RewindMarkerInput type (markers.ts:71), RewindMarkerLike interface (transforms.ts:790).\n3. LOGIC: Add `hideEntryIds?: string[]` to all three interfaces. The field is OPTIONAL for backward compatibility (old markers lack it → filterPipeline falls back to relative resolution). Add a JSDoc comment explaining: 'Stable entry IDs of the messages to hide, pinned at marker-creation time. When present, filterPipeline resolves these IDs → current message indices via resolvePinnedHide and removes them. Absent (old markers) → falls back to relative re-resolution.' Run existing tests — they should all pass since the field is optional and additive.\n4. OUTPUT: RewindMarker, RewindMarkerInput, and RewindMarkerLike all have an optional hideEntryIds?: string[] field. No existing tests break.\n5. DOCS: [Mode A] Update JSDoc on RewindMarker/RewindMarkerLike to document hideEntryIds. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Implement resolvePinnedHide pure resolver",
+              "status": "Planned",
+              "description": "New pure function in transforms.ts that maps a set of stable entry IDs → current message indices using the branch walk (root→leaf, same as resolveCheckpoint but collecting ALL matching entries instead of stopping at one). Returns the removal set. Handles compaction by refusing (returning []).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Implement and test resolvePinnedHide",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/fix_design.md §Change 3. This function generalizes resolveCheckpoint's entry→message walk (transforms.ts ~line 495-510). It uses the SAME entryMessageYield and isContextProducingType helpers already in the module. CRITICAL: branchEntries from getBranch() is ROOT→LEAF order (do NOT reverse — walk in the natural root→leaf order that matches the messages array).\n2. INPUT: messages (MessageLike[]), branchEntries (BranchEntry[] from getBranch(), ROOT→LEAF), hideEntryIds (string[]). All from the marker's hideEntryIds field + the live session state.\n3. LOGIC: Export function resolvePinnedHide(messages, branchEntries, hideEntryIds) → number[]. Algorithm: (1) Build a Set<string> from hideEntryIds. Non-array or empty → return []. (2) ctxEntries = branchEntries.filter(isContextProducingType) — NO reversal, already root→leaf. (3) Walk with msgCursor=0: for each entry, yield = entryMessageYield(entry); if yield < 0 (compaction/unknown) → return [] (refuse safely); if msgCursor + yield > messages.length → return [] (alignment lost); if entry.id is in the hideEntryIds Set → push all indices [msgCursor, msgCursor+yield) to remove; msgCursor += yield. (4) Return remove (ascending). Pure, defensive, NEVER throws (isRecord/readOwn; E13). ZERO new imports.\n4. OUTPUT: An exported resolvePinnedHide function in transforms.ts. Tests: (a) basic — 3 entries, 2 in hideEntryIds → removes their 2 messages. (b) growth stability — same hideEntryIds against a branch with 2 MORE entries at the end → same 2 removed, new 2 NOT removed. (c) compaction refusal — branch with a compaction entry → returns []. (d) defensive — non-array inputs → []. (e) empty hideEntryIds → [].\n5. DOCS: [Mode A] Add comprehensive JSDoc on resolvePinnedHide documenting the algorithm, compaction refusal, and the root→leaf walk direction. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "Capture hideEntryIds at rewind-creation time",
+              "status": "Planned",
+              "description": "In the rewind tool (rewind.ts), add a captureHideEntryIds helper that maps the resolved message indices (already computed by resolvePreview) back to session entry IDs via buildContextEntries. Include hideEntryIds in the persisted marker payload.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Implement captureHideEntryIds + integrate into resolvePreview",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T1.S1", "P1.M1.T1.S1", "P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/fix_design.md §Change 2 and spec_and_test_analysis.md §KEY QUESTION 2. resolvePreview (src/tools/rewind.ts ~line 271-308) ALREADY resolves the removal set (message indices) against a buildContextEntries() snapshot. The `remove` array is used only for K/ledger — it is discarded. The fix captures the corresponding entry IDs and persists them.\n2. INPUT: The existing resolvePreview function. It builds: `const entries = ctx.sessionManager.buildContextEntries(); const messages = entries.flatMap(e => sessionEntryToContextMessages(e))`. Then resolves `remove` (message indices) by granularity. Each entry produces exactly 1 message (verified: message/custom_message/branch_summary → yield 1).\n3. LOGIC: Add a captureHideEntryIds(entries, remove) helper that walks entries with a cursor, and for each entry whose message index is in the remove set, captures entry.id. Algorithm: `let cursor = 0; const ids = []; for (const e of entries) { const yield = sessionEntryToContextMessages(e).length; for (let j = cursor; j < cursor + yield; j++) { if (remove.includes(j)) { if (e.id) ids.push(e.id); break; } } cursor += yield; } return ids;`. Modify resolvePreview to return `{ ledger, k, hideEntryIds }` (add hideEntryIds to the return). In rewindExecute (step 7, ~line 340), add `hideEntryIds` to the payload object alongside `checkpoint`. The wrapper spread `{...data, ...envelope}` preserves it. Update RewindDetails interface to include hideEntryIds for audit. Test: mock ctx.sessionManager.buildContextEntries to return entries with known IDs; verify the marker persisted via appendEntry includes hideEntryIds matching the removed messages' entry IDs.\n4. OUTPUT: Every new rewind marker has hideEntryIds populated with the stable entry IDs of the messages to hide. The K preview still works (unchanged). Old code paths (ledger, mutation warning) are unaffected.\n5. DOCS: [Mode A] Update resolvePreview and rewindExecute JSDoc to document hideEntryIds capture. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "Update filterPipeline dispatch + add permanent-hiding tests",
+              "status": "Planned",
+              "description": "Update filterPipeline's rewind loop to check hideEntryIds first: if present, use resolvePinnedHide (stable, permanent). Fall back to the existing relative resolution for old markers without hideEntryIds (backward compat). Add the CRITICAL missing test pattern: 'rewind then resume work then re-fire' that asserts permanent hiding.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "Update filterPipeline dispatch + permanent-hiding tests",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T2.S1", "P1.M2.T3.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/fix_design.md §Change 4 and spec_and_test_analysis.md §KEY QUESTION 3 (test gap). filterPipeline (src/transforms.ts ~line 988-1010) has a rewind loop that dispatches by granularity. The fix adds a hideEntryIds check BEFORE the granularity dispatch. The ENTIRE test suite (671 tests) never simulates 'rewind → more work → re-fire' — this is the exact pattern that exposes the bug.\n2. INPUT: The existing filterPipeline rewind loop. resolvePinnedHide from P1.M2.T2.S1. The RewindMarkerLike type (now with hideEntryIds from P1.M2.T1.S1).\n3. LOGIC: In the rewind loop, BEFORE the granularity if/else chain, add: `const hideEntryIdsRaw = readOwn(rw, 'hideEntryIds'); if (Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0) { remove = resolvePinnedHide(m, Array.isArray(branchEntries) ? branchEntries : [], hideEntryIdsRaw as string[]); } else if (granularity === 'last_tool_call_group') { ... existing ... }`. The existing relative resolution becomes the ELSE branch (backward compat for old markers). protectedOk and applyRewind are unchanged.\n4. OUTPUT: filterPipeline with hideEntryIds dispatch. THE MISSING TEST PATTERN — add to test/transforms.test.ts a new describe block 'permanent hiding across fires (BUG-001/002 regression)': (a) Build msgs1 = [user, asst('BAD'), result('BAD'), asst('RW'), result('RW'), custom('mulligan:note')]. Build branch1 with entry IDs [e_u, e_bad_a, e_bad_r, e_rw_a, e_rw_r, e_note]. Marker: {seq:1, granularity:'last_tool_call_group', hideEntryIds:['e_bad_a','e_bad_r'], excludeToolCallId:'RW'}. Fire 1: filterPipeline(msgs1, {rewinds:[marker],shrinks:[]}, config, branch1) → assert msgs1[1] and msgs1[2] NOT in result (BAD hidden). (b) Build msgs2 = [...msgs1, asst('GOOD'), result('GOOD')] and branch2 = [...branch1, entry('e_good_a'), entry('e_good_r')]. Fire 2: filterPipeline(msgs2, {rewinds:[marker],shrinks:[]}, config, branch2) → assert msgs2[1] and msgs2[2] STILL NOT in result (BAD still hidden — PERMANENT), AND msgs2[6] and msgs2[7] ARE in result (GOOD visible — new work not hidden). (c) Same pattern for last_turn granularity. This is THE test that would have caught the bug.\n5. DOCS: [Mode A] Update filterPipeline JSDoc to document the hideEntryIds dispatch and backward-compat fallback. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Regression Tests for Real Usage Pattern",
+          "status": "Planned",
+          "description": "Add comprehensive regression tests for the 'rewind then resume work then re-fire' usage pattern across all three granularities, and enhance the smoke test scenarios to assert actual content hiding (not just marker persistence). These tests directly implement the PRD recommendation: 'Add integration tests that drive the real usage pattern: perform tool work, rewind, then perform MORE tool work, and assert the originally-hidden content is STILL absent from every subsequent context.fire.'",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Checkpoint permanent-hiding + multi-rewind regression tests",
+              "status": "Planned",
+              "description": "Add the checkpoint-specific permanent-hiding test (set checkpoint → do work → rewind → do more work → re-fire → checkpoint span STILL hidden) and multi-rewind composition tests that verify pinned markers compose correctly.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Checkpoint permanent-hiding + multi-rewind composition tests",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T4.S1", "P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/spec_and_test_analysis.md §KEY QUESTION 3-4. The F-checkpoint smoke scenario asserts only marker persistence, never that content is hidden. The checkpoint permanent-hiding test must use the SAME multi-fire pattern as P1.M2.T4.S1 but for the checkpoint granularity, verifying the checkpoint fix (M1) + pinning (M2) work together.\n2. INPUT: All fixed code from M1 (resolveCheckpoint ordering, setCheckpoint stable entry, orphan prevention) and M2 (hideEntryIds, resolvePinnedHide, filterPipeline dispatch). Test fixtures from test/transforms.test.ts (entry, labelEntry, user, asst, result, custom builders).\n3. LOGIC: Add to test/transforms.test.ts: (a) 'checkpoint permanent hiding (BUG-003 regression)': Build msgs1 with branch entries [e_u, e_cp_a, e_cp_r, e_read_a, e_read_r]. Set a checkpoint label targeting e_cp_a (or e_cp_r after unit-snap). Rewind to checkpoint with hideEntryIds capturing entries after the checkpoint. Fire 1: assert post-checkpoint work hidden. Fire 2: append new work [e_new_a, e_new_r]; assert checkpoint span STILL hidden + new work visible. (b) 'multi-rewind composition with pinned IDs': Two rewind markers, each with hideEntryIds. Verify both spans are hidden and compose correctly (no interference). (c) 'pinned + shrink interaction': A pinned rewind hides messages X, then a shrink targets a message in X → shrink no-ops (target already removed). (d) 'backward compat: old marker without hideEntryIds uses relative resolution': Verify the fallback path still works (legacy markers).\n4. OUTPUT: Comprehensive regression tests that would catch all three bugs if they regressed. All tests pass.\n5. DOCS: none — test-only subtask, no user-facing/config/API surface change."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T2",
+              "title": "Enhance smoke test assertions",
+              "status": "Planned",
+              "description": "The F-rewind-core and F-checkpoint smoke scenarios (test/integration/smoke.ts) currently only assert that markers PERSIST (hasRewindMarker:true). Enhance them to assert that the hidden content is actually absent from the filtered view, and that K > 0 for checkpoint rewinds.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S1",
+                  "title": "Enhance F-rewind-core and F-checkpoint smoke assertions",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T4.S1", "P1.M1.T1.S1", "P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.0", "h3.1", "h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/spec_and_test_analysis.md §KEY QUESTION 4. F-rewind-core (test/integration/smoke.ts:149-163) creates a last_turn rewind marker and asserts hasRewindMarker:true + notePresent:true. F-checkpoint (smoke.ts:227-240) sets a checkpoint + rewinds, but never asserts K > 0 or that content is hidden. The context handler observer (smoke.ts ~line 253) logs {count, msgCanaryPresent, resultCanaryPresent, ...} every fire.\n2. INPUT: The existing smoke.ts driveScenario function and the context handler observer.\n3. LOGIC: For F-rewind-core: the deterministic path already creates a last_turn rewind. Enhance the context handler observer to assert that on the observing inference (the second -p prompt), the filtered view does NOT contain the MSG_CANARY (the session-start custom message that the last_turn rewind should hide). Log a pass/fail based on msgCanaryPresent === false on the post-rewind fire. For F-checkpoint: enhance to capture the rewind tool's result text and assert it does NOT contain '0 messages will be hidden' (K > 0). If K === 0, log a FAIL. This catches BUG-003 directly. NOTE: the smoke harness is a Pi HELPER extension — keep changes minimal and never-throwing.\n4. OUTPUT: F-rewind-core and F-checkpoint smoke scenarios now assert actual hiding behavior, not just marker persistence. A regression that re-introduces any of the 3 bugs would fail the smoke test.\n5. DOCS: none — test-only subtask."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M4",
+          "title": "Sync changeset-level documentation",
+          "status": "Planned",
+          "description": "Update the specification documents to reflect the architectural changes: the corrected idempotency assumption, the pinning mechanism, the hideEntryIds field, and the resolveCheckpoint ordering fix. This is Mode B documentation (changeset-level, cross-cutting) that depends on all implementing subtasks.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M4.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Update spec/06 §11 (idempotency), spec/06 §3/§4/§6/§12 (resolver descriptions), spec/04 §3 (RewindMarker hideEntryIds field), and perform a JSDoc sweep on all modified functions.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S1",
+                  "title": "Update spec/06 idempotency + resolver descriptions",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M2.T1.S1", "P1.M2.T2.S1", "P1.M2.T3.S1", "P1.M2.T4.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/research_findings.md. spec/06 §11 (line 232) claims 'across fires the session is unchanged between user prompts' — this is FALSE within a turn. spec/06 §3/§4/§6 describe the relative resolution algorithms that are now superseded by pinning for new markers. spec/06 §12 pseudocode shows the filterPipeline without the hideEntryIds dispatch.\n2. INPUT: All modified source files from M1 and M2. The current spec/06-context-filter.md and spec/04-data-model.md.\n3. LOGIC: (a) spec/06 §11: Correct the idempotency claim. Replace 'across fires the session is unchanged between user prompts' with an accurate statement: 'within a turn, tool calls append entries between context fires, so relative specs are unstable; new markers pin stable entry IDs at creation time (hideEntryIds) to ensure permanent hiding across session growth.' (b) spec/06 §3/§4/§6: Add a note that new markers capture hideEntryIds at creation time, and filterPipeline resolves via resolvePinnedHide. The relative resolvers remain as a backward-compat fallback. (c) spec/06 §12: Update the pseudocode to show the hideEntryIds dispatch. (d) spec/04 §3: Document the hideEntryIds field on RewindMarker. (e) JSDoc sweep: verify all modified functions (resolveCheckpoint, setCheckpoint, resolvePinnedHide, filterPipeline, resolvePreview, captureHideEntryIds) have accurate JSDoc reflecting the changes.\n4. OUTPUT: Specification documents accurately describe the pinning mechanism, the corrected idempotency model, and the hideEntryIds field. No stale claims remain.\n5. DOCS: [Mode B] This IS the documentation sync task."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
