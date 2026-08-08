@@ -263,7 +263,7 @@ function checkpointExists(ctx: ExtensionContext, name: string): boolean {
  *
  * GOTCHA #7: extractFileLedger's `range` is a number[] of MESSAGE INDICES (NOT a [start,end) tuple). The resolver's
  * removal set IS that index list.
- * GOTCHA #8: resolveCheckpoint takes branchEntries DATA (getBranch(), leaf→root), NOT ctx.
+ * GOTCHA #8: resolveCheckpoint takes branchEntries DATA (getBranch(), root→leaf), NOT ctx.
  * Module-local.
  */
 function resolvePreview(

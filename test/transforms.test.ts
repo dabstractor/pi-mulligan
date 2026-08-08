@@ -745,8 +745,9 @@ function labelEntry(id: string, targetId: string, name: string): BranchEntry {
 }
 
 describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defensive + tail-exclusions", () => {
-  // NOTE: getBranch() is LEAF→ROOT; we build branchEntries in that order. Each context-producing entry yields
-  // exactly 1 message, so messages[k] corresponds 1:1 to the k-th context-producing entry (root→leaf).
+  // NOTE: getBranch() returns ROOT→LEAF (it collects leaf→root then .reverse() — see
+  // architecture/pi_session_model.md Q2). We build branchEntries in that root→leaf order. Each
+  // context-producing entry yields exactly 1 message, so messages[k] ↔ k-th context-producing entry.
 
   it("(clean) basic mapping — checkpoint mid-branch removes strictly-later work, keeps the point + before", () => {
     // root→leaf context-producing entries → messages (1:1):
@@ -755,11 +756,12 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     //   e3 result → msgs[2]   ← removed (> iTarget, not excluded)
     //   e4 asst(text) → msgs[3] ← removed
     const msgs: MessageLike[] = [user("u1"), asst("c1"), result("c1"), asstText("junk")];
-    // branchEntries LEAF→ROOT (getBranch order):
+    // branchEntries ROOT→LEAF (getBranch() order):
     const branchEntries: BranchEntry[] = [
-      entry("e4", "message"), entry("e3", "message"), labelEntry("eL", "e2", "ckpt"),
-      entry("e2", "message"), entry("e1", "message"),
+      entry("e1", "message"), entry("e2", "message"), labelEntry("eL", "e2", "ckpt"),
+      entry("e3", "message"), entry("e4", "message"),
     ];
+    // (assertions below UNCHANGED — see PRP GOTCHA C)
     const res = resolveCheckpoint(msgs, branchEntries, "ckpt");
     expect(res).not.toBeNull();
     expect(res!.remove).toEqual([2, 3]); // e3(result) + e4(text asst); e2 (the checkpoint) KEPT at idx1
@@ -769,7 +771,8 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     const msgs: MessageLike[] = [user("u"), asst("c"), result("c")]; // idx0 user, idx1 asst, idx2 result
     // checkpoint targets e_asst (idx1). iTarget=1. remove=[2].
     const branch: BranchEntry[] = [
-      entry("e_result", "message"), labelEntry("eL", "e_asst", "p"), entry("e_asst", "message"), entry("e_user", "message"),
+      entry("e_user", "message"), entry("e_asst", "message"), labelEntry("eL", "e_asst", "p"),
+      entry("e_result", "message"),
     ];
     const res = resolveCheckpoint(msgs, branch, "p");
     expect(res!.remove).toEqual([2]);
@@ -781,8 +784,8 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     // iTarget = 0 (checkpoint at user). After it: asst(rw)+result(rw) [own unit, KEPT] + asst(text)[removed].
     const msgs: MessageLike[] = [user("u"), asst("rw-call"), result("rw-call"), asstText("bad")];
     const branch: BranchEntry[] = [
-      entry("e_text", "message"), entry("e_result", "message"), entry("e_asst_rw", "message"),
-      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+      entry("e_user", "message"), labelEntry("eL", "e_user", "k"), entry("e_asst_rw", "message"),
+      entry("e_result", "message"), entry("e_text", "message"),
     ];
     const res = resolveCheckpoint(msgs, branch, "k", "rw-call");
     expect(res!.remove).toEqual([3]); // asst(text) removed; the rewind's own unit (idx1,2) KEPT; checkpoint user idx0 kept
@@ -794,8 +797,8 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     const msgs: MessageLike[] = [user("u"), result("c"), custom("mulligan:note"), custom("mulligan:nudge")];
     // checkpoint at user (idx0). After it: result(idx1, removed), note(idx2 KEPT), nudge(idx3 KEPT).
     const branch: BranchEntry[] = [
-      entry("e_nudge", "custom_message"), entry("e_note", "custom_message"), entry("e_result", "message"),
-      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+      entry("e_user", "message"), labelEntry("eL", "e_user", "k"), entry("e_result", "message"),
+      entry("e_note", "custom_message"), entry("e_nudge", "custom_message"),
     ];
     const res = resolveCheckpoint(msgs, branch, "k");
     expect(res!.remove).toEqual([1]); // only the result removed; note + nudge survive
@@ -805,8 +808,9 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
     // root→leaf: compaction, then user, asst, result. checkpoint targets the asst AFTER compaction.
     const branch: BranchEntry[] = [
-      entry("e_result", "message"), labelEntry("eL", "e_asst", "k"), entry("e_asst", "message"),
-      entry("e_user", "message"), entry("e_comp", "compaction", { summary: "s", firstKeptEntryId: "e_user" }),
+      entry("e_comp", "compaction", { summary: "s", firstKeptEntryId: "e_user" }),
+      entry("e_user", "message"), entry("e_asst", "message"), labelEntry("eL", "e_asst", "k"),
+      entry("e_result", "message"),
     ];
     expect(resolveCheckpoint(msgs, branch, "k")).toBeNull();
   });
@@ -816,9 +820,9 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     // reaches the compaction entry → mapping OK. iTarget = asst's index; remove = everything after it.
     const msgs: MessageLike[] = [user("u"), asst("c"), result("c"), asstText("post")];
     const branch: BranchEntry[] = [
+      entry("e_user", "message"), entry("e_asst", "message"), labelEntry("eL", "e_asst", "k"),
+      entry("e_result", "message"), entry("e_post", "message"),
       entry("e_comp", "compaction", { summary: "s", firstKeptEntryId: "e_result" }),
-      entry("e_post", "message"), entry("e_result", "message"), labelEntry("eL", "e_asst", "k"),
-      entry("e_asst", "message"), entry("e_user", "message"),
     ];
     const res = resolveCheckpoint(msgs, branch, "k");
     expect(res).not.toBeNull();
@@ -842,7 +846,7 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     // checkpoint at the LAST context-producing entry → iTarget = last index → nothing after → remove = [].
     const msgs: MessageLike[] = [user("u"), asst("c")];
     const branch: BranchEntry[] = [
-      labelEntry("eL", "e_asst", "k"), entry("e_asst", "message"), entry("e_user", "message"),
+      entry("e_user", "message"), entry("e_asst", "message"), labelEntry("eL", "e_asst", "k"),
     ];
     const res = resolveCheckpoint(msgs, branch, "k");
     expect(res).not.toBeNull();
@@ -861,8 +865,8 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
   it("excludeToolCallId absent/empty/non-string → rewind's own unit NOT kept (removed with the rest); note still survives", () => {
     const msgs: MessageLike[] = [user("u"), asst("rw-call"), result("rw-call"), custom("mulligan:note")];
     const branch: BranchEntry[] = [
-      entry("e_note", "custom_message"), entry("e_result", "message"), entry("e_asst", "message"),
-      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+      entry("e_user", "message"), labelEntry("eL", "e_user", "k"), entry("e_asst", "message"),
+      entry("e_result", "message"), entry("e_note", "custom_message"),
     ];
     // No excludeToolCallId → the asst(rw)+result are NOT protected → removed. note survives.
     expect(resolveCheckpoint(msgs, branch, "k")!.remove).toEqual([1, 2]);
@@ -1305,17 +1309,15 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
     });
 
     it("checkpoint rewind through the pipeline removes everything after the checkpoint point", () => {
-      // branchEntries (leaf→root): [message u0, message a1, label checkpoint "x" targeting a1]. messages = [u0, a1, r1?]
-      // — to keep it simple: a 2-message prefix [u0, a1text] with a checkpoint labeling a1; a checkpoint rewind hides
-      // everything after the checkpoint (nothing here → remove=[]). We instead label an EARLIER point to force a removal.
+      // branchEntries ROOT→LEAF (getBranch() order): [message e0 (root), label checkpoint "x" targeting e1, message e1, message e2, message e3 (leaf)].
+      // messages = [u0, a1text, drop1, drop2]; checkpoint labels the entry yielding message index 1 (asstText keep).
       const msgs: MessageLike[] = [user("u0"), asstText("keep"), asstText("drop1"), asstText("drop2")];
-      // branchEntries leaf→root: label "mulligan:checkpoint:x" targets the entry yielding message index 1 (asstText keep).
       const branchEntries: BranchEntry[] = [
-        { type: "message", id: "e3", parentId: "e2" }, // msg index 3 (drop2) — leaf
-        { type: "message", id: "e2", parentId: "e1" }, // msg index 2 (drop1)
-        { type: "message", id: "e1", parentId: "e0" }, // msg index 1 (keep)
+        { type: "message", id: "e0", parentId: null },           // msg index 0 (u0) — ROOT
         { type: "label", id: "L1", parentId: "e0", targetId: "e1", label: "mulligan:checkpoint:x" },
-        { type: "message", id: "e0", parentId: null }, // msg index 0 (u0) — root
+        { type: "message", id: "e1", parentId: "e0" },           // msg index 1 (keep)
+        { type: "message", id: "e2", parentId: "e1" },           // msg index 2 (drop1)
+        { type: "message", id: "e3", parentId: "e2" },           // msg index 3 (drop2) — LEAF
       ];
       const markers: MarkerBundle = {
         rewinds: [mkRewind(1, "checkpoint", { checkpoint: "x", excludeToolCallId: undefined })],

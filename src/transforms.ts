@@ -410,11 +410,11 @@ export interface BranchEntry {
  *
  * ALGORITHM (spec/06 §6, steps 1–6):
  *   1. Defensive: non-array messages/branchEntries, or checkpointName not a non-empty string → null.
- *   2. Find the FIRST LabelEntry (scanning branchEntries leaf→root = most-recent) whose
- *      label === `mulligan:checkpoint:${checkpointName}`. None → null (spec/08 E10 not-found → refuse). targetId =
- *      its targetId; non-string/empty → null.
- *   3. ctxEntries = [...branchEntries].reverse() (root→leaf) filtered to context-producing types
- *      (message, custom_message, branch_summary, compaction — spec/06 §6 step 2).
+ *   2. Find the FIRST LabelEntry (scanning branchEntries in REVERSE (leaf→root, since branchEntries is
+ *      root→leaf) = most-recent) whose label === `mulligan:checkpoint:${checkpointName}`. None → null
+ *      (spec/08 E10 not-found → refuse). targetId = its targetId; non-string/empty → null.
+ *   3. ctxEntries = branchEntries directly (already root→leaf — getBranch() order; no internal reverse)
+ *      filtered to context-producing types (message, custom_message, branch_summary, compaction — spec/06 §6 step 2).
  *   4. Walk ctxEntries with msgCursor (messages consumed). For each entry: yield = entryMessageYield(entry);
  *      yield < 0 (compaction/unknown → indeterminate) OR msgCursor+yield > messages.length (alignment lost) → null.
  *      If entry.id === targetId → iTarget = msgCursor + yield - 1 (the entry's LAST message index — kept); break.
@@ -442,7 +442,7 @@ export interface BranchEntry {
  * hot path). Every field read goes through the module-private isRecord/readOwn. NEVER imports Pi (purity).
  *
  * @param messages the LLM message list (a real Pi AgentMessage[] assigns in with no cast); non-array → null
- * @param branchEntries getBranch() output, LEAF→ROOT (we reverse to root→leaf internally); non-array → null
+ * @param branchEntries getBranch() output, ROOT→LEAF (getBranch() order; no internal reverse needed); non-array → null
  * @param checkpointName the checkpoint name (without the `mulligan:checkpoint:` prefix); non-string/empty → null
  * @param excludeToolCallId the rewind's own toolCall id (its unit is kept); undefined/empty/non-string → not kept
  * @returns { remove: number[] } on a determinable mapping (possibly empty), or null when indeterminate/refused
@@ -459,22 +459,25 @@ export function resolveCheckpoint(
 
   const needle = `mulligan:checkpoint:${checkpointName}`;
 
-  // 2) Find the FIRST (most-recent, leaf→root) LabelEntry with the matching label.
+  // 2) Find the FIRST (most-recent) LabelEntry with the matching label. branchEntries is ROOT→LEAF
+  //    (getBranch() order), so scan from the END (leaf→root) so the most-recent (leaf-most) match wins.
   let targetId: string | undefined;
-  for (const e of branchEntries) {
+  for (let i = branchEntries.length - 1; i >= 0; i--) {
+    const e = branchEntries[i];
     if (!isRecord(e)) continue;
     if (readOwn(e, "type") !== "label") continue;
     if (readOwn(e, "label") !== needle) continue;
     const tid = readOwn(e, "targetId");
     if (typeof tid === "string" && tid.length > 0) {
       targetId = tid;
-      break; // most-recent match wins
+      break; // most-recent (leaf-most) match wins
     }
   }
   if (targetId === undefined) return null; // not found on this branch (spec/08 E10) or no usable targetId → refuse
 
-  // 3) ctxEntries = reversed (root→leaf) filtered to context-producing types (spec/06 §6 step 2).
-  const ctxEntries = [...branchEntries].reverse().filter((e) =>
+  // 3) ctxEntries = branchEntries (already ROOT→LEAF — getBranch() order; no internal reverse) filtered
+  //    to context-producing types (spec/06 §6 step 2).
+  const ctxEntries = branchEntries.filter((e) =>
     isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
   );
 
@@ -963,7 +966,7 @@ export function protectedOk(
  * @param messages      the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
  * @param markers       { rewinds, shrinks } (a real readMarkers output assigns in); undefined/non-record → pass-through
  * @param config        the config slice protectedOk reads (rewind.protectedRoles); undefined → enforce first:user
- * @param branchEntries getBranch() output for checkpoint rewinds (leaf→root); optional — absent → checkpoint no-ops
+ * @param branchEntries getBranch() output for checkpoint rewinds (root→leaf — getBranch() order); optional — absent → checkpoint no-ops
  * @returns the filtered message array; the SAME reference as `messages` when no marker transforms anything
  */
 export function filterPipeline(

@@ -97,7 +97,7 @@ function makePi(opts: {
  *   - leafId (getLeafId — the captured marker entry id; default "leaf-1")
  *   - sessionId (default "s1")
  *   - entries (getEntries — rewind-marker entries for the depth guard + label entries for checkpoint existence)
- *   - branch (getBranch — SessionEntry[] leaf→root for checkpoint resolution)
+ *   - branch (getBranch — SessionEntry[] root→leaf for checkpoint resolution)
  *   - contextEntries (buildContextEntries — SessionEntry[] snapshot flattened to messages for the ledger/K preview)
  * Set throwOnGetEntries / throwOnBuildContext to simulate failures.
  */
