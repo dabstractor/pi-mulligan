@@ -430,7 +430,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Pi Integration Layer",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Bridge the pure transform logic to Pi's runtime: implement markers.ts (thin wrappers around pi.appendEntry/sendMessage/setLabel with seq and leaf-id capture) and filter.ts (the context event handler that reads markers, calls the pure pipeline, caches lastFiltered, and fails open on any error).",
           "tasks": [
             {
@@ -478,14 +478,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Context Event Filter Handler (filter.ts)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Implement the context event handler — the heart of the extension. On every inference: read markers from ctx.sessionManager.getEntries(), call the pure filterPipeline, cache lastFiltered for audit, inject the drift nudge if warranted, and fail open on any error (return nothing = pass-through).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Implement context handler — read markers, call pipeline, cache, fail-open",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T5.S1",
@@ -567,14 +567,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "mulligan_checkpoint Tool (tools/checkpoint.ts)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Implement the checkpoint tool: tag the current position with a name so a later rewind can target it. Validates name format, labels the current leaf entry.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Implement mulligan_checkpoint tool — name validation, setLabel",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M4.T1.S2"
@@ -590,14 +590,14 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "mulligan_audit Tool (tools/audit.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the read-only audit tool: give the agent a token-aware view of its context computed from the FILTERED view (what the model actually sees, NOT getContextUsage). Reports per-message token estimates, flags outliers, lists active markers, suggests shrink/rewind actions.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Implement mulligan_audit tool — filtered view read, token breakdown, report rendering",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M4.T2.S1",
