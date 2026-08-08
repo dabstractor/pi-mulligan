@@ -430,7 +430,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Pi Integration Layer",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Bridge the pure transform logic to Pi's runtime: implement markers.ts (thin wrappers around pi.appendEntry/sendMessage/setLabel with seq and leaf-id capture) and filter.ts (the context event handler that reads markers, calls the pure pipeline, caches lastFiltered, and fails open on any error).",
           "tasks": [
             {
@@ -478,14 +478,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Context Event Filter Handler (filter.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the context event handler — the heart of the extension. On every inference: read markers from ctx.sessionManager.getEntries(), call the pure filterPipeline, cache lastFiltered for audit, inject the drift nudge if warranted, and fail open on any error (return nothing = pass-through).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Implement context handler — read markers, call pipeline, cache, fail-open",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T5.S1",
@@ -506,21 +506,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Agent-Callable Tools",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the four agent-callable tools: mulligan_rewind (shed context + leave note), mulligan_shrink (replace result with summary), mulligan_checkpoint (tag position), and mulligan_audit (token breakdown of filtered view). Each tool is a thin wrapper: validate input → write marker(s)/note via markers.ts → return confirmation. Tools are write-only w.r.t. the message list (audit is the read-only exception).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "mulligan_rewind Tool (tools/rewind.ts)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Implement the core 'mulligan' tool: shed recent context (last tool-call group, last turn, or back to checkpoint) and leave a structured note. Validates note fields, checks depth guard, composes ledger + note, persists marker + note, returns confirmation with mutation warning.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Implement mulligan_rewind tool — schema, validation, persistence, confirmation",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1",
@@ -542,14 +542,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "mulligan_shrink Tool (tools/shrink.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the shrink tool: replace a specific past tool result's content with a compact replacement in the view. Validates config, validates replacement non-empty, does best-effort match for immediate feedback, persists the shrink marker.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Implement mulligan_shrink tool — schema, validation, persistence, match feedback",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M4.T1.S1",
