@@ -702,14 +702,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "Extension Factory Wiring (index.ts)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Replace the index.ts stub with the full factory: load config, register all 4 tools, attach all event handlers (context, tool_result, turn_end, session_start, session_shutdown), and wire everything together.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "Wire all tools, handlers, config, and lifecycle in index.ts factory",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S1",
