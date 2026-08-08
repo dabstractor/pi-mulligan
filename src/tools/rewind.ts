@@ -50,6 +50,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ToolDefinition,
+  type SessionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import { appendRewindMarker, leaveNote, type RewindMarkerInput } from "../markers.js"; // GOTCHA #13: .js
@@ -152,6 +153,10 @@ export interface RewindDetails {
   k?: number;
   /** The extracted file ledger (success path only; empty on best-effort failure). */
   ledger?: FileLedger;
+  /** Stable ENTRY ids pinned for permanent hiding at marker-creation time (fix_design.md §Change 2; audit surface).
+   *  Present on the success path (possibly []); omitted on refusal paths. Read by filterPipeline (P1.M2.T4) off the
+   *  persisted marker and resolved by resolvePinnedHide (P1.M2.T2). Holds ENTRY ids (stable), NOT message indices. */
+  hideEntryIds?: string[];
   /** The persisted marker's entry id (success path; null/omitted when append returned null). */
   markerId?: string | null;
 }
@@ -252,6 +257,47 @@ function checkpointExists(ctx: ExtensionContext, name: string): boolean {
 }
 
 /**
+ * captureHideEntryIds — map the resolved MESSAGE-INDEX removal set back to the STABLE ENTRY ids of the entries that
+ * produced those messages, for PERMANENT pinned hiding (fix_design.md §Change 2; the PRODUCER half of the BUG-001/
+ * BUG-002 fix; consumed at filter time by resolvePinnedHide, P1.M2.T2, via the persisted marker's hideEntryIds).
+ *
+ * ALGORITHM (fix_design.md §Change 2; mirrors how `messages` was built): walk `entries` with a `cursor`; for each
+ * entry `e`, `yield = sessionEntryToContextMessages(e).length` (typically 1 for message/custom_message/branch_summary);
+ * if ANY index in `[cursor, cursor+yield)` is in `remove`, push `e.id` ONCE and break; then `cursor += yield`. Because
+ * `messages = entries.flatMap(sessionEntryToContextMessages)` (resolvePreview, above), entry `e` ↔ `messages[cursor..cursor+yield)`
+ * is EXACT BY CONSTRUCTION — no position math. The captured ids are the STABLE anchors Pi gives us (SessionEntryBase.id
+ * is a permanent UUID; survives compaction/reload/growth), which is precisely why pinned hiding is permanent where the
+ * relative re-resolution model (BUG-001/002) failed.
+ *
+ * Defensive: non-array `entries`/`remove` → []. Does NOT itself try/catch: it runs inside `resolvePreview` inside
+ * rewindExecute's best-effort catch, so a throwing `sessionEntryToContextMessages(e)` propagates → hideEntryIds=[] +
+ * emptyLedger + K=0 + the rewind STILL proceeds (E13/E8). Per-entry try/catch is intentionally AVOIDED — it would risk
+ * misaligning the cursor (a throwing entry that yields >0 messages would shift every later mapping). Module-local
+ * (tested via the tool execute path, like resolvePreview/countRewindMarkers/checkpointExists).
+ *
+ * @param entries the buildContextEntries() snapshot resolvePreview already built (root→leaf); each e.id is a stable string
+ * @param remove  the MESSAGE-INDEX removal set resolvePreview already resolved (number[]); non-array → []
+ * @returns the stable ENTRY ids of the entries whose message(s) are in `remove` (each entry at most once); [] if nothing
+ */
+function captureHideEntryIds(entries: SessionEntry[], remove: readonly number[]): string[] {
+  if (!Array.isArray(entries) || !Array.isArray(remove)) return [];
+  const removeSet = new Set<number>(remove);
+  const ids: string[] = [];
+  let cursor = 0;
+  for (const e of entries) {
+    const y = sessionEntryToContextMessages(e).length; // typically 1 (message/custom_message/branch_summary)
+    for (let j = cursor; j < cursor + y; j++) {
+      if (removeSet.has(j)) {
+        if (e.id) ids.push(e.id); // SessionEntryBase.id is a stable string; guard rejects the empty-string edge
+        break; // capture each entry at most once (matters if a future entry type yields >1 message)
+      }
+    }
+    cursor += y;
+  }
+  return ids;
+}
+
+/**
  * resolvePreview — the read-only ledger + K preview (step 5; GOTCHA #5/#6/#7/#8). Builds a SNAPSHOT via
  * `ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)` (NOT event.messages — the tool
  * is write-only w.r.t. messages), then mirrors filterPipeline's granularity dispatch (spec/06 §12) to resolve the
@@ -270,7 +316,7 @@ function resolvePreview(
   ctx: ExtensionContext,
   params: RewindArgs,
   toolCallId: string,
-): { ledger: FileLedger; k: number } {
+): { ledger: FileLedger; k: number; hideEntryIds: string[] } {
   const entries = ctx.sessionManager.buildContextEntries(); // GOTCHA #5: snapshot, compaction-aware
   // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free
   // structural type with a narrower content-block index signature that TS rejects across the boundary.
@@ -289,7 +335,11 @@ function resolvePreview(
     remove = resolveCheckpoint(messages, branchEntries, params.checkpoint ?? "", toolCallId)?.remove ?? [];
   }
   const ledger = extractFileLedger(messages, remove); // GOTCHA #7: remove = message indices
-  return { ledger, k: remove.length };
+  // Pin the STABLE ENTRY ids of the removed messages (fix_design.md §Change 2): the removal set is resolved ONCE
+  // against this current snapshot (the correct session state); the captured entry ids are stable forever, so the
+  // filter can re-resolve them by identity every later fire (permanent hiding — BUG-001/002 fix).
+  const hideEntryIds = captureHideEntryIds(entries, remove);
+  return { ledger, k: remove.length, hideEntryIds };
 }
 
 // ── execute (spec/05 §1 behavior; shared tool convention = never throws — E13) ─────
@@ -351,11 +401,15 @@ async function rewindExecute(
     //     K=0 + STILL succeeds (the marker spec is what matters; the ledger is ADVISORY).
     let ledger: FileLedger;
     let k: number;
+    let hideEntryIds: string[];
     try {
-      ({ ledger, k } = resolvePreview(ctx, params, toolCallId));
+      ({ ledger, k, hideEntryIds } = resolvePreview(ctx, params, toolCallId));
     } catch {
+      // Snapshot/resolution failure → best-effort: empty ledger + K=0 + hideEntryIds=[] + STILL proceed (E13/E8).
+      // (captureHideEntryIds itself doesn't try/catch — a throw inside resolvePreview lands here.)
       ledger = emptyLedger();
       k = 0;
+      hideEntryIds = [];
     }
 
     // (6) render note (step 6 — note already validated by step 2; renderNote does NOT re-validate).
@@ -370,6 +424,10 @@ async function rewindExecute(
       excludeToolCallId: toolCallId,
       note: params.note,
       ledger,
+      // fix_design.md §Change 2: the stable ENTRY ids pinned for permanent hiding. Typed on RewindMarkerInput
+      // (P1.M2.T1.S1), so NO cast needed for THIS field — the `as RewindMarkerInput` cast below stays only for
+      // `checkpoint` (GOTCHA #1 — spec/04 §3 omits it; it rides the spread). The wrapper's {...data} persists it.
+      hideEntryIds,
       checkpoint: params.checkpoint, // GOTCHA #1: persists even when undefined; spec/04 §3 omits it (cast below)
     };
     const markerId = appendRewindMarker(pi, ctx, payload as RewindMarkerInput); // cast: frozen type omits checkpoint
@@ -384,7 +442,7 @@ async function rewindExecute(
     const { text } = successText(granularity, k, hasWarning);
     return {
       content: [{ type: "text", text }],
-      details: { granularity, k, ledger, markerId },
+      details: { granularity, k, ledger, hideEntryIds, markerId },
     };
   } catch (e) {
     // Shared tool convention (E13): never throw — return a text result describing the failure.

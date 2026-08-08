@@ -758,3 +758,126 @@ describe("mulligan_rewind — the note left is renderNote(note, ledger, granular
     expect(sent[0].content).toBe(expected);
   });
 });
+
+// ── hideEntryIds capture (fix_design.md §Change 2; PRODUCER half of permanent hiding — BUG-001/002) ──────
+
+/** Like msgEntry but with a DETERMINISTIC id (needed to assert which entry ids were captured). Mirrors msgEntry's shape. */
+function msgEntryId(id: string, message: Record<string, unknown>): { type: "message"; id: string; message: Record<string, unknown> } {
+  return { type: "message", id, message };
+}
+
+describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; permanent-hiding producer)", () => {
+  it("last_tool_call_group → hideEntryIds === the removed toolGroup's entry ids (the X group; NOT the rewind's own, NOT the user)", async () => {
+    const { appended, pi } = makePi();
+    // snapshot: u(e_u), asst(X)(e_X), result(X)(e_rX), asst(call-1)(e_rw), result(call-1)(e_rrw).
+    // last_tool_call_group excludes the rewind's OWN group (call-1) → resolves the X group → remove=[1,2] → K=2.
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntryId("e_u", user("u")),
+        msgEntryId("e_X", asst("X")),
+        msgEntryId("e_rX", result("X")),
+        msgEntryId("e_rw", asst("call-1")),
+        msgEntryId("e_rrw", result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    expect(appended).toHaveLength(1);
+    const entry = appended[0].data as RewindMarker;
+    // the removed messages are at indices 1,2 → their entries are e_X, e_rX (the whole bad toolGroup)
+    expect(entry.hideEntryIds).toEqual(["e_X", "e_rX"]);
+    expect(entry.hideEntryIds).not.toContain("e_u"); // user kept
+    expect(entry.hideEntryIds).not.toContain("e_rw"); // rewind's own assistant kept
+    expect(entry.hideEntryIds).not.toContain("e_rrw"); // rewind's own result kept
+    // result audit surface carries the same ids
+    expect(res.details.hideEntryIds).toEqual(["e_X", "e_rX"]);
+    expect(res.details.k).toBe(2);
+  });
+
+  it("last_turn → hideEntryIds === the BAD toolGroup's entry ids (rewind's own unit kept)", async () => {
+    const { appended, pi } = makePi();
+    // snapshot: u(e_u), asst(BAD)(e_bad), result(BAD)(e_rbad), asst(call-1)(e_rw), result(call-1)(e_rrw).
+    // last_turn removes everything after the last user msg (idx 0) EXCEPT the rewind's own unit + notes → remove=[1,2].
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntryId("e_u", user("please do X")),
+        msgEntryId("e_bad", asst("BAD")),
+        msgEntryId("e_rbad", result("BAD")),
+        msgEntryId("e_rw", asst("call-1")),
+        msgEntryId("e_rrw", result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" }, "call-1");
+    const entry = appended[0].data as RewindMarker;
+    expect(entry.hideEntryIds).toEqual(["e_bad", "e_rbad"]);
+    expect(entry.hideEntryIds).not.toContain("e_rw");
+    expect(entry.hideEntryIds).not.toContain("e_rrw");
+    expect(res.details.hideEntryIds).toEqual(["e_bad", "e_rbad"]);
+  });
+
+  it("K=0 (only the rewind's own group in the snapshot) → remove=[] → hideEntryIds === [] (PRESENT, not undefined)", async () => {
+    const { appended, pi } = makePi();
+    // snapshot: only the rewind's own group → resolveLastToolCallGroup returns null → remove=[] → K=0.
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntryId("e_rw", asst("call-1")), msgEntryId("e_rrw", result("call-1"))],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    expect(res.details.k).toBe(0);
+    const entry = appended[0].data as RewindMarker;
+    expect(Array.isArray(entry.hideEntryIds)).toBe(true); // present (every new marker has it)
+    expect(entry.hideEntryIds).toEqual([]);
+    expect(res.details.hideEntryIds).toEqual([]);
+  });
+
+  it("snapshot failure (buildContextEntries throws) → catch → hideEntryIds === [] + marker STILL persisted", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ throwOnBuildContext: true });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    expect(firstText(res)).toContain("Mulligan: rewound");
+    expect(appended).toHaveLength(1); // marker persisted despite the preview failure
+    const entry = appended[0].data as RewindMarker;
+    expect(entry.hideEntryIds).toEqual([]); // best-effort: nothing captured
+    expect(res.details.hideEntryIds).toEqual([]);
+    expect(res.details.ledger).toEqual({ readFiles: [], modifiedFiles: [], bashSideEffects: [] });
+    expect(res.details.k).toBe(0);
+  });
+
+  it("every persisted success marker HAS a hideEntryIds array (the contract: 'every new rewind marker has hideEntryIds populated')", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntryId("e_u", user("u")),
+        msgEntryId("e_X", asst("X")),
+        msgEntryId("e_rX", result("X")),
+        msgEntryId("e_rw", asst("call-1")),
+        msgEntryId("e_rrw", result("call-1")),
+      ],
+    });
+    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    expect(appended).toHaveLength(1);
+    expect(Array.isArray((appended[0].data as RewindMarker).hideEntryIds)).toBe(true);
+  });
+
+  it("hideEntryIds order follows entry order (root→leaf cursor walk) and is deterministic for the same snapshot", async () => {
+    const { appended, pi } = makePi();
+    const snap = [
+      msgEntryId("e_u", user("u")),
+      msgEntryId("e_A", asst("A")),
+      msgEntryId("e_rA", result("A")),
+      msgEntryId("e_B", asst("B")),
+      msgEntryId("e_rB", result("B")),
+      msgEntryId("e_rw", asst("call-1")),
+      msgEntryId("e_rrw", result("call-1")),
+    ];
+    const { ctx } = makeCtx({ contextEntries: snap });
+    // last_tool_call_group excludes call-1 → resolves the B group (most-recent non-excluded) → remove=[3,4]
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    expect(res.details.k).toBe(2);
+    expect((appended[0].data as RewindMarker).hideEntryIds).toEqual(["e_B", "e_rB"]); // root→leaf order
+  });
+});
+
+describe("mulligan_rewind — RewindDetails.hideEntryIds type (fix_design.md §Change 2 audit surface)", () => {
+  it("RewindDetails has hideEntryIds?: string[]", () => {
+    expectTypeOf<RewindDetails>().toMatchTypeOf<{ hideEntryIds?: string[] }>();
+  });
+});
