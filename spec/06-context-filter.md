@@ -92,6 +92,8 @@ Algorithm:
 
 **`applyRewind` for this granularity** = remove the resolved unit's indices from the array (then close the gap).
 
+> **Pinning (permanent hiding):** the relative algorithm above is the **backward-compat fallback**. Markers created by the current `mulligan_rewind` capture the resolved unit's stable **entry IDs** at creation time into `hideEntryIds` (via `captureHideEntryIds`), and `filterPipeline` resolves them by identity every fire via `resolvePinnedHide` (§12). Because entry IDs are stable across session growth, the hidden unit never shifts onto new work — this is what makes the soft-delete permanent (fixes the leak-back of BUG-001). This `resolveLastToolCallGroup` resolver runs only for old markers (or capture failures) that lack `hideEntryIds`. See `@04-data-model.md` §3 for the field and §11 for why pinning is required.
+
 ---
 
 ## 4. `resolveLastTurn`
@@ -113,6 +115,8 @@ Algorithm:
 4. **Pairing:** because removal operates on `partitionIntoUnits`, any assistant+results removed together stay paired. But the "keep the rewind's own unit" exclusion interacts with pairing: the rewind's assistant message might share a unit with sibling tool calls from the same inference (parallel tools). In parallel-tool mode, one assistant message can carry `mulligan_rewind` AND sibling tool calls. Hiding the siblings but keeping the rewind requires **surgical** handling — see §9 (parallel tools). Default: treat the whole assistant message as the rewind's unit only if ALL its toolCalls are `mulligan_rewind`; otherwise fall back to "keep the entire assistant message + all its results" (safe, less surgical).
 
 **`applyRewind` for `last_turn`** = remove `remove` indices (gap-closed), unit-aware.
+
+> **Pinning (permanent hiding):** like `resolveLastToolCallGroup` above, this relative resolver is the **backward-compat fallback**. Current `last_turn` markers pin the entry IDs of the removed span at creation time (`hideEntryIds` via `captureHideEntryIds`) and `filterPipeline` resolves them by identity every fire via `resolvePinnedHide` (§12). This is essential for `last_turn`: without pinning, the agent's own "redo" work lands after the last user message and is hidden on every subsequent fire, trapping the agent in a loop (BUG-002). Pinning makes the redo visible (its entries have new IDs not in the pinned set) while the shed span stays hidden. See `@04-data-model.md` §3 and §11.
 
 ---
 
@@ -151,7 +155,7 @@ function applyShrink(messages: AgentMessage[], marker: ShrinkMarker): AgentMessa
 The only place Mulligan maps entries to messages. Algorithm:
 
 ```ts
-function resolveCheckpoint(messages: AgentMessage[], ctx, checkpointName: string): { remove: number[] } | null
+function resolveCheckpoint(messages: AgentMessage[], branchEntries: SessionEntry[], checkpointName: string, excludeToolCallId?: string): { remove: number[] } | null
 ```
 1. Find the `LabelEntry` with `label === \`mulligan:checkpoint:${name}\`` on the current branch (scan `getEntries()`; the label's `targetId` is the checkpointed entry).
 2. Build the ordered list of **context-producing entries** on the branch up to the leaf, in order: filter `getBranch()` (leaf→root, then reverse) to entries of types that produce a message (`message`, `custom_message`, `compaction`, `branch_summary`). Call this `ctxEntries`.
@@ -161,6 +165,8 @@ function resolveCheckpoint(messages: AgentMessage[], ctx, checkpointName: string
 6. Refuse if `iTarget` falls at/before a protected message (§8).
 
 This mapping is intrinsically fiddlier than the relative granularities; that's why relative granularities are the default and checkpoint is the advanced mode. If the mapping cannot be determined confidently (e.g. a compaction entry lacks `retainedTail`), **refuse safely** and log — never guess.
+
+> **Pinning (permanent hiding):** checkpoint rewinds ALSO pin at creation time. `captureHideEntryIds` runs inside `resolvePreview` (the rewind tool's creation-time snapshot) and captures the entry IDs of the resolved removal set into `hideEntryIds`; `filterPipeline` then resolves them by identity every fire via `resolvePinnedHide`, which generalizes this section's entry→message walk from "one checkpoint target" to "a set of pinned entry IDs". The relative `resolveCheckpoint` above remains the **backward-compat fallback** (old markers / capture failures) AND the producer used at creation time to compute the removal set. Note also: `setCheckpoint` labels the last *real* `message` entry on the branch (walking `getBranch()` backwards), not the raw leaf — this avoids labeling a transient/non-context-producing entry that would make the walk map to the leaf and hide nothing (BUG-003). See `@04-data-model.md` §3 and §11.
 
 ---
 
@@ -229,32 +235,46 @@ Wait — that removed both the grep AND the read, and the rewinds' own calls rem
 
 (If the agent intended only one removal, it would issue one rewind. Two markers = two removals. Deterministic.)
 
-Idempotency: re-firing the filter on the same session reproduces the same result (markers resolve against the same session each time until the session changes). No double-removal because removed messages are absent from subsequent passes within the same fire, and across fires the session is unchanged between user prompts.
+Idempotency: re-firing the filter on the same session reproduces the same result (markers resolve against the same session each time until the session changes). No double-removal because removed messages are absent from subsequent passes within the same fire.
+
+**Within a turn, the session is NOT static across fires.** A tool call appends entries between one `context` fire and the next, so a rewind marker that stores a *relative* spec ("last tool-call group" / "last turn") and is re-resolved against the live message list every fire is unstable: the moment the agent resumes work after a rewind, the relative spec re-targets onto the NEW work, un-hiding the originally-hidden mistake (BUG-001) and/or hiding the agent's own redo on every fire (BUG-002). For this reason, **new markers pin stable entry IDs at creation time** (`hideEntryIds`, captured by `captureHideEntryIds` — see §3/§4/§6 and `@04-data-model.md` §3) and `filterPipeline` resolves them by *identity* every fire via `resolvePinnedHide` (§12). The hidden set is therefore invariant across session growth: the originally-hidden mistake stays hidden every fire; the agent's new work (new entries, new IDs not in the pinned set) stays visible. The relative resolvers below remain ONLY as a backward-compat fallback for old markers (or capture failures) that lack `hideEntryIds`. (Idempotency of the pure pipeline on identical input still holds; the instability was always about re-resolution against a *growing* input, which pinning eliminates.)
 
 ---
 
 ## 12. Pseudocode: the full pipeline (reference)
 
 ```ts
-function filterPipeline(messages: AgentMessage[], markers, config, ctx): AgentMessage[] {
+function filterPipeline(messages: AgentMessage[], markers, config, branchEntries, ctx): AgentMessage[] {
   let m = messages;
-  const units = partitionIntoUnits(m);
   for (const rw of stableSortBySeq(markers.rewinds)) {
     let remove: number[];
-    if (rw.granularity === "last_tool_call_group") {
+
+    // PINNED PATH (permanent hiding — fixes BUG-001/BUG-002): new markers carry stable ENTRY ids captured once
+    // at creation time (captureHideEntryIds). resolvePinnedHide maps them by IDENTITY to current message indices
+    // every fire, so the hidden set never shifts onto new work. A refused pinned hide returns [] and does NOT
+    // fall back to the relative branches below (that would re-introduce the bug). branchEntries is getBranch()
+    // output, ROOT→LEAF (no reverse).
+    const pinned = Array.isArray(rw.hideEntryIds) ? rw.hideEntryIds : [];
+    if (pinned.length > 0) {
+      remove = resolvePinnedHide(m, branchEntries, pinned);
+    } else if (rw.granularity === "last_tool_call_group") {
+      // LEGACY FALLBACK (old markers / capture failures): relative re-resolution. Re-partition FRESH each rewind
+      // (the real code partitions inside the loop, not once before it — a pre-loop partition indexes a stale array
+      // after the first rewind reduces m).
+      const units = partitionIntoUnits(m);
       const u = resolveLastToolCallGroup(units, m, rw.excludeToolCallId);
       remove = u ? u.indices : [];
     } else if (rw.granularity === "last_turn") {
       remove = resolveLastTurn(m, rw.options, rw.excludeToolCallId).remove;
     } else { // checkpoint
-      const res = resolveCheckpoint(m, ctx, rw.checkpoint);
+      const res = resolveCheckpoint(m, branchEntries, rw.checkpoint, rw.excludeToolCallId);
       remove = res ? res.remove : [];
     }
     if (!protectedOk(m, remove, config)) { log("warn","rewind.protected",...); continue; }
     m = removeIndices(m, remove);
   }
   for (const sh of stableSortBySeq(markers.shrinks)) {
-    m = applyShrink(m, sh);
+    m = applyShrink(m, sh);   // shrinks intentionally re-resolve against m each fire (§5) — NOT pinned.
   }
   if (config.nudges.perTurnDrift && markers.metric && shouldNudge(markers.metric, config)) {
     m = injectNudge(m, markers.metric);

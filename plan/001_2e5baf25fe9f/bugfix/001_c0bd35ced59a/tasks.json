@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Fix Rewind Hiding Permanence",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Fix the three critical bugs where rewind hiding is not permanent: BUG-001 (last_tool_call_group leaks back after new work), BUG-002 (last_turn traps agent in infinite loop), BUG-003 (checkpoint hides nothing). The shared root cause is that rewind markers store relative specs re-resolved against the growing message list every context fire. The fix pins stable entry IDs at marker-creation time and fixes the checkpoint resolution path.",
       "milestones": [
         {
@@ -281,21 +281,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync changeset-level documentation",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Update the specification documents to reflect the architectural changes: the corrected idempotency assumption, the pinning mechanism, the hideEntryIds field, and the resolveCheckpoint ordering fix. This is Mode B documentation (changeset-level, cross-cutting) that depends on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Update spec/06 §11 (idempotency), spec/06 §3/§4/§6/§12 (resolver descriptions), spec/04 §3 (RewindMarker hideEntryIds field), and perform a JSDoc sweep on all modified functions.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Update spec/06 idempotency + resolver descriptions",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

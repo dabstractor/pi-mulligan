@@ -123,6 +123,18 @@ interface RewindMarker extends MulliganEnvelope {
    *  rewind's own group when resolving "last tool-call group". Captured from the
    *  tool execute()'s toolCallId argument. */
   excludeToolCallId?: string;
+  /** Stable ENTRY IDs of the messages to hide, pinned ONCE at marker-creation time
+   *  (by `captureHideEntryIds` in the rewind tool's creation-time snapshot). When
+   *  present + non-empty, `filterPipeline` resolves them by identity → current
+   *  message indices via `resolvePinnedHide` (`@06-context-filter.md` §12),
+   *  guaranteeing PERMANENT soft-delete hiding across session growth (fixes
+   *  BUG-001 leak-back + BUG-002 infinite loop: relative specs re-target onto
+   *  new work; pinned entry IDs do not). Holds ENTRY ids (stable Pi
+   *  SessionEntryBase.id UUIDs), NOT message indices (which shift on compaction).
+   *  OPTIONAL for backward compatibility: absent (old markers, or when capture
+   *  failed) → `filterPipeline` falls back to granularity-based relative
+   *  re-resolution. See `@06-context-filter.md` §3/§4/§6/§11. */
+  hideEntryIds?: string[];
   /** Monotonic per-session counter, so the filter can order markers reliably
    *  even if timestamps tie. Maintained in memory + snapshotted in the marker. */
   seq: number;
