@@ -788,7 +788,7 @@
                   "type": "Subtask",
                   "id": "P1.M7.T4.S1",
                   "title": "Create README.md with install, config, tools, and guarantees",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M7.T1.S1",
