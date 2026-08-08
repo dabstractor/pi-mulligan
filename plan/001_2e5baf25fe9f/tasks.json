@@ -618,7 +618,7 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Preventive Nudges",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the two ride-along nudges that help the agent notice when it should rewind or shrink — without ever spending an extra model request. Nudge A: bloated-result reminder (tool_result handler appends reminder to large results). Nudge B: per-turn drift nudge (turn_end records metric, context handler injects one-line annotation on next inference).",
           "tasks": [
             {
@@ -651,7 +651,7 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Per-Turn Drift Nudge (turn_end metric + context injection)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement the zero-extra-request drift nudge: at turn_end, compute the turn's token delta and append a turn-metric entry; at the next context fire, inject a one-line annotation into the message copy if drift/bloat thresholds were crossed. This is the signature 'free ride' mechanism.",
               "subtasks": [
                 {
@@ -675,7 +675,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S2",
                   "title": "Implement shouldNudge and injectNudge for context handler",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T2.S1",
@@ -702,14 +702,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "Extension Factory Wiring (index.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Replace the index.ts stub with the full factory: load config, register all 4 tools, attach all event handlers (context, tool_result, turn_end, session_start, session_shutdown), and wire everything together.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "Wire all tools, handlers, config, and lifecycle in index.ts factory",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S1",

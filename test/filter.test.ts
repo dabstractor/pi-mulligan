@@ -24,8 +24,6 @@ import {
   readMarkers,
   contextHandler,
   registerFilterHandler,
-  shouldNudge,
-  injectNudge,
   type MarkersBundle,
 } from "../src/filter.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
@@ -231,12 +229,38 @@ describe("contextHandler — disabled pass-through, transform+cache, fail-open (
     expect(pipelineCalls[1].branchEntries).toHaveLength(1);                      // saw the NEW branch
   });
 
-  it("does NOT inject the nudge (stub no-op) even when perTurnDrift + a metric exist", () => {
+  it("injects the drift nudge when shouldNudge(metric) is true and not suppressed", () => {
     pipelineReturn = [{ role: "user", content: "P" }];
     const ctx = makeCtx({ sessionId: "s5", entries: [customEntry("mulligan:turn-metric", metricData(1, true))] });
     const result = contextHandler({ type: "context", messages: [] }, ctx) as { messages: unknown[] };
-    // injectNudge stub returns messages unchanged → result equals filterPipeline's output exactly.
-    expect(result.messages).toEqual([{ role: "user", content: "P" }]);
+    // shouldNudge true (grewOverThreshold) + no markers → not suppressed → 1 nudge appended to the END.
+    expect(result.messages).toHaveLength(2);
+    const last = result.messages[1] as Record<string, unknown>;
+    expect(last.role).toBe("custom");
+    expect(last.customType).toBe("mulligan:nudge");
+    expect(last.display).toBe(false);
+    expect(typeof last.content).toBe("string");
+  });
+
+  it("does NOT inject the drift nudge when suppressed by a same-turn rewind marker", () => {
+    pipelineReturn = [{ role: "user", content: "P" }];
+    // metric.ts=1 + rewind.ts=1 → 1 ∈ (1 − window, 1] → suppressed (shouldNudge true but suppress wins).
+    const ctx = makeCtx({
+      sessionId: "s5b",
+      entries: [
+        customEntry("mulligan:turn-metric", metricData(1, true)),
+        customEntry("mulligan:rewind", rewindData(2)),
+      ],
+    });
+    const result = contextHandler({ type: "context", messages: [] }, ctx) as { messages: unknown[] };
+    expect(result.messages).toHaveLength(1); // no nudge
+  });
+
+  it("does NOT inject the drift nudge when shouldNudge is false (no growth, no bloat)", () => {
+    pipelineReturn = [{ role: "user", content: "P" }];
+    const ctx = makeCtx({ sessionId: "s5c", entries: [customEntry("mulligan:turn-metric", metricData(1, false, false))] });
+    const result = contextHandler({ type: "context", messages: [] }, ctx) as { messages: unknown[] };
+    expect(result.messages).toHaveLength(1); // no nudge
   });
 
   it("fail-open: a throwing filterPipeline is caught, logged, and returns undefined (pass-through)", () => {
@@ -273,17 +297,5 @@ describe("registerFilterHandler — arms pi.on('context', contextHandler)", () =
     ) as { messages: unknown[] };
     expect(result.messages).toEqual([{ role: "user", content: "Z" }]);
     expect(pipelineCalls).toHaveLength(1);
-  });
-});
-
-// ── nudge stubs ─────────────────────────────────────────────────────────────────────────────
-
-describe("shouldNudge / injectNudge — no-op stubs (wired in P1.M6.T2.S2)", () => {
-  it("shouldNudge always returns false", () => {
-    expect(shouldNudge({} as never, {} as never)).toBe(false);
-  });
-  it("injectNudge returns the messages array unchanged", () => {
-    const msgs = [{ role: "user", content: "x" }];
-    expect(injectNudge(msgs, {} as never)).toBe(msgs);
   });
 });

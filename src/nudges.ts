@@ -35,12 +35,20 @@ import type {
   TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { getConfig } from "./config.js";
+import type { MulliganConfig } from "./config.js";
 import { getRuntime } from "./runtime.js";
 import { log } from "./log.js";
 import { resultBytes, approxTokens, estimateTokens } from "./tokens.js";
 import type { ResultContentBlock } from "./tokens.js";
-import { renderBloatReminder } from "./notes.js";
-import { appendTurnMetric, type TurnMetricInput } from "./markers.js";
+import { renderBloatReminder, renderDriftNudge } from "./notes.js";
+import {
+  appendTurnMetric,
+  type TurnMetricInput,
+  type TurnMetric,
+  type RewindMarker,
+  type ShrinkMarker,
+} from "./markers.js";
+import type { MessageLike } from "./transforms.js";
 
 /**
  * ToolResultContentBlock — the element type of `ToolResultEvent["content"]` (TextContent | ImageContent). Pi's
@@ -222,4 +230,111 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
   pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext): void => {
     turnEndMetricHandler(pi, event, ctx);
   });
+}
+
+/**
+ * NUDGE_TURN_WINDOW_MS — the heuristic time window for suppressCheck (spec/07 §2 "Edge cases": suppress if a
+ * rewind/shrink marker was created "during the metric's turn"). 10 minutes: a generous bound on a single agent
+ * turn's wall-clock duration. A marker created during the turn that produced the metric falls inside
+ * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]; markers from earlier turns fall outside. EXPORTED so tests can
+ * reference the exact boundary. Best-effort by design (spec/07 §2 frames suppress as a "Simple heuristic"; the
+ * whole nudge subsystem is best-effort). NOT config in v1 (config.ts is frozen by sibling PRPs); a future
+ * iteration may expose it as config.nudges.suppressWindowMs.
+ */
+export const NUDGE_TURN_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * shouldNudge — Nudge B Phase 2 gate (spec/07 §2; spec/06 §1/§12). Pure boolean: fire the drift nudge iff the
+ * latest turn-metric grew context over threshold OR recorded a bloated result. Both fields are computed by Phase 1
+ * (turnEndMetricHandler, P1.M6.T2.S1) at turn_end from the FILTERED view (design principle #6) — no recomputation,
+ * no tokenization, no Pi call here.
+ *
+ * The `_config` arg is the spec/contract signature's second parameter but is UNUSED in v1: the drift threshold was
+ * already applied when the metric's grewOverThreshold was computed at turn_end. Named `_config` per the
+ * accepted-but-unused convention (renderBloatReminder(_toolName, …); estimateTokens(messages, _model?)).
+ *
+ * `=== true` (not just truthy) so a malformed metric — readMarkers casts raw session data, so a field could be
+ * undefined/non-boolean — yields a real `boolean` (never `undefined`), satisfying the `: boolean` return and
+ * failing safe to "no nudge".
+ *
+ * @param metric  the latest mulligan:turn-metric (readMarkers keeps the highest-seq one; null is filtered by the
+ *                caller's `markers.metric` check before this is called).
+ * @param _config the MulliganConfig (ACCEPTED for signature parity; NOT used in v1).
+ * @returns true iff metric.grewOverThreshold || metric.bloatHit.
+ */
+export function shouldNudge(metric: TurnMetric, _config: MulliganConfig): boolean {
+  return metric.grewOverThreshold === true || metric.bloatHit === true;
+}
+
+/**
+ * injectNudge — Nudge B Phase 2 injection (spec/07 §2 "Phase 2: inject at next context fire"). PURE: composes the
+ * one-line annotation via the already-shipped renderDriftNudge (P1.M2.T3.S3 — handles deltaTokens===null first-turn
+ * + bloat-only cases) and appends it as an EPHEMERAL mulligan:nudge CustomMessage to a NEW copy of messages. NEVER
+ * calls pi.sendMessage — the nudge lives ONLY in the returned copy, which is what the model sees THIS inference; Pi
+ * persists the ORIGINAL branch untouched. Each context fire gets a FRESH deep copy from Pi → the nudge is recomputed
+ * from the latest metric each fire and REPLACES (never stacks with) the previous (nothing persists to stack).
+ *
+ * WHY MessageLike[] not AgentMessage[] (GOTCHA #3): the filter.ts call site is
+ * `messages = injectNudge(messages, markers.metric)` where `messages` is MessageLike[] (filterPipeline's return;
+ * the cast to Pi's AgentMessage[] happens at contextHandler's RETURN boundary). AgentMessage[] would not type-check
+ * at the assignment. MessageLike (transforms.ts) has an index signature → the nudge object literal assigns in with
+ * NO cast (GOTCHA #4). renderDriftNudge takes the TurnMetric with NO cast (a real TurnMetric is structurally
+ * assignable to DriftNudgeInput — GOTCHA #5).
+ *
+ * @param messages the filtered message copy (MessageLike[] — the in-flight view the model will see).
+ * @param metric   the latest turn-metric (shouldNudge(metric) is already true when this is called).
+ * @returns a NEW array: [...messages, nudge]. The input is NOT mutated.
+ */
+export function injectNudge(messages: MessageLike[], metric: TurnMetric): MessageLike[] {
+  const line = renderDriftNudge(metric); // TurnMetric → DriftNudgeInput, no cast (GOTCHA #5)
+  const nudge: MessageLike = {
+    role: "custom",
+    customType: "mulligan:nudge",
+    content: line,
+    display: false,
+    details: { ephemeral: true, turnIndex: metric.turnIndex },
+    timestamp: Date.now(),
+  };
+  return [...messages, nudge];
+}
+
+/**
+ * suppressCheck — Nudge B Phase 2 suppress heuristic (spec/07 §2 "Edge cases": "avoid nagging after the agent
+ * already acted"). PURE: returns true (suppress the nudge) iff ANY rewind or shrink marker was created during the
+ * metric's turn, approximated as: some marker.ts falls in the half-open window
+ * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. Returns false otherwise (no markers / all older than the window /
+ * marker ts in the future).
+ *
+ * WHY a window, not a pure upper bound (GOTCHA #7): at nudge-fire time, readMarkers returns the LATEST metric + ALL
+ * accumulated markers. A turn-N marker AND a turn-(N-1) marker both have ts <= metric.ts (the metric is the most-
+ * recently-stamped entry; no turn-(N+1) markers exist at context-fire). So `ts <= metric.ts` alone OVER-SUPPRESSES
+ * (one rewind ever → nudge never fires again). There is no per-turn lower bound without the PREVIOUS metric
+ * (readMarkers keeps only the latest), so a wall-clock window is the best-effort resolution the spec calls a
+ * "Simple heuristic". Read ts defensively; a non-finite ts → treated as NOT in window (no suppress → fail to nudge,
+ * the safe direction for an advisory nudge).
+ *
+ * WHY a structural markers param (GOTCHA #6): filter.ts imports these functions from nudges.ts, so nudges.ts must
+ * NOT import MarkersBundle from filter.ts (circular). The param is `{ rewinds: ReadonlyArray<RewindMarker>;
+ * shrinks: ReadonlyArray<ShrinkMarker> }`; filter.ts's MarkersBundle is structurally assignable (the extra `metric`
+ * field is ignored for assignability-to-param). Call site: `suppressCheck(markers.metric, markers)`.
+ *
+ * @param metric  the latest turn-metric (metric.ts bounds the window's upper end).
+ * @param markers { rewinds, shrinks } — the persisted rewind/shrink markers on the branch (MarkersBundle shape).
+ * @returns true iff some marker.ts ∈ (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts].
+ */
+export function suppressCheck(
+  metric: TurnMetric,
+  markers: { rewinds: ReadonlyArray<RewindMarker>; shrinks: ReadonlyArray<ShrinkMarker> },
+): boolean {
+  const metricTs = typeof metric.ts === "number" && Number.isFinite(metric.ts) ? metric.ts : 0;
+  const lo = metricTs - NUDGE_TURN_WINDOW_MS;
+  for (const m of markers.rewinds) {
+    const ts = typeof m.ts === "number" && Number.isFinite(m.ts) ? m.ts : NaN;
+    if (Number.isFinite(ts) && ts > lo && ts <= metricTs) return true;
+  }
+  for (const m of markers.shrinks) {
+    const ts = typeof m.ts === "number" && Number.isFinite(m.ts) ? m.ts : NaN;
+    if (Number.isFinite(ts) && ts > lo && ts <= metricTs) return true;
+  }
+  return false;
 }

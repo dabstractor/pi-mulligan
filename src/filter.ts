@@ -44,10 +44,10 @@ import type { MessageLike, BranchEntry } from "./transforms.js";
 import { getRuntime } from "./runtime.js";
 import type { AgentMessage } from "./runtime.js"; // local opaque alias (Pi's AgentMessage is NOT exported)
 import { getConfig } from "./config.js";
-import type { MulliganConfig } from "./config.js";
 import { log } from "./log.js";
 import { estimateTokens } from "./tokens.js";
 import type { RewindMarker, ShrinkMarker, TurnMetric } from "./markers.js";
+import { shouldNudge, injectNudge, suppressCheck } from "./nudges.js";
 
 // ── module-private defensive helpers (mirror transforms.ts/notes.ts — never throw) ───
 
@@ -154,28 +154,6 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
   return { rewinds, shrinks, metric };
 }
 
-// ── Nudge stubs (P1.M6.T2.S2 replaces these with real imports from nudges.ts) ────────────────
-
-/**
- * shouldNudge — STUB. The real rule (spec/07 §2): `metric.grewOverThreshold || metric.bloatHit`. Returns
- * false now so the v1 handler does not inject (nudges ship in P1.M6). P1.M6.T2.S2 will delete this stub
- * and `import { shouldNudge } from "./nudges.js"`. EXPORTED so the test asserts the no-op + the swap is
- * a find/replace. Signature matches the eventual real one.
- */
-export function shouldNudge(_metric: TurnMetric, _config: MulliganConfig): boolean {
-  return false; // no-op stub — wired in P1.M6.T2.S2
-}
-
-/**
- * injectNudge — STUB. The real impl (spec/07 §2) appends an ephemeral `mulligan:nudge` CustomMessage to
- * the copy (never persisted). Returns `messages` unchanged now. P1.M6.T2.S2 will replace this with the
- * real import. EXPORTED for the test + the swap. Typed with transforms.ts's MessageLike (the in-flight
- * copy type) so it composes with filterPipeline without Pi's AgentMessage.
- */
-export function injectNudge(messages: MessageLike[], _metric: TurnMetric): MessageLike[] {
-  return messages; // no-op stub — wired in P1.M6.T2.S2
-}
-
 // ── contextHandler — the heart of the extension (spec/03 §7, spec/06 §1) ─────────────────────
 
 /**
@@ -216,9 +194,15 @@ export function contextHandler(event: ContextEvent, ctx: ExtensionContext): Cont
       branchEntries as unknown as BranchEntry[],
     );
 
-    // Per-turn drift nudge (spec/07 §2). shouldNudge/injectNudge are no-op stubs for now (P1.M6.T2 wires
-    // them); the gate is written so it lights up automatically once the stubs are replaced.
-    if (config.nudges.perTurnDrift && markers.metric && shouldNudge(markers.metric, config)) {
+    // Per-turn drift nudge (spec/07 §2). shouldNudge/injectNudge/suppressCheck are imported from nudges.ts
+    // (P1.M6.T2.S2). Suppress avoids nagging when the agent already acted that turn (a rewind/shrink marker
+    // within the turn's time window — spec/07 §2 "Edge cases").
+    if (
+      config.nudges.perTurnDrift &&
+      markers.metric &&
+      shouldNudge(markers.metric, config) &&
+      !suppressCheck(markers.metric, markers)
+    ) {
       messages = injectNudge(messages, markers.metric);
     }
 
