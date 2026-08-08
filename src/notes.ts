@@ -1,3 +1,6 @@
+import type { FileLedger } from "./ledger.js";
+import type { Granularity } from "./config.js";
+
 /**
  * notes.ts — Mulligan's note validation + rendering (pure helpers).
  * spec/04-data-model.md §2.1 (NoteInput), spec/05-tools.md §1 step 2 (validate note: all four non-empty),
@@ -117,4 +120,104 @@ function readOwn(obj: unknown, key: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 (P1.M2.T3.S2) — renderNote (spec/04-data-model.md §2.3 — the mulligan:note CustomMessage content)
+// APPENDED below the S1 exports (NoteInput, NoteValidation, NOTE_INVALID_REASON, validateNote) and the
+// module-private isRecord/readOwn helpers, which are UNCHANGED and REUSED here. This module now imports
+// TYPE-ONLY { FileLedger } (from ledger.js) + { Granularity } (from config.js) — erased at compile time, so
+// notes.ts stays Pi-free and unit-testable in isolation (notes.ts is the pure-helper tier, NOT a permanent
+// zero-imports gate — see S1 PRP GOTCHA #2). renderNote is pure and is unit-tested with snapshot-style cases
+// (spec/10 §1.8).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The three ledger block descriptors, in spec/04 §2.3 order (read → modified → bash). Each tuple is
+ * [rendered-tag, FileLedger-field]. Module-local.
+ */
+const LEDGER_BLOCKS: ReadonlyArray<readonly [tag: string, field: keyof FileLedger]> = [
+  ["files-read", "readFiles"],
+  ["files-modified", "modifiedFiles"],
+  ["bash-side-effects", "bashSideEffects"],
+];
+
+/**
+ * renderNote — compose the markdown note the resumed model reads as the `mulligan:note` CustomMessage content
+ * (spec/04-data-model.md §2.3). PURE: it interpolates the (already-validated) NoteInput + the deterministic
+ * FileLedger + the Granularity into the pinned markdown shape. Called by tools/rewind.ts step 5 (spec/05 §1)
+ * AFTER validateNote has passed (step 2) and the ledger is composed; the returned string becomes
+ * `pi.sendMessage({ customType:"mulligan:note", content: <this>, display:true, details:{...} })` (spec/05 §1
+ * step 6; spec/04 §3).
+ *
+ * FORMAT (spec/04 §2.3 — built by joining these sections with a blank line, i.e. "\n\n"):
+ *     ## 🔄 Mulligan rewind (<granularity>)
+ *     **What happened:** <what_happened>
+ *     **Avoid:** <avoid>
+ *     **Current true state:** <true_current_state>
+ *     <files-read>…</files-read>                ← omitted iff ledger.readFiles is empty
+ *     <files-modified>…</files-modified>        ← omitted iff ledger.modifiedFiles is empty
+ *     <bash-side-effects>…</bash-side-effects>  ← omitted iff ledger.bashSideEffects is empty
+ *     **Next:** <next>
+ * Each ledger block is `<tag>\n<item1>\n<item2>\n…\n</tag>` (items joined by "\n", one per line). The block tags
+ * mirror Pi's compaction summary convention so a model accustomed to compaction parses them naturally (spec/04
+ * §2.3). The granularity is interpolated VERBATIM (e.g. "last_turn", NOT "Last turn"). No trailing newline.
+ *
+ * DEFENSIVE — NEVER throws (rewind-tool hot path; E13 discipline). note fields are read via readOwn (Proxy-safe;
+ * a throwing-Proxy get-trap returns undefined, not an exception); a non-record note or non-array ledger list
+ * renders gracefully (treated as empty strings / empty block) rather than crashing. renderNote does NOT re-validate
+ * the note — validateNote (step 2) already guarantees every field is a non-empty string in real use; this function
+ * just renders whatever it is given, defensively. Field VALUES are rendered AS-IS (spec/04 §2.3).
+ *
+ * @param note        the agent's NoteInput (validateNote has already accepted it)
+ * @param ledger      the deterministic FileLedger from extractFileLedger (P1.M2.T2.S1)
+ * @param granularity the rewind granularity, interpolated into the header verbatim
+ * @returns the markdown string (sections separated by blank lines; NO trailing newline)
+ */
+export function renderNote(
+  note: NoteInput,
+  ledger: FileLedger,
+  granularity: Granularity,
+): string {
+  const sections: string[] = [
+    `## 🔄 Mulligan rewind (${granularity})`,
+    `**What happened:** ${readNoteField(note, "what_happened")}`,
+    `**Avoid:** ${readNoteField(note, "avoid")}`,
+    `**Current true state:** ${readNoteField(note, "true_current_state")}`,
+  ];
+  for (const [tag, field] of LEDGER_BLOCKS) {
+    const items = readLedgerList(ledger, field);
+    if (items.length > 0) {
+      sections.push(`<${tag}>\n${items.join("\n")}\n</${tag}>`);
+    }
+  }
+  sections.push(`**Next:** ${readNoteField(note, "next")}`);
+  return sections.join("\n\n");
+}
+
+/**
+ * Read a NoteInput field as a string ("" if absent/non-string); defensive, never throws (a Proxy get-trap may
+ * throw — readOwn swallows it). Module-private; reuses S1's readOwn. The literal-union key keeps the call sites
+ * type-checked against the real NoteInput field names.
+ */
+function readNoteField(
+  note: unknown,
+  key: "what_happened" | "avoid" | "true_current_state" | "next",
+): string {
+  const v = readOwn(note, key);
+  return typeof v === "string" ? v : "";
+}
+
+/**
+ * Read a FileLedger list as a string[] (filtering to string elements; [] if absent/non-array). Defensive, never
+ * throws. Module-private; reuses S1's readOwn. The `keyof FileLedger` keeps the call sites type-checked.
+ */
+function readLedgerList(ledger: unknown, field: keyof FileLedger): string[] {
+  const v = readOwn(ledger, field);
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const item of v) {
+    if (typeof item === "string") out.push(item);
+  }
+  return out;
 }

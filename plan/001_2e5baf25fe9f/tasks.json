@@ -144,7 +144,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Pure Helper Library (Zero Pi Dependency)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the three pure helper modules that have NO Pi dependency and are fully unit-testable without Pi, model, or session: token estimation (tokens.ts), file ledger extraction (ledger.ts), and note validation/rendering (notes.ts). These are the foundation of Mulligan's correctness surface.",
           "tasks": [
             {
@@ -213,7 +213,7 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Note Validation & Rendering (notes.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the note validation (all 4 fields required non-empty), note rendering (markdown with conditional ledger blocks), and the two nudge text renderers (bloat reminder, drift nudge). All pure functions.",
               "subtasks": [
                 {
@@ -234,7 +234,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Implement renderNote(note, ledger, granularity) with conditional ledger blocks",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1",
@@ -249,7 +249,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S3",
                   "title": "Implement renderBloatReminder and renderDriftNudge text renderers",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T3.S1"
