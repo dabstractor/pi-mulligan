@@ -361,14 +361,14 @@
               "type": "Task",
               "id": "P1.M3.T4",
               "title": "Transform Application (Rewind Removal & Shrink Substitution)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement applyRewind (unit-aware gap-closing removal of a set of indices) and resolveShrinkTarget + applyShrink (three matcher strategies for finding a message and substituting its content while preserving pairing-relevant fields).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T4.S1",
                   "title": "Implement applyRewind — unit-aware gap-closing index removal",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -382,7 +382,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T4.S2",
                   "title": "Implement resolveShrinkTarget and applyShrink with three matcher strategies",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M3.T1.S1"

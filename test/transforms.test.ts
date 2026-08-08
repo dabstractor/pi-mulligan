@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, type Unit, type MessageLike, type BranchEntry } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, type Unit, type MessageLike, type BranchEntry } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -880,5 +880,108 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     expectTypeOf(resolveCheckpoint([], [], "x")).toEqualTypeOf<{ remove: number[] } | null>();
     const ok = resolveCheckpoint([user("u")], [labelEntry("eL", "e1", "x"), entry("e1", "message")], "x");
     expectTypeOf(ok).toEqualTypeOf<{ remove: number[] } | null>();
+  });
+});
+
+describe("applyRewind — spec/10 §1.4 PINNED contract + defensive + composition", () => {
+  it("empty remove → input UNCHANGED — SAME reference (idempotent; applyShrink §5:133 precedent)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+    // Intentional strengthening: spec says "input unchanged" (content); same-ref is the strict reading + convention.
+    expect(applyRewind(msgs, [])).toBe(msgs);
+  });
+
+  it("basic removal + gap-close: drop middle indices → contiguous result, no holes, elements renumbered", () => {
+    const msgs: MessageLike[] = [user("u0"), asst("c1"), result("c1"), user("u1"), asstText("x")];
+    // remove indices 1,2 (an asst+result toolGroup) → survivors [u0, u1, asstText] shift into 0,1,2 (gap closed).
+    const out = applyRewind(msgs, [1, 2]);
+    expect(out).toHaveLength(3);
+    expect(out.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+    expect(out[0]).toBe(msgs[0]); // u0 preserved
+    expect(out[1]).toBe(msgs[3]); // u1 shifted into index 1 (gap closed)
+    expect(out[2]).toBe(msgs[4]); // asstText shifted into index 2 (gap closed)
+  });
+
+  it("spec/10 §1.4 bullet 1 — removing a toolGroup unit keeps pairing intact (no orphan results/calls)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1"), asst("c2"), result("c2"), asstText("tail")];
+    // Partition → toolGroup{1,2}, toolGroup{3,4}, plain{0}, plain{5}. Remove the FIRST toolGroup (its indices).
+    const units = partitionIntoUnits(msgs);
+    const firstToolGroup = units.find((u) => u.kind === "toolGroup")!;
+    const out = applyRewind(msgs, firstToolGroup.indices);
+    // Re-partition the result + assert NO orphan: every remaining toolResult has a matching assistant & vice versa.
+    expectPairingInvariant(out, partitionIntoUnits(out));
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]); // 2nd toolGroup + tail survive
+  });
+
+  it("spec/10 §1.4 bullet 2 — removing last_turn keeps the rewind's OWN unit + mulligan notes at the tail (composition)", () => {
+    // [user(u1), asst(grep), result(grep), mulligan:note, asst(rewind), result(rewind)]
+    // resolveLastTurn default (exclude the rewind's call) → remove the grep toolGroup (idx 1,2); KEEP the note
+    // (idx3) + the rewind's own unit (idx4,5). applyRewind closes the gap → tail keeps note + own unit.
+    const exclude = "rewind-call";
+    const msgs: MessageLike[] = [
+      user("u1"), asst("grep"), result("grep"), custom("mulligan:note"), asst(exclude), result(exclude),
+    ];
+    const { remove } = resolveLastTurn(msgs, {}, exclude);
+    expect(remove).toEqual([1, 2]); // the resolver computed a UNIT-AWARE removal (DERIVED by simulation — NOT copied from spec/06 §11)
+    const out = applyRewind(msgs, remove);
+    expect(out.map((m) => m.role)).toEqual(["user", "custom", "assistant", "toolResult"]); // tail = [user] + [note] + [rewind asst + result]
+    expect((out[1] as MessageLike).customType).toBe("mulligan:note"); // the note survived
+    expect(out[2]).toBe(msgs[4]); // the rewind's OWN assistant survived
+    expect(out[3]).toBe(msgs[5]); // the rewind's OWN result survived
+    expectPairingInvariant(out, partitionIntoUnits(out)); // no orphans
+  });
+
+  it("defensive: non-array messages → [] (mirrors partitionIntoUnits)", () => {
+    expect(applyRewind(null as unknown as MessageLike[], [1])).toEqual([]);
+    expect(applyRewind(undefined as unknown as MessageLike[], [0])).toEqual([]);
+  });
+
+  it("defensive: non-array remove → messages UNCHANGED (same reference, treated as no removal)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+    expect(applyRewind(msgs, null as unknown as number[])).toBe(msgs);
+    expect(applyRewind(msgs, undefined as unknown as number[])).toBe(msgs);
+  });
+
+  it("defensive: out-of-range / negative / non-number / duplicate indices in remove are HARMLESS", () => {
+    const msgs: MessageLike[] = [user("a"), user("b"), user("c")];
+    // remove=[1, 1, 99, -3, NaN, "x"] → only index 1 is a valid match → [a, c].
+    expect(applyRewind(msgs, [1, 1, 99, -3, NaN, "x" as unknown as number])).toEqual([msgs[0], msgs[2]]);
+    // remove with NO valid numbers → unchanged (same reference).
+    expect(applyRewind(msgs, [NaN, "y" as unknown as number])).toBe(msgs);
+  });
+
+  it("spec/08 E13 — NEVER throws: a throwing-Proxy element is never read (the filter callback ignores the element)", () => {
+    const trap: MessageLike = new Proxy(
+      { role: "user", content: "x" } as MessageLike,
+      new Proxy({}, { get() { throw new Error("trap"); } }),
+    );
+    const msgs: MessageLike[] = [user("keep"), trap, user("also")];
+    // Removing index 1 (the trap) must not crash: filter never reads the trap's properties.
+    expect(() => applyRewind(msgs, [1])).not.toThrow();
+    expect(applyRewind(msgs, [1])).toHaveLength(2);
+    // Keeping the trap (removing a DIFFERENT index) must not crash either — the trap element is only copied by
+    // reference into the result array, never introspected.
+    expect(() => applyRewind(msgs, [0])).not.toThrow();
+    expect(applyRewind(msgs, [0])).toHaveLength(2);
+  });
+
+  it("spec/10 §3 — monotonic shrinkage: result.length <= messages.length for any remove", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c"), asstText("t")];
+    expect(applyRewind(msgs, []).length).toBeLessThanOrEqual(msgs.length);
+    expect(applyRewind(msgs, [1, 2]).length).toBeLessThanOrEqual(msgs.length);
+    expect(applyRewind(msgs, [0, 1, 2, 3]).length).toBeLessThanOrEqual(msgs.length);
+  });
+
+  it("purity: never mutates the input array (filter returns a new array; empty path returns the same unmuted ref)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+    const snapshot = [...msgs];
+    applyRewind(msgs, [1]);
+    applyRewind(msgs, []);
+    expect(msgs).toEqual(snapshot); // input untouched
+    expect(msgs).toHaveLength(3);
+  });
+
+  it("returns MessageLike[] (the array type, not null/wrapped)", () => {
+    expectTypeOf(applyRewind([], [])).toEqualTypeOf<MessageLike[]>();
+    expectTypeOf(applyRewind([user("u")], [0])).toEqualTypeOf<MessageLike[]>();
   });
 });

@@ -532,3 +532,58 @@ function entryMessageYield(entry: unknown): number {
 function isContextProducingType(type: unknown): boolean {
   return type === "message" || type === "custom_message" || type === "branch_summary" || type === "compaction";
 }
+
+/**
+ * applyRewind — the PURE gap-closing index-removal helper for rewind application (spec/06-context-filter.md
+ * §3, §4, §12). The DUMB half of rewind: the resolvers (resolveLastToolCallGroup / resolveLastTurn /
+ * resolveCheckpoint — sibling functions above) compute UNIT-AWARE `remove` index sets; `applyRewind` filters
+ * those indices out and closes the gap. Pairing is preserved BY CONSTRUCTION because the caller already removed
+ * whole units (a toolGroup's [assistant, ...results] go together — never orphaning either side — spec/06 §3/§4
+ * "applyRewind for this granularity = remove the resolved unit's indices, then close the gap").
+ *
+ * CONTRACT (spec/06 §12 call site, `m = applyRewind(m, remove)`):
+ *   - INPUT: `messages` (a real Pi AgentMessage[] assigns in with no cast via the MessageLike[] param), `remove`
+ *     (a number[] of message indices to drop — ascending, from a resolver; possibly empty).
+ *   - EMPTY `remove` (or a remove with no numeric entries) → return `messages` UNCHANGED (SAME reference). This
+ *     is the documented idempotent no-op (spec/10 §1.4; spec/06 §12 reaches here with remove=[] whenever a
+ *     resolver returns null/empty — spec/08 E8). Same-reference matches the applyShrink precedent (spec/06 §5
+ *     L133) and is safe for the `lastFiltered` cache + mulligan_audit (content consumers — spec/06 §7 L174).
+ *   - NON-ARRAY `messages` → return `[]` (defensive; mirrors partitionIntoUnits L113). NON-ARRAY `remove` → treat
+ *     as no removal → return `messages` unchanged (same reference).
+ *   - OUT-OF-RANGE / negative / non-number / duplicate entries in `remove` → harmless (they never match a valid
+ *     array index). The resolvers never emit those, but the function stays TOTAL regardless.
+ *
+ * WHY filter (not a hand-rolled splice loop): `Array.filter` returns a CONTIGUOUS new array → the gap is closed
+ * for free (spec/06 §3/§4 "close the gap"). The callback IGNORES the element (`_msg`) so a throwing-Proxy message
+ * element's get-trap NEVER fires → applyRewind NEVER throws on malformed/proxy messages (spec/08 E13) even though
+ * it uses no isRecord/readOwn — it is the ONE transform that touches no message internals (trivially safe vs the
+ * siblings, which read role/content/customType).
+ *
+ * Pure + defensive + TOTAL: non-array messages → []; non-array/empty remove → messages unchanged; out-of-range/
+ * negative/non-number/duplicate indices → harmless; throwing-Proxy elements → never read → never throws (E13;
+ * context-handler hot path via filterPipeline T5.S1). Side-effect-free (never mutates `messages`). NO new imports
+ * (reuses MessageLike already in module scope; `grep -c '^import' src/transforms.ts` stays 0).
+ *
+ * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
+ * @param remove ascending message indices to drop (from a resolver); empty/non-array → messages unchanged
+ * @returns a NEW array with `remove` indices dropped (gap closed); the SAME array reference when nothing is removed
+ */
+export function applyRewind(messages: MessageLike[], remove: number[]): MessageLike[] {
+  // Defensive: a non-array messages (shouldn't happen) → []. Non-array/empty remove → messages unchanged (no-op).
+  if (!Array.isArray(messages)) return [];
+  if (!Array.isArray(remove) || remove.length === 0) return messages;
+
+  // Build a Set of NUMERIC removal indices. Non-numbers / out-of-range / negatives / NaN never match a valid
+  // array index → harmless (the resolvers never emit those, but stay total). Dedup is free. NaN is excluded
+  // because typeof NaN === "number" but NaN is never a usable array index (NaN !== NaN) — excluding it keeps
+  // a remove like [NaN, "x"] a true no-op (same-reference) per the spec/10 §1.4 contract.
+  const removeSet = new Set<number>();
+  for (const r of remove) {
+    if (typeof r === "number" && !Number.isNaN(r)) removeSet.add(r);
+  }
+  if (removeSet.size === 0) return messages; // no valid indices → unchanged (idempotent)
+
+  // Filter out the indices to remove; Array.filter yields a contiguous new array (gap closed — spec/06 §3/§4).
+  // The callback IGNORES the element → a throwing-Proxy element's get-trap never fires → never throws (E13).
+  return messages.filter((_msg, i) => !removeSet.has(i));
+}
