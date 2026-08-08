@@ -821,6 +821,14 @@ export interface RewindMarkerLike {
   /** toolCallId of THIS rewind's own tool call (filter skips its group for last_tool_call_group; keeps its unit for
    *  last_turn/checkpoint). Absent/empty/non-string → not skipped/kept. */
   excludeToolCallId?: string;
+  /**
+   * Stable entry IDs of the messages to hide, pinned at marker-creation time (fix_design.md §Change 1). filterPipeline
+   * dispatches on this FIRST: when it is a non-empty array, resolvePinnedHide maps the IDs → current message indices
+   * and removes them (permanent hiding across session growth — fixes BUG-001/BUG-002). Absent/empty (old markers, or
+   * capture failure) → falls back to granularity-based relative re-resolution (backward compat). Read defensively via
+   * readOwn(rw,"hideEntryIds"). OPTIONAL. Holds ENTRY ids (stable), NOT message indices (which shift on compaction).
+   */
+  hideEntryIds?: string[];
   /** checkpoint only — the checkpoint name (without the mulligan:checkpoint: prefix). Absent → checkpoint rewind no-ops. */
   checkpoint?: string;
 }

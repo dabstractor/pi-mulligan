@@ -405,6 +405,15 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(m.ts).toEqualTypeOf<number>();
   });
 
+  it("RewindMarker/RewindMarkerInput carry optional hideEntryIds (fix_design.md §Change 1; backward-compat)", () => {
+    // RewindMarkerInput is Omit<RewindMarker,…> → hideEntryIds propagates from RewindMarker. Omitted is valid:
+    const withoutHide: RewindMarkerInput = REWIND_DATA; // already omits hideEntryIds → compiles (old markers)
+    // …and present is valid (new markers):
+    const withHide: RewindMarkerInput = { ...REWIND_DATA, hideEntryIds: ["e1", "e2"] };
+    expectTypeOf(withHide.hideEntryIds).toEqualTypeOf<string[] | undefined>();
+    expectTypeOf(withoutHide.hideEntryIds).toEqualTypeOf<string[] | undefined>();
+  });
+
   it("TurnMetric has NO `id` field and deltaTokens is number | null (GOTCHA #4, #6)", () => {
     const m = {} as TurnMetric;
     expectTypeOf(m).not.toHaveProperty("id");
