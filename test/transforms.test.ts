@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, type Unit, type MessageLike } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, type Unit, type MessageLike, type BranchEntry } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -729,5 +729,156 @@ describe("resolveLastTurn — purity, ordering, types", () => {
     expectTypeOf(resolveLastTurn([], {})).toEqualTypeOf<{ remove: number[] }>();
     expectTypeOf(resolveLastTurn([], { to_previous_prompt: true })).toEqualTypeOf<{ remove: number[] }>();
     expectTypeOf(resolveLastTurn([], undefined, "x")).toEqualTypeOf<{ remove: number[] }>();
+  });
+});
+
+// ── resolveCheckpoint (checkpoint targeting — entry→message mapping; spec/06 §6) ────────────
+
+/** Build a minimal branch entry (SessionEntry-like). */
+function entry(id: string, type: BranchEntry["type"], extra: Record<string, unknown> = {}): BranchEntry {
+  return { type, id, parentId: null, timestamp: "t", ...extra };
+}
+
+/** Build a mulligan:checkpoint LabelEntry pointing at targetId. */
+function labelEntry(id: string, targetId: string, name: string): BranchEntry {
+  return { type: "label", id, parentId: null, timestamp: "t", targetId, label: `mulligan:checkpoint:${name}` };
+}
+
+describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defensive + tail-exclusions", () => {
+  // NOTE: getBranch() is LEAF→ROOT; we build branchEntries in that order. Each context-producing entry yields
+  // exactly 1 message, so messages[k] corresponds 1:1 to the k-th context-producing entry (root→leaf).
+
+  it("(clean) basic mapping — checkpoint mid-branch removes strictly-later work, keeps the point + before", () => {
+    // root→leaf context-producing entries → messages (1:1):
+    //   e1 user   → msgs[0]
+    //   e2 asst   → msgs[1]   ← CHECKPOINT targetId = e2  (iTarget = 1)
+    //   e3 result → msgs[2]   ← removed (> iTarget, not excluded)
+    //   e4 asst(text) → msgs[3] ← removed
+    const msgs: MessageLike[] = [user("u1"), asst("c1"), result("c1"), asstText("junk")];
+    // branchEntries LEAF→ROOT (getBranch order):
+    const branchEntries: BranchEntry[] = [
+      entry("e4", "message"), entry("e3", "message"), labelEntry("eL", "e2", "ckpt"),
+      entry("e2", "message"), entry("e1", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branchEntries, "ckpt");
+    expect(res).not.toBeNull();
+    expect(res!.remove).toEqual([2, 3]); // e3(result) + e4(text asst); e2 (the checkpoint) KEPT at idx1
+  });
+
+  it("keeps the checkpoint point itself (iTarget never in remove) and everything before", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")]; // idx0 user, idx1 asst, idx2 result
+    // checkpoint targets e_asst (idx1). iTarget=1. remove=[2].
+    const branch: BranchEntry[] = [
+      entry("e_result", "message"), labelEntry("eL", "e_asst", "p"), entry("e_asst", "message"), entry("e_user", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "p");
+    expect(res!.remove).toEqual([2]);
+    expect(res!.remove).not.toContain(1); // checkpoint point kept
+    expect(res!.remove).not.toContain(0); // earlier message kept
+  });
+
+  it("tail-exclusion: the rewind's own unit (assistant+result issuing excludeToolCallId) survives after iTarget", () => {
+    // iTarget = 0 (checkpoint at user). After it: asst(rw)+result(rw) [own unit, KEPT] + asst(text)[removed].
+    const msgs: MessageLike[] = [user("u"), asst("rw-call"), result("rw-call"), asstText("bad")];
+    const branch: BranchEntry[] = [
+      entry("e_text", "message"), entry("e_result", "message"), entry("e_asst_rw", "message"),
+      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "k", "rw-call");
+    expect(res!.remove).toEqual([3]); // asst(text) removed; the rewind's own unit (idx1,2) KEPT; checkpoint user idx0 kept
+    expect(res!.remove).not.toContain(1);
+    expect(res!.remove).not.toContain(2);
+  });
+
+  it("tail-exclusion: a mulligan:note / mulligan:nudge custom_message after iTarget survives", () => {
+    const msgs: MessageLike[] = [user("u"), result("c"), custom("mulligan:note"), custom("mulligan:nudge")];
+    // checkpoint at user (idx0). After it: result(idx1, removed), note(idx2 KEPT), nudge(idx3 KEPT).
+    const branch: BranchEntry[] = [
+      entry("e_nudge", "custom_message"), entry("e_note", "custom_message"), entry("e_result", "message"),
+      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "k");
+    expect(res!.remove).toEqual([1]); // only the result removed; note + nudge survive
+  });
+
+  it("compaction between root and checkpoint → REFUSE (null) — mapping indeterminate (spec/06 §6 / Known Gotcha #1)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+    // root→leaf: compaction, then user, asst, result. checkpoint targets the asst AFTER compaction.
+    const branch: BranchEntry[] = [
+      entry("e_result", "message"), labelEntry("eL", "e_asst", "k"), entry("e_asst", "message"),
+      entry("e_user", "message"), entry("e_comp", "compaction", { summary: "s", firstKeptEntryId: "e_user" }),
+    ];
+    expect(resolveCheckpoint(msgs, branch, "k")).toBeNull();
+  });
+
+  it("compaction AFTER the checkpoint is not walked → mapping succeeds (refuse only fires for compaction in the walked range)", () => {
+    // root→leaf: user, asst(ck), result, COMPACTION(leaf). checkpoint targets asst (before compaction) → walk never
+    // reaches the compaction entry → mapping OK. iTarget = asst's index; remove = everything after it.
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c"), asstText("post")];
+    const branch: BranchEntry[] = [
+      entry("e_comp", "compaction", { summary: "s", firstKeptEntryId: "e_result" }),
+      entry("e_post", "message"), entry("e_result", "message"), labelEntry("eL", "e_asst", "k"),
+      entry("e_asst", "message"), entry("e_user", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "k");
+    expect(res).not.toBeNull();
+    expect(res!.remove).toEqual([2, 3]); // result(idx2) + post-compaction asst(idx3) removed; checkpoint asst(idx1) kept
+  });
+
+  it("checkpoint not found on branch → null (spec/08 E10)", () => {
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")];
+    expect(resolveCheckpoint([user("u")], branch, "nope")).toBeNull();
+  });
+
+  it("checkpoint targetId labels a NON-context-producing entry (e.g. a custom marker) → filtered out → null (never guess)", () => {
+    const branch: BranchEntry[] = [
+      labelEntry("eL", "e_marker", "k"), entry("e_marker", "custom", { customType: "mulligan:rewind", data: {} }),
+      entry("e_user", "message"),
+    ];
+    expect(resolveCheckpoint([user("u")], branch, "k")).toBeNull();
+  });
+
+  it("nothing after iTarget → { remove: [] } (determinable-but-empty, NOT null)", () => {
+    // checkpoint at the LAST context-producing entry → iTarget = last index → nothing after → remove = [].
+    const msgs: MessageLike[] = [user("u"), asst("c")];
+    const branch: BranchEntry[] = [
+      labelEntry("eL", "e_asst", "k"), entry("e_asst", "message"), entry("e_user", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "k");
+    expect(res).not.toBeNull();
+    expect(res!.remove).toEqual([]);
+  });
+
+  it("defensive: non-array messages → null; non-array branchEntries → null; empty checkpointName → null", () => {
+    expect(resolveCheckpoint(null as unknown as MessageLike[], [], "k")).toBeNull();
+    expect(resolveCheckpoint([], null as unknown as BranchEntry[], "k")).toBeNull();
+    expect(resolveCheckpoint([], [], "")).toBeNull();
+    // "   " is a non-empty string → NOT auto-refused by the guard (guard is non-EMPTY, not non-blank); it simply
+    // won't match a label → null via not-found.
+    expect(resolveCheckpoint([], [], "   ")).toBeNull();
+  });
+
+  it("excludeToolCallId absent/empty/non-string → rewind's own unit NOT kept (removed with the rest); note still survives", () => {
+    const msgs: MessageLike[] = [user("u"), asst("rw-call"), result("rw-call"), custom("mulligan:note")];
+    const branch: BranchEntry[] = [
+      entry("e_note", "custom_message"), entry("e_result", "message"), entry("e_asst", "message"),
+      labelEntry("eL", "e_user", "k"), entry("e_user", "message"),
+    ];
+    // No excludeToolCallId → the asst(rw)+result are NOT protected → removed. note survives.
+    expect(resolveCheckpoint(msgs, branch, "k")!.remove).toEqual([1, 2]);
+    expect(resolveCheckpoint(msgs, branch, "k", "")!.remove).toEqual([1, 2]); // empty → not kept
+  });
+
+  it("never throws on throwing-Proxy messages/entries (E13 — context-handler hot path)", () => {
+    const throwingMsg = new Proxy({}, { get() { throw new Error("trap"); } });
+    const throwingEntry = new Proxy({}, { get() { throw new Error("trap"); } }) as unknown as BranchEntry;
+    // No assertion value — just that it returns null (or an object) WITHOUT throwing.
+    expect(() => resolveCheckpoint([throwingMsg as unknown as MessageLike], [throwingEntry], "k")).not.toThrow();
+  });
+
+  it("returns { remove: number[] } | null (the exact union, never a bare array)", () => {
+    expectTypeOf(resolveCheckpoint([], [], "x")).toEqualTypeOf<{ remove: number[] } | null>();
+    const ok = resolveCheckpoint([user("u")], [labelEntry("eL", "e1", "x"), entry("e1", "message")], "x");
+    expectTypeOf(ok).toEqualTypeOf<{ remove: number[] } | null>();
   });
 });

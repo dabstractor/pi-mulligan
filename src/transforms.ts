@@ -382,3 +382,153 @@ function isMulliganCustomMessage(msg: unknown): boolean {
   const customType = readOwn(msg, "customType");
   return typeof customType === "string" && customType.startsWith("mulligan:");
 }
+
+// ── resolveCheckpoint (checkpoint targeting — entry→message mapping; spec/06 §6) ───
+
+/**
+ * Minimal structural SessionEntry-like type for resolveCheckpoint's branchEntries param (a real Pi SessionEntry[]
+ * from getBranch() assigns in with NO cast — structural typing, mirrors MessageLike/Unit). Purity: resolveCheckpoint
+ * takes the DATA it needs (branchEntries + checkpointName), NOT ctx (ExtensionContext) — it never imports Pi.
+ * EXPORTED so tests build typed fixtures and filter.ts (P1.M4.T2) passes getBranch() typed as BranchEntry[].
+ */
+export interface BranchEntry {
+  type: string; // "message" | "custom_message" | "compaction" | "branch_summary" | "label" | "custom" | ...
+  id: string;
+  parentId?: string | null;
+  timestamp?: string;
+  /** LabelEntry only — the entry this label points at (the checkpointed entry). */
+  targetId?: string;
+  /** LabelEntry only — the label string, e.g. "mulligan:checkpoint:before-x". */
+  label?: string;
+  [key: string]: unknown; // message/customType/summary/firstKeptEntryId/... read defensively via readOwn
+}
+
+/**
+ * resolveCheckpoint — map a named `mulligan:checkpoint:<name>` Pi LabelEntry to a message index, then compute the
+ * removal set for a `checkpoint` rewind (spec/06-context-filter.md §6). The ONLY place Mulligan maps entries↔messages
+ * (the relative granularities resolve against messages directly).
+ *
+ * ALGORITHM (spec/06 §6, steps 1–6):
+ *   1. Defensive: non-array messages/branchEntries, or checkpointName not a non-empty string → null.
+ *   2. Find the FIRST LabelEntry (scanning branchEntries leaf→root = most-recent) whose
+ *      label === `mulligan:checkpoint:${checkpointName}`. None → null (spec/08 E10 not-found → refuse). targetId =
+ *      its targetId; non-string/empty → null.
+ *   3. ctxEntries = [...branchEntries].reverse() (root→leaf) filtered to context-producing types
+ *      (message, custom_message, branch_summary, compaction — spec/06 §6 step 2).
+ *   4. Walk ctxEntries with msgCursor (messages consumed). For each entry: yield = entryMessageYield(entry);
+ *      yield < 0 (compaction/unknown → indeterminate) OR msgCursor+yield > messages.length (alignment lost) → null.
+ *      If entry.id === targetId → iTarget = msgCursor + yield - 1 (the entry's LAST message index — kept); break.
+ *      Else msgCursor += yield. Loop end without match → null (targetId labels a non-context-producing entry).
+ *   5. remove (ascending): for j from iTarget+1..end, skip if rewindOwnIndices.has(j) (the rewind's own unit via
+ *      partitionIntoUnits + assistantIssuedCall, only when excludeToolCallId is a non-empty string) or
+ *      isMulliganCustomMessage(messages[j]) (the note/nudge). Else push. (IDENTICAL to resolveLastTurn's rule —
+ *      spec/06 §6 step 5 "same tail-exclusion rules as resolveLastTurn".)
+ *   6. Return { remove }.
+ *
+ * COMPACTION (spec/06 §6 vs installed Pi): spec says compaction yields `1 + retainedTail.length` and "refuse if a
+ * compaction entry lacks retainedTail." The installed Pi CompactionEntry has NO retainedTail, AND getBranch() is the
+ * RAW path (not compaction-aware) while event.messages is compaction-aware → a compaction on the root→target walk
+ * makes the mapping INDETERMINATE. entryMessageYield returns -1 for compaction → this function returns null (refuse
+ * safely, never guess — spec/06 §6 end). Compaction AFTER the checkpoint is never walked (we break at target) so it
+ * stays aligned. See PRP "Known Gotchas" + research/spec_extracts.md §2 for the full proof.
+ *
+ * RETURNS `{ remove: number[] } | null` — null = indeterminate/refuse (not-found, non-context-producing target,
+ * compaction, overshoot, non-array, bad checkpointName); { remove: [] } = determinable-but-empty (nothing after
+ * iTarget, or all after-iTarget excluded). The single consumer filterPipeline (P1.M3.T5.S1) uses
+ * `remove = resolveCheckpoint(m, branchEntries, rw.checkpoint, rw.excludeToolCallId)?.remove ?? []` (spec/06 §12).
+ *
+ * Pure + defensive: null/non-array messages/branchEntries → null; malformed entries, throwing-Proxy objects, and a
+ * non-string/empty checkpointName/excludeToolCallId are all handled gracefully — NEVER throws (E13; context-handler
+ * hot path). Every field read goes through the module-private isRecord/readOwn. NEVER imports Pi (purity).
+ *
+ * @param messages the LLM message list (a real Pi AgentMessage[] assigns in with no cast); non-array → null
+ * @param branchEntries getBranch() output, LEAF→ROOT (we reverse to root→leaf internally); non-array → null
+ * @param checkpointName the checkpoint name (without the `mulligan:checkpoint:` prefix); non-string/empty → null
+ * @param excludeToolCallId the rewind's own toolCall id (its unit is kept); undefined/empty/non-string → not kept
+ * @returns { remove: number[] } on a determinable mapping (possibly empty), or null when indeterminate/refused
+ */
+export function resolveCheckpoint(
+  messages: MessageLike[],
+  branchEntries: BranchEntry[],
+  checkpointName: string,
+  excludeToolCallId?: string,
+): { remove: number[] } | null {
+  // 1) Defensive: arrays + a non-empty checkpoint name.
+  if (!Array.isArray(messages) || !Array.isArray(branchEntries)) return null;
+  if (typeof checkpointName !== "string" || checkpointName.length === 0) return null;
+
+  const needle = `mulligan:checkpoint:${checkpointName}`;
+
+  // 2) Find the FIRST (most-recent, leaf→root) LabelEntry with the matching label.
+  let targetId: string | undefined;
+  for (const e of branchEntries) {
+    if (!isRecord(e)) continue;
+    if (readOwn(e, "type") !== "label") continue;
+    if (readOwn(e, "label") !== needle) continue;
+    const tid = readOwn(e, "targetId");
+    if (typeof tid === "string" && tid.length > 0) {
+      targetId = tid;
+      break; // most-recent match wins
+    }
+  }
+  if (targetId === undefined) return null; // not found on this branch (spec/08 E10) or no usable targetId → refuse
+
+  // 3) ctxEntries = reversed (root→leaf) filtered to context-producing types (spec/06 §6 step 2).
+  const ctxEntries = [...branchEntries].reverse().filter((e) =>
+    isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
+  );
+
+  // 4) Walk in parallel with messages; stop at the target entry → iTarget = its last message index.
+  let msgCursor = 0;
+  let iTarget = -1;
+  let found = false;
+  for (const e of ctxEntries) {
+    const y = entryMessageYield(e); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
+    if (y < 0) return null; // compaction (or unknown) on the walked range → mapping indeterminate → refuse safely
+    if (msgCursor + y > messages.length) return null; // alignment lost (raw branch vs compaction-aware messages) → refuse
+    if (isRecord(e) && readOwn(e, "id") === targetId) {
+      iTarget = msgCursor + y - 1; // the entry's LAST message index — KEPT (spec/06 §6 "keep the checkpoint point")
+      found = true;
+      break;
+    }
+    msgCursor += y;
+  }
+  if (!found) return null; // targetId labels a non-context-producing entry (filtered out) → refuse (never guess)
+
+  // 5) remove = indices > iTarget, EXCEPT the rewind's own unit + mulligan:* notes (IDENTICAL to resolveLastTurn).
+  const rewindOwnIndices = new Set<number>();
+  const hasExclude = typeof excludeToolCallId === "string" && excludeToolCallId.length > 0;
+  if (hasExclude) {
+    for (const unit of partitionIntoUnits(messages)) {
+      if (unit.kind === "toolGroup" && assistantIssuedCall(messages, unit.indices, excludeToolCallId)) {
+        for (const idx of unit.indices) rewindOwnIndices.add(idx); // keep the WHOLE unit (parallel-safe — §9)
+      }
+    }
+  }
+  const remove: number[] = [];
+  for (let j = iTarget + 1; j < messages.length; j++) {
+    if (rewindOwnIndices.has(j)) continue; // the rewind's own assistant + results survive
+    if (isMulliganCustomMessage(messages[j])) continue; // the note / nudge survives
+    remove.push(j);
+  }
+  return { remove };
+}
+
+/**
+ * Module-private: how many LLM messages does this branch entry produce? Verified against Pi
+ * sessionEntryToContextMessages (session-manager.js): message/custom_message/branch_summary → 1; compaction → 1 in
+ * Pi BUT the spec/06 §6 "1 + retainedTail.length" model does not match (no retainedTail) AND a compaction on a RAW
+ * getBranch misaligns with compaction-aware messages → returns the INDETERMINATE sentinel (-1) so the caller refuses.
+ * Non-context-producing types (label/custom/…) also return -1 (they are filtered out before the walk, so this is a
+ * safety net). Defensive (isRecord/readOwn; never throws).
+ */
+function entryMessageYield(entry: unknown): number {
+  const type = isRecord(entry) ? readOwn(entry, "type") : undefined;
+  if (type === "message" || type === "custom_message" || type === "branch_summary") return 1;
+  return -1; // compaction (indeterminate) OR unknown/non-context-producing → caller refuses
+}
+
+/** Module-private: is this entry type one that produces a context message (spec/06 §6 step 2 list)? */
+function isContextProducingType(type: unknown): boolean {
+  return type === "message" || type === "custom_message" || type === "branch_summary" || type === "compaction";
+}

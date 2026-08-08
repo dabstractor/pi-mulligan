@@ -337,14 +337,14 @@
               "type": "Task",
               "id": "P1.M3.T3",
               "title": "Checkpoint Targeting (Entry→Message Mapping)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement resolveCheckpoint — the one place Mulligan maps session entries to message indices. Finds the checkpoint label entry, walks context-producing entries in parallel with messages to find the target position, and computes the removal range.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T3.S1",
                   "title": "Implement resolveCheckpoint — entry-to-message position mapping",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -368,7 +368,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T4.S1",
                   "title": "Implement applyRewind — unit-aware gap-closing index removal",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
