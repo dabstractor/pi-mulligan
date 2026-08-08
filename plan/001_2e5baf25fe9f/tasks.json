@@ -267,7 +267,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Pure Core — Context Filter Transforms (Correctness Heart)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement transforms.ts — the pure, fully unit-testable transform logic that is the heart of Mulligan's correctness. This includes message partitioning (pairing-aware), rewind resolution (last tool-call group, last turn, checkpoint), shrink resolution, transform application (rewind removal, shrink substitution), and the filter pipeline composition. ALL transform logic lives here; the context handler (filter.ts) is thin glue.",
           "tasks": [
             {
@@ -361,7 +361,7 @@
               "type": "Task",
               "id": "P1.M3.T4",
               "title": "Transform Application (Rewind Removal & Shrink Substitution)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement applyRewind (unit-aware gap-closing removal of a set of indices) and resolveShrinkTarget + applyShrink (three matcher strategies for finding a message and substituting its content while preserving pairing-relevant fields).",
               "subtasks": [
                 {
@@ -382,7 +382,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T4.S2",
                   "title": "Implement resolveShrinkTarget and applyShrink with three matcher strategies",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -399,14 +399,14 @@
               "type": "Task",
               "id": "P1.M3.T5",
               "title": "Filter Pipeline Composition & Protected Messages",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the filterPipeline function that composes all transforms in a fixed order (rewinds oldest-first, then shrinks oldest-first), plus stableSortBySeq (marker ordering) and protectedOk (defense-in-depth against catastrophic amnesia). This is the composition layer that makes multi-marker behavior deterministic.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T5.S1",
                   "title": "Implement filterPipeline, stableSortBySeq, and protectedOk",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1",

@@ -587,3 +587,179 @@ export function applyRewind(messages: MessageLike[], remove: number[]): MessageL
   // The callback IGNORES the element → a throwing-Proxy element's get-trap never fires → never throws (E13).
   return messages.filter((_msg, i) => !removeSet.has(i));
 }
+
+/**
+ * ShrinkTarget — how a shrink identifies the message whose content to substitute (spec/04-data-model.md §4;
+ * spec/06-context-filter.md §5). Discriminated union; resolveShrinkTarget resolves it LIVE each inference against
+ * the current event.messages (compaction-robust — spec/04 §4 "targets resolve against the current messages each
+ * inference"). STRUCTURALLY IDENTICAL to markers.ts's ShrinkTarget (a real markers.ts ShrinkTarget / ShrinkMarker.target
+ * assigns in with NO cast) — declared LOCALLY here so transforms.ts stays Pi-FREE (0 imports; it must NOT import from
+ * markers.ts, which pulls in Pi). This mirrors the MessageLike convention (a local structural type, not AgentMessage).
+ * EXPORTED so the shrink tool (P1.M5.T2), filterPipeline (T5.S1), and tests share one shape at the pure tier.
+ */
+export type ShrinkTarget =
+  | { by_tool_call_id: string }
+  | { by_tool_name: string; occurrence: "last" | "first" }
+  | { by_content_includes: string };
+
+/**
+ * resolveShrinkTarget — resolve a ShrinkTarget to a single message index, LIVE against the current messages
+ * (spec/06-context-filter.md §5; spec/04-data-model.md §4). Returns the matched index or null (no match → the
+ * shrink no-ops this fire and retries next fire — compaction-robust; spec/06 §5:133, spec/04 §4).
+ *
+ * MATCHER STRATEGIES (spec/06 §5 L126-128):
+ *   - by_tool_call_id: return the index of the FIRST toolResult message whose `toolCallId === id` (toolCallId is
+ *     unique → at most one), else null.
+ *   - by_tool_name + occurrence: among toolResult messages whose `toolName === name`, return the LAST index
+ *     (occurrence:"last", the default for any non-"first" value — GOTCHA #6) or the FIRST index (occurrence:"first"),
+ *     else null.
+ *   - by_content_includes: return the index of the FIRST message (ANY role — spec/08 E19) whose stringified `content`
+ *     includes the substring (stringifyContent: string→verbatim, array→JSON.stringify), else null.
+ *
+ * The FIRST present non-empty-string discriminator key decides the variant (by_tool_call_id → by_tool_name →
+ * by_content_includes); a target with no recognizable discriminator, or a non-string/empty id/name, resolves to null.
+ *
+ * Pure + defensive: a non-array `messages` → null; a non-record `target` → null; malformed messages, throwing-Proxy
+ * messages, and non-string/empty discriminator values are all handled gracefully — NEVER throws (E13; context-handler
+ * hot path via filterPipeline T5.S1). Every field read goes through the module-private isRecord/readOwn.
+ *
+ * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → null
+ * @param target the ShrinkTarget (discriminated union); non-record → null
+ * @returns the matched message index, or null when nothing matches
+ */
+export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarget): number | null {
+  if (!Array.isArray(messages)) return null;
+  if (!isRecord(target)) return null;
+
+  // by_tool_call_id: first toolResult whose toolCallId === id (unique → at most one).
+  const callId = readOwn(target, "by_tool_call_id");
+  if (typeof callId === "string" && callId.length > 0) {
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!isRecord(m) || readOwn(m, "role") !== "toolResult") continue;
+      if (readOwn(m, "toolCallId") === callId) return i;
+    }
+    return null;
+  }
+
+  // by_tool_name + occurrence: among toolResults with toolName === name, last (default) or first index.
+  const name = readOwn(target, "by_tool_name");
+  if (typeof name === "string" && name.length > 0) {
+    const wantFirst = readOwn(target, "occurrence") === "first"; // anything else (incl. missing) → last (GOTCHA #6)
+    let found = -1;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!isRecord(m) || readOwn(m, "role") !== "toolResult") continue;
+      if (readOwn(m, "toolName") === name) {
+        if (wantFirst) return i; // first match wins immediately
+        found = i;               // keep scanning → last match wins
+      }
+    }
+    return found === -1 ? null : found;
+  }
+
+  // by_content_includes: first message (ANY role — E19) whose stringified content includes the substring.
+  const needle = readOwn(target, "by_content_includes");
+  if (typeof needle === "string") {
+    for (let i = 0; i < messages.length; i++) {
+      if (stringifyContent(readOwn(messages[i], "content")).includes(needle)) return i;
+    }
+    return null;
+  }
+
+  return null; // no recognizable discriminator key
+}
+
+/**
+ * applyShrink — substitute the matched message's content with a compact replacement (spec/06-context-filter.md §5).
+ * The replacement PERSISTS for as long as the marker exists (permanent soft substitution). SHRINKS DO NOT REMOVE
+ * MESSAGES — they replace content, preserving role/toolCallId/toolName/isError (and every other field via the
+ * spread) so the model API stays valid: a toolResult KEEPS its toolCallId → its assistant call stays paired
+ * (spec/06 §5:145 "pairing untouched"); a non-toolResult keeps its role (spec/08 E19).
+ *
+ * ALGORITHM (spec/06 §5 L131-140):
+ *   1. i = resolveShrinkTarget(messages, marker.target). null (or out of range) → return messages UNCHANGED (SAME
+ *      reference) — the documented no-op (spec/06 §5:133). This is ALSO the "shrink-after-rewind-removed-target"
+ *      no-op (spec/06 §5:143) and the compaction-removed-target no-op (spec/04 §4 — retried next fire).
+ *   2. replacement = { ...orig, content: [{ type:"text", text: replacement }] }. The spread preserves EVERY other
+ *      field (role, toolCallId, toolName, isError, customType, …). The spec's §5:136-138 ternary has IDENTICAL
+ *      branches (both spread orig + override content — only the comment differs); written as ONE expression here
+ *      (DRY — GOTCHA #11). Wrapped in try/catch: a throwing-Proxy orig could make {...orig} throw → minimal fallback
+ *      {role, content} (never throws, preserves role — E13 + E19 — GOTCHA #5).
+ *   3. Return a NEW array with index i replaced (messages.map). Non-matched elements copied BY REFERENCE (never
+ *      read/spread → throwing-Proxy-safe — GOTCHA #12).
+ *
+ * COMPOSITION (spec/06 §5:143, spec/08 E17): "Multiple shrinks same target → applied in seq order, last wins." This
+ * is achieved NATURALLY by sequential application — NO special last-wins code (GOTCHA #7): each applyShrink
+ * re-resolves against the CURRENT messages (the second call sees the already-shrunk message), matches it again
+ * (by_tool_call_id is stable — the spread preserved toolCallId), and overwrites its content → last replacement wins.
+ *
+ * CONTRACT (spec/06 §1 pipeline, `messages = applyShrinkSafe(messages, m)`; filterPipeline T5.S1 calls THIS fn):
+ *   - INPUT: `messages` (a real Pi AgentMessage[] assigns in with no cast via MessageLike[]), `marker`
+ *     ({target: ShrinkTarget, replacement: string} — a real markers.ts ShrinkMarker assigns in with NO cast; only the
+ *     two fields applyShrink reads are in the structural type — GOTCHA #2). NO import from markers.ts (Pi-free).
+ *   - NO MATCH (resolve returns null, marker is a non-record, or messages is a non-array) → messages UNCHANGED
+ *     (SAME reference) for the null/marker paths; non-array messages → [] (defensive, mirrors applyRewind/
+ *     partitionIntoUnits — GOTCHA #4).
+ *
+ * Pure + defensive + TOTAL: non-array messages → []; non-record marker → messages unchanged; no match → messages
+ * unchanged (same ref); a throwing-Proxy MATCHED message → the {...orig} spread is try/caught with a minimal fallback
+ * → NEVER throws (E13). Side-effect-free (never mutates `messages`). NO new imports (reuses MessageLike + ContentBlock
+ * + isRecord/readOwn already in module scope; `grep -c '^import' src/transforms.ts` stays 0).
+ *
+ * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
+ * @param marker { target: ShrinkTarget; replacement: string } (a real ShrinkMarker assigns in with no cast)
+ * @returns a NEW array with the matched message's content substituted; the SAME array reference on a no-op
+ */
+export function applyShrink(
+  messages: MessageLike[],
+  marker: { target: ShrinkTarget; replacement: string },
+): MessageLike[] {
+  // Defensive: non-array messages → [] (mirrors applyRewind/partitionIntoUnits); non-record marker → no-op (same ref).
+  if (!Array.isArray(messages)) return [];
+  if (!isRecord(marker)) return messages;
+
+  // Resolve the target (read marker.target via readOwn for throwing-Proxy safety; cast — resolveShrinkTarget
+  // re-validates isRecord). null/out-of-range → no-op, SAME reference (spec/06 §5:133).
+  const i = resolveShrinkTarget(messages, readOwn(marker, "target") as ShrinkTarget);
+  if (i === null || i < 0 || i >= messages.length) return messages;
+
+  const orig = messages[i];
+  const rep = readOwn(marker, "replacement");
+  const text = typeof rep === "string" ? rep : "";
+  const newContent: ContentBlock[] = [{ type: "text", text }];
+
+  // Clone orig's fields via spread + override content. {...orig} preserves role/toolCallId/toolName/isError/customType/…
+  // → pairing intact (toolResult keeps toolCallId — spec/06 §5:145) + role preserved (spec/08 E19). The spec §5 ternary
+  // has identical branches → ONE expression (GOTCHA #11). try/catch: a throwing-Proxy orig could make {...orig} throw
+  // → minimal fallback preserves the safely-read role (E13 + E19 — GOTCHA #5).
+  const role = readOwn(orig, "role");
+  let replacement: MessageLike;
+  try {
+    replacement = { ...(orig as MessageLike), content: newContent };
+  } catch {
+    replacement = { role: typeof role === "string" ? role : undefined, content: newContent };
+  }
+
+  // New array with index i replaced; other elements copied BY REFERENCE (never read → throwing-Proxy-safe — GOTCHA #12).
+  return messages.map((m, j) => (j === i ? replacement : m));
+}
+
+/**
+ * Module-private: stringify a message's `content` for by_content_includes substring search (spec/06 §5 L128
+ * "stringified content"). A string content → verbatim; an array content (content blocks) → JSON.stringify (so `text`
+ * fields are searchable, e.g. `[{"type":"text","text":"ENOSPC at /disk"}]` includes "ENOSPC"); anything else
+ * (undefined / throwing-Proxy / circular) → "". Wrapped in try/catch → never throws (JSON.stringify of a
+ * throwing-Proxy/circular value returns "" via the catch). NOT exported.
+ */
+function stringifyContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}

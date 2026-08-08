@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, type Unit, type MessageLike, type BranchEntry } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, applyShrink, resolveShrinkTarget, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -983,5 +983,152 @@ describe("applyRewind — spec/10 §1.4 PINNED contract + defensive + compositio
   it("returns MessageLike[] (the array type, not null/wrapped)", () => {
     expectTypeOf(applyRewind([], [])).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(applyRewind([user("u")], [0])).toEqualTypeOf<MessageLike[]>();
+  });
+});
+
+describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defensive + composition", () => {
+  /** Read the first text block's text from a shrunk message (content is [{type:"text",text}] after applyShrink). */
+  const textOf = (m: MessageLike): string => {
+    const c = m.content;
+    if (Array.isArray(c) && c.length > 0) {
+      const first = c[0] as { text?: unknown };
+      return typeof first.text === "string" ? first.text : "";
+    }
+    return "";
+  };
+
+  it("spec/10 §1.5 bullet 1 — by_tool_call_id match → content replaced, role/toolCallId/toolName/isError PRESERVED", () => {
+    const bloated: MessageLike = {
+      ...result("call-A"), toolName: "grep", isError: false, content: [{ type: "text", text: "BLOATED OUTPUT" }],
+    };
+    const msgs: MessageLike[] = [user("u"), asst("call-A"), bloated];
+    const out = applyShrink(msgs, { target: { by_tool_call_id: "call-A" }, replacement: "[shrunk]" });
+    expect(out).toHaveLength(3);
+    expect(textOf(out[2])).toBe("[shrunk]");        // content replaced
+    expect(out[2].role).toBe("toolResult");         // preserved
+    expect(out[2].toolCallId).toBe("call-A");       // preserved → pairing untouched (spec/06 §5:145)
+    expect(out[2].toolName).toBe("grep");           // preserved
+    expect(out[2].isError).toBe(false);             // preserved
+    expect(out[0]).toBe(msgs[0]);                   // others untouched (by reference)
+    expect(out[1]).toBe(msgs[1]);
+  });
+
+  it("spec/10 §1.5 bullet 2 — no match → input UNCHANGED — SAME reference (no-op; spec/06 §5:133)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+    // Intentional strengthening: spec says "input unchanged" (content); same-ref is the strict reading + the §5:133
+    // precedent (and the applyRewind T4.S1 convention).
+    expect(applyShrink(msgs, { target: { by_tool_call_id: "nope" }, replacement: "x" })).toBe(msgs);
+    expect(applyShrink(msgs, { target: { by_tool_name: "absent", occurrence: "last" }, replacement: "x" })).toBe(msgs);
+    expect(applyShrink(msgs, { target: { by_content_includes: "not-present-anywhere" }, replacement: "x" })).toBe(msgs);
+  });
+
+  it("spec/10 §1.5 bullet 3 — two shrinks same target, seq order → LAST wins (spec/08 E17)", () => {
+    const msgs: MessageLike[] = [
+      user("u"), asst("c"), { ...result("c"), content: [{ type: "text", text: "BIG" }] },
+    ];
+    // Sequential application: the first shrink preserves toolCallId "c", so the second re-matches the same message.
+    const once = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "first" });
+    expect(textOf(once[2])).toBe("first");
+    const twice = applyShrink(once, { target: { by_tool_call_id: "c" }, replacement: "second" });
+    expect(textOf(twice[2])).toBe("second");        // last wins
+    expect(twice[2].toolCallId).toBe("c");          // still paired after both substitutions
+  });
+
+  it("by_tool_name + occurrence 'last' (default) → LAST matching toolResult substituted; earlier ones untouched", () => {
+    const r1: MessageLike = { ...result("c1"), toolName: "grep", content: [{ type: "text", text: "r1" }] };
+    const r2: MessageLike = { ...result("c2"), toolName: "grep", content: [{ type: "text", text: "r2" }] };
+    const other: MessageLike = { ...result("c3"), toolName: "read", content: [{ type: "text", text: "ro" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c1"), r1, asst("c2"), r2, asst("c3"), other];
+    const out = applyShrink(msgs, { target: { by_tool_name: "grep", occurrence: "last" }, replacement: "L" });
+    expect(textOf(out[4])).toBe("L");               // the LAST grep result (index 4)
+    expect(textOf(out[2])).toBe("r1");              // the FIRST grep result untouched
+    expect(textOf(out[6])).toBe("ro");              // the non-grep result untouched
+  });
+
+  it("by_tool_name + occurrence 'first' → FIRST matching toolResult substituted", () => {
+    const r1: MessageLike = { ...result("c1"), toolName: "grep", content: [{ type: "text", text: "r1" }] };
+    const r2: MessageLike = { ...result("c2"), toolName: "grep", content: [{ type: "text", text: "r2" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c1"), r1, asst("c2"), r2];
+    const out = applyShrink(msgs, { target: { by_tool_name: "grep", occurrence: "first" }, replacement: "F" });
+    expect(textOf(out[2])).toBe("F");               // the FIRST grep result (index 2)
+    expect(textOf(out[4])).toBe("r2");              // the LAST grep result untouched
+  });
+
+  it("by_content_includes → FIRST message (any role) whose stringified content includes the substring", () => {
+    const big: MessageLike = { ...result("c"), content: [{ type: "text", text: "error: ENOSPC at /disk" }] };
+    const msgs: MessageLike[] = [user("hello"), asst("c"), big];
+    const out = applyShrink(msgs, { target: { by_content_includes: "ENOSPC" }, replacement: "[err]" });
+    expect(textOf(out[2])).toBe("[err]");           // the toolResult at index 2 matched
+    expect(out[2].role).toBe("toolResult");
+  });
+
+  it("spec/08 E19 — by_content_includes matches a NON-toolResult (user) → content replaced, role PRESERVED", () => {
+    const msgs: MessageLike[] = [user("find this token please"), asst("c"), result("c")];
+    const out = applyShrink(msgs, { target: { by_content_includes: "token" }, replacement: "[redacted]" });
+    expect(textOf(out[0])).toBe("[redacted]");      // the user message at index 0 matched
+    expect(out[0].role).toBe("user");               // role PRESERVED (E19) — not turned into a toolResult
+  });
+
+  it("resolveShrinkTarget direct: returns the matched index (number) or null per matcher", () => {
+    const msgs: MessageLike[] = [
+      user("u"), asst("c1"), { ...result("c1"), toolName: "grep" }, asst("c2"),
+      { ...result("c2"), toolName: "grep" },
+    ];
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "c2" })).toBe(4);
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "absent" })).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "grep", occurrence: "first" })).toBe(2);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "grep", occurrence: "last" })).toBe(4);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "absent", occurrence: "last" })).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_content_includes: "u" })).toBe(0); // user("u") stringified includes "u"
+  });
+
+  it("defensive: non-array messages → []; non-record marker → unchanged (same ref); malformed target → no-op", () => {
+    expect(applyShrink(null as unknown as MessageLike[], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqual([]);
+    const msgs: MessageLike[] = [user("u")];
+    expect(applyShrink(msgs, null as unknown as { target: ShrinkTarget; replacement: string })).toBe(msgs);
+    // No discriminator key → no match → unchanged (same ref).
+    expect(applyShrink(msgs, { target: {} as ShrinkTarget, replacement: "r" })).toBe(msgs);
+    // resolveShrinkTarget defensive: non-array messages → null; non-record target → null; empty id/name → null.
+    expect(resolveShrinkTarget(null as unknown as MessageLike[], { by_tool_call_id: "x" })).toBeNull();
+    expect(resolveShrinkTarget(msgs, null as unknown as ShrinkTarget)).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "" } as ShrinkTarget)).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "", occurrence: "last" } as ShrinkTarget)).toBeNull();
+  });
+
+  it("spec/08 E13 — NEVER throws: throwing-Proxy messages never crash resolveShrinkTarget or applyShrink", () => {
+    // A throwing-Proxy with a NON-EMPTY target + throwing get-trap (the hard case for {...orig} spread).
+    const trap = new Proxy(
+      { role: "user", content: "bloated" } as MessageLike,
+      new Proxy({}, { get() { throw new Error("trap"); } }),
+    );
+    // resolveShrinkTarget never throws on it (all reads via readOwn; stringifyContent catches JSON.stringify throws).
+    expect(() => resolveShrinkTarget([trap], { by_content_includes: "" })).not.toThrow();
+    // applyShrink where a throwing-Proxy is PRESENT but NOT matched → copied by reference via .map, never read.
+    const msgs1: MessageLike[] = [user("keep"), trap];
+    expect(() => applyShrink(msgs1, { target: { by_content_includes: "keep" }, replacement: "r" })).not.toThrow();
+    // applyShrink where the throwing-Proxy IS matched (empty needle matches empty stringified content) → spread is
+    // try/caught → minimal fallback → never throws, content replaced.
+    expect(() => applyShrink([trap], { target: { by_content_includes: "" }, replacement: "r" })).not.toThrow();
+    const out = applyShrink([trap], { target: { by_content_includes: "" }, replacement: "r" });
+    expect(out).toHaveLength(1);
+    expect(textOf(out[0])).toBe("r");               // fallback still replaced content (role read safely before spread)
+  });
+
+  it("purity: never mutates the input array (map returns a new array; no-op returns the same unmuted ref)", () => {
+    const bloated: MessageLike = { ...result("c"), content: [{ type: "text", text: "BIG" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c"), bloated];
+    const snapshot = msgs.map((m) => ({ ...m }));
+    applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "x" });
+    applyShrink(msgs, { target: { by_tool_call_id: "nope" }, replacement: "x" }); // no-op
+    expect(msgs).toHaveLength(3);                    // input untouched
+    expect(msgs[2]).toBe(bloated);                   // input element reference untouched
+    expect((msgs[2].content as unknown as { text: string }[])[0].text).toBe("BIG"); // input content not mutated
+    expect(msgs.map((m) => m.role)).toEqual(snapshot.map((m) => m.role));
+  });
+
+  it("returns MessageLike[] (resolveShrinkTarget returns number | null)", () => {
+    expectTypeOf(applyShrink([], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
+    expectTypeOf(applyShrink([user("u")], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
+    expectTypeOf(resolveShrinkTarget([], { by_tool_call_id: "x" })).toEqualTypeOf<number | null>();
   });
 });
