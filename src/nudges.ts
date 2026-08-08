@@ -32,13 +32,15 @@ import type {
   ToolResultEvent,
   ExtensionAPI,
   ExtensionContext,
+  TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { getConfig } from "./config.js";
 import { getRuntime } from "./runtime.js";
 import { log } from "./log.js";
-import { resultBytes, approxTokens } from "./tokens.js";
+import { resultBytes, approxTokens, estimateTokens } from "./tokens.js";
 import type { ResultContentBlock } from "./tokens.js";
 import { renderBloatReminder } from "./notes.js";
+import { appendTurnMetric, type TurnMetricInput } from "./markers.js";
 
 /**
  * ToolResultContentBlock — the element type of `ToolResultEvent["content"]` (TextContent | ImageContent). Pi's
@@ -129,4 +131,95 @@ export function bloatReminderHandler(
  */
 export function registerBloatReminder(pi: ExtensionAPI): void {
   pi.on("tool_result", bloatReminderHandler);
+}
+
+/**
+ * turnEndMetricHandler — Nudge B Phase 1 (spec/07 §2). Fires at the end of every turn; measures how much the
+ * FILTERED context grew this turn (delta vs the in-memory tokenBaseline), snapshots the bloat hits collected by
+ * bloatReminderHandler (Nudge A) into a persisted turn-metric CustomEntry, clears the bloat accumulator, and
+ * rolls the baseline forward. Rides the turn_end notification — zero extra model requests (D3/D4).
+ *
+ * The metric is INTERNAL TELEMETRY: a `custom` entry (NOT in LLM context). Only the LATEST one is read by the
+ * filter's drift-nudge injection (P1.M6.T2.S2); older ones persist on disk but are ignored.
+ *
+ * NEVER throws (spec/03 #4, spec/08 E13): the WHOLE body is ONE try/catch → log + return (the turn is never
+ * broken). Read sessionId FIRST so the catch can log it. deltaTokens is null on the first turn / post-reload
+ * (baseline missing) → the downstream nudge falls back to bloat-only signaling. SYNC (every dependency is sync).
+ *
+ * WHY pi is a parameter (GOTCHA #2): the turn_end callback only receives (event, ctx), but this handler must
+ * call appendTurnMetric(pi, ctx, …) (→ pi.appendEntry). registerTurnEndMetric captures pi in a closure and
+ * passes it here, so the exported handler is directly testable with a fake pi.
+ *
+ * @param pi    the Pi ExtensionAPI (appendTurnMetric → pi.appendEntry lives here).
+ * @param event { type:"turn_end"; turnIndex; message; toolResults } — NO messages field (api_verification §7.3).
+ * @param ctx   the Pi ExtensionContext (sessionManager.getSessionId read FRESH — C12; getContextUsage fallback).
+ * @returns void (turn_end is a notification event).
+ */
+export function turnEndMetricHandler(
+  pi: ExtensionAPI,
+  event: TurnEndEvent,
+  ctx: ExtensionContext,
+): void {
+  let sessionId = "";
+  try {
+    sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); first so the catch can log it (GOTCHA #4)
+
+    const config = getConfig();
+    if (!config.enabled || !config.nudges.perTurnDrift) return; // both gates BEFORE measurement (GOTCHA #8)
+
+    const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
+
+    // (3) Current filtered token count. lastFiltered is the filter's cached output (what the model actually saw
+    //     — D5/D6 honest bookkeeping). Fallback to ctx.getContextUsage() only when no filtered view exists yet
+    //     (first turn / context never fired). NO cast: rt.lastFiltered is AgentMessage[] (Record<string,unknown>[]),
+    //     structurally assignable to estimateTokens' MessageLike[] (GOTCHA #3, verified by tsc).
+    const now = rt.lastFiltered
+      ? estimateTokens(rt.lastFiltered).tokens
+      : (ctx.getContextUsage()?.tokens ?? 0);
+
+    // (4) Delta vs the baseline captured at the previous turn_end (or session_start). null on first turn.
+    const delta = rt.tokenBaseline == null ? null : now - rt.tokenBaseline;
+
+    // (5) Snapshot + CLEAR the bloat hits collected this turn by bloatReminderHandler (Nudge A). Grab the OLD
+    //     array reference (the metric's frozen snapshot), then REASSIGN the field to a fresh [] for next turn.
+    const bloat = rt.pendingBloatHits;
+    rt.pendingBloatHits = [];
+
+    // (6) Build TurnMetricInput — the 5 DATA fields ONLY (GOTCHA #1: appendTurnMetric stamps schema/v/kind/seq/ts;
+    //     do NOT call nextSeq or add seq — it would double-increment). grewOverThreshold uses driftThresholdTokens.
+    const metric: TurnMetricInput = {
+      deltaTokens: delta,
+      bloatHit: bloat.length > 0,
+      bloatHits: bloat,
+      grewOverThreshold: delta != null && delta > config.nudges.driftThresholdTokens,
+      turnIndex: event.turnIndex,
+    };
+
+    // (7) Persist the turn-metric CustomEntry (NOT in LLM context). appendTurnMetric stamps the envelope + seq +
+    //     ts and never throws (returns null on failure — acceptable; missing one metric is non-fatal).
+    appendTurnMetric(pi, ctx, metric);
+
+    // (8) Roll the baseline forward + record the turn index. UNCONDITIONAL in the happy path (appendTurnMetric
+    //     never throws, so we always reach here). A throw EARLIER skips this → baseline untouched → delta retries
+    //     next turn (correct). NOT in the catch path.
+    rt.tokenBaseline = now;
+    rt.lastTurnIndex = event.turnIndex;
+  } catch (e) {
+    log("error", "nudge.turn_end", sessionId, { error: String(e) }); // GOTCHA #4: sessionId, NOT ctx
+    // fail-open: return nothing (the turn is unaffected)
+  }
+}
+
+/**
+ * registerTurnEndMetric — arm Nudge B Phase 1. index.ts (P1.M7.T1.S1) calls this once at startup.
+ * The closure CAPTURES `pi` (GOTCHA #2): the turn_end callback only receives (event, ctx), but the handler
+ * needs pi for appendTurnMetric. P1.M6.T2.S2 (shouldNudge/injectNudge — Phase 2, in filter.ts) READS the metric
+ * this handler writes; it does NOT live in this module.
+ *
+ * @param pi the Pi ExtensionAPI (on() lives here).
+ */
+export function registerTurnEndMetric(pi: ExtensionAPI): void {
+  pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext): void => {
+    turnEndMetricHandler(pi, event, ctx);
+  });
 }
