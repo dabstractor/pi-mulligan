@@ -274,14 +274,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Message Partitioning & Tool-Call Pairing (partitionIntoUnits)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the foundational pairing-aware message partitioner that groups assistant messages with their tool results into atomic 'units'. Every removal operation operates on units, never raw indices, guaranteeing pairing by construction.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Implement partitionIntoUnits — pairing-aware grouping",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
