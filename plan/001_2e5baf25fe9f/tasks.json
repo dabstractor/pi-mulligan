@@ -590,14 +590,14 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "mulligan_audit Tool (tools/audit.ts)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Implement the read-only audit tool: give the agent a token-aware view of its context computed from the FILTERED view (what the model actually sees, NOT getContextUsage). Reports per-message token estimates, flags outliers, lists active markers, suggests shrink/rewind actions.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Implement mulligan_audit tool — filtered view read, token breakdown, report rendering",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M4.T2.S1",
@@ -625,14 +625,14 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Bloated-Result Reminder (tool_result handler)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the tool_result event handler that measures each result's size, and if above the bloat threshold, appends a short reminder to that result's content. Also records a bloat-hit contribution for the turn metric. Advisory only — never auto-shrinks (decision D3).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Implement tool_result bloat annotator + bloat hit recording",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S2",
