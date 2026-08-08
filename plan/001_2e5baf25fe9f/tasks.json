@@ -625,14 +625,14 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Bloated-Result Reminder (tool_result handler)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the tool_result event handler that measures each result's size, and if above the bloat threshold, appends a short reminder to that result's content. Also records a bloat-hit contribution for the turn metric. Advisory only — never auto-shrinks (decision D3).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Implement tool_result bloat annotator + bloat hit recording",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S2",
@@ -658,7 +658,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Implement turn_end metric handler — compute delta, append turn-metric entry",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1",
