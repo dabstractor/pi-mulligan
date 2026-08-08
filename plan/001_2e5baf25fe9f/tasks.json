@@ -151,7 +151,7 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Token Estimation Helpers (tokens.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement pure token estimation functions: estimateTokens for message arrays (character/structure-based heuristic with confidence flag), resultBytes for content blocks (UTF-8 byte length), and approxTokens for byte-to-token conversion.",
               "subtasks": [
                 {
@@ -173,7 +173,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Implement resultBytes(content) and approxTokens(bytes) helpers",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -189,14 +189,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "File Ledger Extraction (ledger.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the deterministic file ledger extraction that scans tool calls in a message span to produce {readFiles, modifiedFiles, bashSideEffects}. This is the state-ledger that prevents the resumed agent from redoing side-effectful work.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Implement extractFileLedger with deterministic read/modified/bash classification",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M1.T1.S1"

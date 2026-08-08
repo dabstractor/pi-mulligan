@@ -2,9 +2,12 @@ import { describe, it, expect, expectTypeOf } from "vitest";
 import {
   estimateTokens,
   CHARS_PER_TOKEN,
+  resultBytes,
+  approxTokens,
   type TokenEstimate,
   type TokenConfidence,
   type MessageLike,
+  type ResultContentBlock,
 } from "../src/tokens.js";
 
 // No beforeEach needed: tokens.ts has NO module-scoped mutable state (unlike config/log/runtime).
@@ -226,5 +229,146 @@ describe("types", () => {
     const m2: MessageLike = { role: "assistant", content: [{ type: "text", text: "hi" }] };
     expectTypeOf(m1).toEqualTypeOf<MessageLike>();
     expectTypeOf(m2).toEqualTypeOf<MessageLike>();
+  });
+});
+
+// ── P1.M2.T1.S2: resultBytes + approxTokens (spec/07 §1, spec/04 §5, spec/10 §1) ───────────────────────────────
+
+describe("resultBytes — byte size of tool_result content (spec/07 §1: UTF-8 bytes)", () => {
+  it("empty content → 0", () => {
+    expect(resultBytes([])).toBe(0);
+  });
+
+  it("null / undefined content → 0 (defensive)", () => {
+    expect(resultBytes(null)).toBe(0);
+    expect(resultBytes(undefined)).toBe(0);
+  });
+
+  it("non-array content → 0 (defensive — a plain string or number is not a block array)", () => {
+    expect(resultBytes("abcd" as unknown as ResultContentBlock[])).toBe(0);
+    expect(resultBytes(12345 as unknown as ResultContentBlock[])).toBe(0);
+  });
+
+  it("a single ASCII text block yields its char count in bytes (ASCII: bytes == chars)", () => {
+    expect(resultBytes([{ type: "text", text: "abc" }])).toBe(3); // 3 ASCII bytes
+    expect(resultBytes([{ type: "text", text: "a".repeat(8000) }])).toBe(8000); // ~8 KB result
+  });
+
+  it("a UTF-8 MULTIBYTE text block yields its BYTE count, not char count (GOTCHA #3/#8 — load-bearing)", () => {
+    // "café" = 4 CHARS but 5 UTF-8 BYTES (é = U+00E9 = 2 bytes). Proves byte≠char counting.
+    expect(resultBytes([{ type: "text", text: "café" }])).toBe(5);
+    // "é".repeat(4) = 4 chars, 8 bytes.
+    expect(resultBytes([{ type: "text", text: "é".repeat(4) }])).toBe(8);
+    // emoji: U+1F600 = 4 UTF-8 bytes.
+    expect(resultBytes([{ type: "text", text: "😀" }])).toBe(4);
+  });
+
+  it("empty text → 0", () => {
+    expect(resultBytes([{ type: "text", text: "" }])).toBe(0);
+  });
+
+  it("an image block contributes its base64 CHAR length (base64 is ASCII → == byte length)", () => {
+    expect(resultBytes([{ type: "image", data: "abcdefgh", mimeType: "image/png" }])).toBe(8);
+  });
+
+  it("an image block with no data → 0 (defensive)", () => {
+    expect(resultBytes([{ type: "image", mimeType: "image/png" }])).toBe(0);
+  });
+
+  it("an unknown block type contributes 0 (forward-compat)", () => {
+    expect(resultBytes([{ type: "thinking", thinking: "abc" }])).toBe(0);
+    expect(resultBytes([{ type: "toolCall", name: "read", arguments: {} }])).toBe(0);
+  });
+
+  it("a non-record block element is skipped → contributes 0 (defensive)", () => {
+    expect(resultBytes([null, 42, "raw", undefined] as unknown as ResultContentBlock[])).toBe(0);
+  });
+
+  it("mixes text + image blocks and sums across the array", () => {
+    const content: ResultContentBlock[] = [
+      { type: "text", text: "ab" },                                    // 2
+      { type: "image", data: "abcd", mimeType: "image/png" },          // 4
+      { type: "text", text: "café" },                                  // 5
+    ];
+    expect(resultBytes(content)).toBe(11); // 2 + 4 + 5
+  });
+
+  it("accepts a real-ish Pi (TextContent | ImageContent)[] shape (structural typing)", () => {
+    const content = [
+      { type: "text", text: "hello world" },                          // 11
+      { type: "image", data: "AAAA", mimeType: "image/jpeg" },        // 4
+    ] as const;
+    expect(resultBytes(content as unknown as ResultContentBlock[])).toBe(15);
+  });
+
+  it("never throws on a throwing-Proxy block (fail-open like log.ts / S1 — GOTCHA #6)", () => {
+    const trap = new Proxy(
+      { type: "text", text: "abcd" },
+      new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("trap");
+          },
+        },
+      ),
+    );
+    expect(() => resultBytes([trap as unknown as ResultContentBlock])).not.toThrow();
+    // every property read throws → 0 bytes
+    expect(resultBytes([trap as unknown as ResultContentBlock])).toBe(0);
+  });
+});
+
+describe("approxTokens — byte→token conversion (spec/04 §5, spec/07 §1 '8 KB ≈ 2k tokens')", () => {
+  it("0 bytes → 0 tokens", () => {
+    expect(approxTokens(0)).toBe(0);
+  });
+
+  it("divides bytes by CHARS_PER_TOKEN=4 with ceil (GOTCHA #5)", () => {
+    expect(approxTokens(40)).toBe(10); // 40/4 = 10
+    expect(approxTokens(41)).toBe(11); // ceil(41/4) = 11
+    expect(approxTokens(1)).toBe(1);   // ceil(1/4) = 1 (non-empty → ≥1 token)
+  });
+
+  it("reproduces spec/07 §1's '8 KB ≈ 2k tokens' equivalence EXACTLY (load-bearing — GOTCHA #4)", () => {
+    expect(approxTokens(8192)).toBe(2048); // the default bloatThresholdBytes → ~2k tokens
+  });
+
+  it("negative bytes → 0 (defensive — tokens can't be negative)", () => {
+    expect(approxTokens(-100)).toBe(0);
+    expect(approxTokens(-1)).toBe(0);
+  });
+
+  it("NaN / Infinity → 0 (defensive — nonsense token counts)", () => {
+    expect(approxTokens(Number.NaN)).toBe(0);
+    expect(approxTokens(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(approxTokens(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
+
+  it("is monotonic non-decreasing in bytes", () => {
+    expect(approxTokens(100)).toBeLessThanOrEqual(approxTokens(200));
+    expect(approxTokens(8000)).toBe(2000);
+    expect(approxTokens(8001)).toBe(2001); // ceil boundary
+  });
+
+  it("composes end-to-end with resultBytes (the spec/07 §1 pipeline)", () => {
+    // An 8000-byte ASCII text result → 8000 bytes → 2000 tokens.
+    const bytes = resultBytes([{ type: "text", text: "a".repeat(8000) }]);
+    expect(bytes).toBe(8000);
+    expect(approxTokens(bytes)).toBe(2000);
+  });
+});
+
+describe("types (P1.M2.T1.S2)", () => {
+  it("ResultContentBlock accepts TextContent and ImageContent shapes (structural)", () => {
+    const text: ResultContentBlock = { type: "text", text: "hi" };
+    const image: ResultContentBlock = { type: "image", data: "AAAA", mimeType: "image/png" };
+    expectTypeOf(text).toEqualTypeOf<ResultContentBlock>();
+    expectTypeOf(image).toEqualTypeOf<ResultContentBlock>();
+  });
+
+  it("resultBytes returns a number; approxTokens returns a number", () => {
+    expectTypeOf(resultBytes([])).toEqualTypeOf<number>();
+    expectTypeOf(approxTokens(0)).toEqualTypeOf<number>();
   });
 });

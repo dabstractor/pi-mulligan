@@ -201,3 +201,108 @@ function safeStringLength(value: unknown): number {
     return 0;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P1.M2.T1.S2 additions — byte-level result measurement + byte→token conversion.
+// spec/07-preventive-and-nudges.md §1 (bloated-result reminder; threshold in BYTES of in-context text),
+// spec/04-data-model.md §5 (TurnMetric.bloatHits[].approxTokens), spec/03 §2.3 (pure helpers),
+// spec/11-build-order.md §1 (tokens.ts holds estimateTokens + resultBytes + approxTokens), spec/10 §1.
+//
+// These two helpers are the measurement core of Nudge A (P1.M6.T1.S1): the tool_result handler calls
+// resultBytes(event.content), compares to config.nudges.bloatThresholdBytes (bytes), and stores
+// approxTokens(bytes) in the persisted turn-metric bloatHits. They are APPENDED to S1's module and REUSE:
+//   - the exported CHARS_PER_TOKEN (= 4) in approxTokens (one canonical ratio; the S1 PRP exports it for S2 reuse),
+//   - the module-private isRecord / readOwn / stringLength (same module scope; hoisted — no redeclaration).
+// S2 adds ZERO imports (Buffer is a Node global; Math/JSON are builtins), so the tokens.ts zero-imports gate
+// (S1 GOTCHA #2) stays green. The new module-private helper stringByteLength measures UTF-8 BYTE length for the
+// text case (the image case reuses stringLength because base64 is ASCII → char length == byte length — GOTCHA #3).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A content block as carried by a Pi `tool_result` (api_verification.md §7.2: `content` is
+ * `(TextContent | ImageContent)[]`). `resultBytes` inspects ONLY `type`, `text`, `data`, so this deliberately
+ * LOOSE structural shape captures exactly what it needs and is permissive enough that a real
+ * `(TextContent | ImageContent)[]` assigns in with no cast. The index signature accepts extra fields (e.g.
+ * `mimeType`) and lets unknown/future block types flow through (they simply contribute 0 bytes — forward-compat).
+ *
+ * This is BROADER than S1's module-local `TextContent`/`ImageContent` (which are not exported); resultBytes must
+ * not over-tighten its input, because the downstream nudge handler hands it `event.content` directly.
+ */
+export interface ResultContentBlock {
+  type: string;
+  /** Present on `text` blocks. */
+  text?: string;
+  /** Present on `image` blocks (base64). */
+  data?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * resultBytes — the UTF-8 BYTE size of a tool_result's in-context content (spec/07 §1: "the threshold is in
+ * BYTES of the in-context text representation … UTF-8 byte length").
+ *
+ * For each content block: a `text` block contributes `Buffer.byteLength(text, "utf8")` (multibyte-aware — a
+ * 16 KB CJK log reads as 16 KB, NOT ~6 KB chars); an `image` block contributes `data?.length ?? 0` (base64 is
+ * ASCII, so char length == byte length); any other `type` contributes 0. The result is a non-negative integer.
+ *
+ * Pure + defensive: non-array content (null/undefined/string/number) → 0; non-record block elements are skipped;
+ * a throwing-Proxy block contributes 0 (reuses S1's `readOwn`, which swallows the trap). NEVER throws — it sits
+ * on the tool_result hot path and feeds the persisted turn-metric.
+ *
+ * @param content the tool_result content array (a single block via `resultBytes([block])`)
+ * @returns non-negative integer byte count
+ */
+export function resultBytes(content: ResultContentBlock[] | null | undefined): number {
+  if (!Array.isArray(content)) {
+    return 0; // absent / null / non-array (string|number|object) → 0 (defensive; tool_result content is always an array)
+  }
+  let bytes = 0;
+  for (const block of content) {
+    if (!isRecord(block)) {
+      continue; // null / primitive element → skip (contributes 0)
+    }
+    const type = readOwn(block, "type");
+    if (type === "text") {
+      // TEXT → UTF-8 BYTE length. Multibyte-aware: "café"=5 bytes, NOT 4. (GOTCHA #3 — do NOT use .length here.)
+      bytes += stringByteLength(readOwn(block, "text"));
+    } else if (type === "image") {
+      // IMAGE → base64 char length. Base64 is ASCII → char length == byte length; .length is correct + cheaper on a
+      // potentially-huge blob. (GOTCHA #3 — do NOT switch to Buffer.byteLength; match the contract.)
+      bytes += stringLength(readOwn(block, "data"));
+    }
+    // unknown type → contributes 0 (forward-compat: future block types are measured as nothing until taught).
+  }
+  return bytes;
+}
+
+/**
+ * approxTokens — convert a byte count to an approximate token count (spec/04 §5: stored in
+ * `TurnMetric.bloatHits[].approxTokens`; spec/07 §1: "8 KB ≈ 2k tokens in-context").
+ *
+ * Formula: `Math.ceil(bytes / CHARS_PER_TOKEN)` — reuses S1's exported `CHARS_PER_TOKEN = 4` (the OpenAI
+ * "~4 chars ≈ 1 token" rule of thumb; for ASCII bytes==chars so bytes/4 is the same heuristic on the byte count).
+ * `approxTokens(8192) = 2048` reproduces the spec's own "8 KB ≈ 2k tokens" equivalence EXACTLY — strong
+ * confirmation this is the intended formula. `Math.ceil` (not floor) so a non-empty result reports ≥1 token.
+ *
+ * Defensive: non-finite (`NaN`/`±Infinity`) or negative `bytes` → 0 (Math.ceil would otherwise yield
+ * `NaN`/`Infinity`/a negative — all nonsense token counts; resultBytes never yields these, but approxTokens is a
+ * public helper that may be called with arbitrary input). NEVER throws.
+ *
+ * @param bytes a non-negative byte count (typically resultBytes(content))
+ * @returns non-negative integer approximate token count
+ */
+export function approxTokens(bytes: number): number {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return 0; // NaN / ±Infinity / negative → 0 (defensive; approxTokens is a public helper)
+  }
+  return Math.ceil(bytes / CHARS_PER_TOKEN);
+}
+
+/**
+ * stringByteLength — the UTF-8 BYTE length of a value when it is a string; 0 otherwise. Module-private (not
+ * exported). Uses the Node global `Buffer.byteLength` (no import — GOTCHA #2). `Buffer.byteLength("café","utf8")`
+ * = 5, `"😀"` = 4, `""` = 0. Mirrors S1's `stringLength` (char length) for the byte-length case (GOTCHA #3).
+ */
+function stringByteLength(value: unknown): number {
+  return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+}
