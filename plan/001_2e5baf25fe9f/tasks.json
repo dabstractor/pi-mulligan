@@ -506,21 +506,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Agent-Callable Tools",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Implement the four agent-callable tools: mulligan_rewind (shed context + leave note), mulligan_shrink (replace result with summary), mulligan_checkpoint (tag position), and mulligan_audit (token breakdown of filtered view). Each tool is a thin wrapper: validate input → write marker(s)/note via markers.ts → return confirmation. Tools are write-only w.r.t. the message list (audit is the read-only exception).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "mulligan_rewind Tool (tools/rewind.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the core 'mulligan' tool: shed recent context (last tool-call group, last turn, or back to checkpoint) and leave a structured note. Validates note fields, checks depth guard, composes ledger + note, persists marker + note, returns confirmation with mutation warning.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Implement mulligan_rewind tool — schema, validation, persistence, confirmation",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1",
@@ -542,14 +542,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "mulligan_shrink Tool (tools/shrink.ts)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Implement the shrink tool: replace a specific past tool result's content with a compact replacement in the view. Validates config, validates replacement non-empty, does best-effort match for immediate feedback, persists the shrink marker.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Implement mulligan_shrink tool — schema, validation, persistence, match feedback",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M4.T1.S1",
