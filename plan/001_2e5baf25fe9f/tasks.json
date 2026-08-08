@@ -733,14 +733,14 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "Integration Smoke Harness",
-              "status": "Failed",
+              "status": "Complete",
               "description": "Adapt the proven looper-smoke.proto.ts prototype into a proper integration test harness that drives real pi -p runs and asserts on the structured log + session JSONL. Implements all F-* scenarios from spec/10-testing.md §2.1.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "Adapt looper-smoke prototype into integration harness with F-* scenarios",
-                  "status": "Failed",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M7.T1.S1"
