@@ -221,3 +221,179 @@ function readLedgerList(ledger: unknown, field: keyof FileLedger): string[] {
   }
   return out;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 (P1.M2.T3.S3) — renderBloatReminder + renderDriftNudge (spec/07-preventive-and-nudges.md §1 + §2).
+// APPENDED below the S1 exports/helpers + the S2 renderNote block, which are UNCHANGED and REUSED here
+// (isRecord/readOwn are hoisted in this module scope; no redeclaration). This module already imports TYPE-ONLY
+// { FileLedger } + { Granularity } (S2); S3 adds NO imports — DriftNudgeInput is defined inline, so notes.ts stays
+// Pi-free and unit-testable in isolation. These two renderers are the TEXT core of the two nudges (P1.M6): consumed
+// by nudges.ts (tool_result annotator + turn_end→context injector) but pure + unit-tested without Pi (spec/07 §3,
+// spec/10 §1). This COMPLETES notes.ts (spec/11 §1: "validateNote, renderNote, renderBloatReminder, renderDriftNudge").
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * DriftNudgeInput — the minimal projection of TurnMetric (spec/04-data-model.md §5) that renderDriftNudge needs.
+ * A real TurnMetric is STRUCTURALLY ASSIGNABLE to this (a mutable `{...}[]` widens to `ReadonlyArray<{...}>`
+ * soundly), so nudges.ts / filter.ts pass the full metric with NO cast. EXPORTED so the consumer + tests share one
+ * type. `deltaTokens` is `null` when the token baseline is unknown (first turn / post-reload) — renderDriftNudge
+ * then drops the "added ~<delta>k tokens" clause and leads with bloat (spec/07 §2 edge cases). Only `.length` of
+ * bloatHits is interpolated into the v1 text; the per-hit toolName/approxTokens are reserved for richer nudges.
+ */
+export interface DriftNudgeInput {
+  /** Signed estimate of how much context grew this turn; null when unknown (first turn / post-reload). */
+  deltaTokens: number | null;
+  /** Bloated tool results recorded this turn (empty array if none). */
+  bloatHits: ReadonlyArray<{ toolName: string; approxTokens: number }>;
+}
+
+/**
+ * renderBloatReminder — Nudge A's text (spec/07-preventive-and-nudges.md §1). Composes the short reminder the
+ * tool_result handler APPENDS to a result's content when its byte size exceeds the threshold. The returned string
+ * is the `text` of a `{type:"text"}` content block appended via `[...(event.content ?? []), {type:"text",
+ * text:reminder}]`. ~40 tokens, incurred once per bloated result; advisory (D3) — appended, not replacing.
+ *
+ * FORMAT (spec/07 §1 — VERBATIM; the leading "\n" + "---" is a markdown horizontal rule separating the reminder
+ * from the result body above it; body lines have SPEC-pinned soft line breaks — do NOT reflow):
+ *     \n---\n
+ *     [mulligan] This result is ~<KB> KB in your context (threshold <T> KB).
+ *     If you don't need the full output going forward, call `mulligan_shrink` with a
+ *     summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole
+ *     call was a mistake. (The hidden/shrunk content stays on disk for the human.)
+ * <KB> = bytesToKb(bytes); <T> = bytesToKb(thresholdBytes). NO trailing newline.
+ *
+ * `toolName` is ACCEPTED (the handler passes event.toolName) but is NOT interpolated into the v1 text (the spec
+ * text has no <toolName> placeholder) — RESERVED for future personalization, hence the `_` prefix. This mirrors
+ * tokens.ts `estimateTokens(messages, _model?: unknown)` — the SAME convention for an accepted-but-unused param.
+ *
+ * DEFENSIVE — NEVER throws (fail-open nudge handler; spec/07 §1; E13). Non-finite/negative bytes or thresholdBytes
+ * render as 0 KB (a public helper may receive arbitrary input; resultBytes never yields these but the guard keeps
+ * the function total).
+ *
+ * @param _toolName       the tool that produced the result (ACCEPTED, NOT used in v1 text; reserved for future use)
+ * @param bytes           the result's UTF-8 byte size (from resultBytes — spec/07 §1)
+ * @param thresholdBytes  the configured bloat threshold in bytes (config.nudges.bloatThresholdBytes, default 8192)
+ * @returns the reminder string (leading "\n---\n" + 4-line body; NO trailing newline)
+ */
+export function renderBloatReminder(
+  _toolName: string,
+  bytes: number,
+  thresholdBytes: number,
+): string {
+  const resultKb = bytesToKb(bytes);
+  const thresholdKb = bytesToKb(thresholdBytes);
+  const body = [
+    `[mulligan] This result is ~${resultKb} KB in your context (threshold ${thresholdKb} KB).`,
+    "If you don't need the full output going forward, call `mulligan_shrink` with a",
+    'summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole',
+    "call was a mistake. (The hidden/shrunk content stays on disk for the human.)",
+  ].join("\n");
+  return `\n---\n${body}`;
+}
+
+/**
+ * renderDriftNudge — Nudge B's text (spec/07-preventive-and-nudges.md §2). Composes the annotation the context
+ * handler injects as a NON-persisted `mulligan:nudge` custom message (via injectNudge — spec/06 §1 + spec/07 §2)
+ * when the previous turn grew context over threshold OR produced bloated results. ~25–40 tokens, only when it fires.
+ *
+ * FORMAT (spec/07 §2 — the FIRST line VARIES by input; the two tail lines are FIXED in all cases):
+ *     [mulligan] <first line>.
+ *     If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).
+ *     Run `mulligan_audit` for a breakdown.
+ * <first line> is an explicit if/else over (delta != null) × (bloat non-empty) — the bloat clause's SUBJECT differs
+ * by position (see GOTCHA #6):
+ *   - delta only:        "Previous turn added ~<k> tokens to your context"
+ *   - delta + bloat:     "Previous turn added ~<k> tokens to your context and produced <N> bloated result(s)"
+ *   - bloat only (null): "Previous turn produced <N> bloated result(s)"
+ *   - both empty:        "Previous turn changed your context"   (unreachable via shouldNudge; totality fallback)
+ * <k> = kTokens(delta) (delta/1000, 1 decimal: 4200→"4.2k", 3000→"3k"); <N> = bloatHits.length;
+ * result(s) = resultWord(N) (1→"result", else "results"). NO trailing newline.
+ *
+ * DEFENSIVE — NEVER throws (fail-open nudge handler; spec/07 §2; E13). deltaTokens/bloatHits are read via readOwn
+ * + isRecord/Array.isArray guards (mirrors S2's readLedgerList); a malformed/throwing-Proxy metric renders
+ * gracefully. renderDriftNudge is reached ONLY when shouldNudge is true (grewOverThreshold || bloatHit — spec/06 §1),
+ * so the both-empty case is unreachable in practice; it still returns a deterministic string so the pure function
+ * is total. deltaTokens===null means UNKNOWN (first turn) — it is NOT rendered as "~0k" (a lie); the delta clause
+ * is dropped and bloat leads.
+ *
+ * @param metric the drift metric projection (DriftNudgeInput — deltaTokens + bloatHits)
+ * @returns the nudge string (3 lines joined by "\n"; NO trailing newline)
+ */
+export function renderDriftNudge(metric: DriftNudgeInput): string {
+  const delta = readDelta(metric);
+  const hits = readBloatHits(metric);
+  let firstLine: string;
+  if (delta != null && hits.length > 0) {
+    firstLine = `Previous turn added ~${kTokens(delta)} tokens to your context and produced ${hits.length} bloated ${resultWord(hits.length)}`;
+  } else if (delta != null) {
+    firstLine = `Previous turn added ~${kTokens(delta)} tokens to your context`;
+  } else if (hits.length > 0) {
+    firstLine = `Previous turn produced ${hits.length} bloated ${resultWord(hits.length)}`;
+  } else {
+    firstLine = "Previous turn changed your context"; // unreachable via shouldNudge; totality fallback
+  }
+  return [
+    `[mulligan] ${firstLine}.`,
+    "If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).",
+    "Run `mulligan_audit` for a breakdown.",
+  ].join("\n");
+}
+
+// ── S3 module-private helpers (mirror S2's readLedgerList; reuse S1's isRecord/readOwn) ─────────────
+
+/**
+ * bytesToKb — convert a byte count to an integer KB value for display (spec/07 §1 "<KB> KB"). Math.round(n/1024);
+ * non-finite (NaN/±Infinity) or negative → 0. `bytesToKb(8192)=8`, `bytesToKb(30720)=30` (the spec's "30 KB
+ * read"), `bytesToKb(8704)=9`. Module-private. NEVER throws.
+ */
+function bytesToKb(n: number): number {
+  return Number.isFinite(n) && n >= 0 ? Math.round(n / 1024) : 0;
+}
+
+/**
+ * kTokens — render a token delta as a "k" string (spec/07 §2 "~<delta>k"). Round to 1 decimal place: 4200→"4.2k",
+ * 3000→"3k", 9800→"9.8k" (the spec h2.6 example shows "4.2k"; JS drops the trailing ".0" naturally). Module-private.
+ */
+function kTokens(delta: number): string {
+  return `${Math.round((delta / 1000) * 10) / 10}k`;
+}
+
+/**
+ * resultWord — pluralize "result" for the drift nudge bloat clause (spec/07 §2 "result(s)"). 1→"result",
+ * else→"results". Module-private.
+ */
+function resultWord(n: number): string {
+  return n === 1 ? "result" : "results";
+}
+
+/**
+ * readDelta — read metric.deltaTokens as a finite number, else null (null = "unknown", e.g. first turn — spec/07 §2
+ * edge cases). Defensive, never throws (a Proxy get-trap may throw — readOwn swallows it). Module-private; reuses
+ * S1's readOwn. `deltaTokens === 0` is a real number (returns 0, not null); only a missing/non-number → null.
+ */
+function readDelta(metric: unknown): number | null {
+  const v = readOwn(metric, "deltaTokens");
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * readBloatHits — read metric.bloatHits as a filtered array of {toolName, approxTokens} (only records with a string
+ * toolName + finite number approxTokens survive; [] if absent/non-array). The COUNT (renderDriftNudge uses .length)
+ * is therefore robust to malformed entries. Defensive, never throws. Module-private; reuses S1's isRecord/readOwn
+ * (mirrors S2's readLedgerList).
+ */
+function readBloatHits(metric: unknown): Array<{ toolName: string; approxTokens: number }> {
+  const v = readOwn(metric, "bloatHits");
+  if (!Array.isArray(v)) return [];
+  const out: Array<{ toolName: string; approxTokens: number }> = [];
+  for (const hit of v) {
+    if (isRecord(hit)) {
+      const toolName = readOwn(hit, "toolName");
+      const approxTokens = readOwn(hit, "approxTokens");
+      if (typeof toolName === "string" && typeof approxTokens === "number" && Number.isFinite(approxTokens)) {
+        out.push({ toolName, approxTokens });
+      }
+    }
+  }
+  return out;
+}

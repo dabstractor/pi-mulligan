@@ -2,9 +2,12 @@ import { describe, it, expect, expectTypeOf } from "vitest";
 import {
   validateNote,
   renderNote,
+  renderBloatReminder,
+  renderDriftNudge,
   NOTE_INVALID_REASON,
   type NoteInput,
   type NoteValidation,
+  type DriftNudgeInput,
 } from "../src/notes.js";
 import type { FileLedger } from "../src/ledger.js";
 import type { Granularity } from "../src/config.js";
@@ -388,6 +391,265 @@ describe("renderNote — types", () => {
       readFiles: string[];
       modifiedFiles: string[];
       bashSideEffects: string[];
+    }>();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 (P1.M2.T3.S3) — renderBloatReminder + renderDriftNudge tests
+// (spec/07-preventive-and-nudges.md §1 + §2; spec/10-testing.md §1 Tier 1).
+// APPENDED below the S1 validateNote + S2 renderNote tests, which are UNCHANGED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The two FIXED tail lines of the drift nudge (spec/07 §2) — reused across every drift case. */
+const DRIFT_TAIL = [
+  "If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).",
+  "Run `mulligan_audit` for a breakdown.",
+];
+
+describe("renderBloatReminder — spec/07 §1 pinned format", () => {
+  it("8 KB result at the 8 KB default threshold → '~8 KB … (threshold 8 KB)'; leading \\n---\\n; no trailing newline", () => {
+    const out = renderBloatReminder("read", 8192, 8192);
+    expect(out).toBe(
+      "\n---\n" +
+        [
+          "[mulligan] This result is ~8 KB in your context (threshold 8 KB).",
+          "If you don't need the full output going forward, call `mulligan_shrink` with a",
+          'summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole',
+          "call was a mistake. (The hidden/shrunk content stays on disk for the human.)",
+        ].join("\n"),
+    );
+    expect(out.startsWith("\n---\n")).toBe(true);
+    expect(out.endsWith("\n")).toBe(false); // GOTCHA #3 — no trailing newline
+  });
+
+  it("30 KB result (the spec's '30 KB read') at 8 KB threshold → '~30 KB … (threshold 8 KB)'", () => {
+    const out = renderBloatReminder("read", 30720, 8192);
+    expect(out).toContain("[mulligan] This result is ~30 KB in your context (threshold 8 KB).");
+  });
+
+  it("bytes round to the nearest KB (8704 bytes = 8.5 KB → '~9 KB')", () => {
+    const out = renderBloatReminder("bash", 8704, 8192);
+    expect(out).toContain("This result is ~9 KB in your context (threshold 8 KB).");
+  });
+
+  it("body text is VERBATIM (backticks, the granularity literal, the soft line breaks — GOTCHA #13)", () => {
+    const out = renderBloatReminder("read", 8192, 8192);
+    expect(out).toContain("call `mulligan_shrink` with a\nsummary, or");
+    expect(out).toContain('`mulligan_rewind(granularity:"last_tool_call_group")`');
+    expect(out).toContain("(The hidden/shrunk content stays on disk for the human.)");
+  });
+
+  it("toolName is accepted but NOT interpolated into the v1 text (GOTCHA #4)", () => {
+    const a = renderBloatReminder("read", 8192, 8192);
+    const b = renderBloatReminder("grep", 8192, 8192);
+    expect(a).toBe(b); // identical regardless of toolName — the spec text has no tool-name placeholder
+    expect(a).not.toContain("read");
+    expect(a).not.toContain("grep");
+  });
+});
+
+describe("renderBloatReminder — defensive (NEVER throws / bad numbers → 0 KB — GOTCHA #5/#7)", () => {
+  it("NaN bytes → '~0 KB'", () => {
+    expect(renderBloatReminder("read", NaN, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
+  });
+  it("negative bytes → '~0 KB'", () => {
+    expect(renderBloatReminder("read", -100, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
+  });
+  it("Infinity bytes → '~0 KB'", () => {
+    expect(renderBloatReminder("read", Infinity, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
+  });
+  it("non-finite threshold → 'threshold 0 KB'", () => {
+    expect(renderBloatReminder("read", 8192, NaN)).toContain("(threshold 0 KB).");
+  });
+  it("never throws on any number input", () => {
+    expect(() => renderBloatReminder("read", NaN, NaN)).not.toThrow();
+    expect(() => renderBloatReminder("read", -Infinity, Infinity)).not.toThrow();
+  });
+});
+
+describe("renderBloatReminder — snapshot-style (spec/10 §1.8-style)", () => {
+  // toMatchInlineSnapshot() with no argument: vitest AUTO-WRITES the snapshot on first run (GOTCHA #12).
+  // If your vitest version requires it, run `npx vitest run -u` once, then `npx vitest run`.
+  it("representative 30 KB read at the 8 KB default threshold", () => {
+    expect(renderBloatReminder("read", 30720, 8192)).toMatchInlineSnapshot(`
+      "
+      ---
+      [mulligan] This result is ~30 KB in your context (threshold 8 KB).
+      If you don't need the full output going forward, call \`mulligan_shrink\` with a
+      summary, or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole
+      call was a mistake. (The hidden/shrunk content stays on disk for the human.)"
+    `);
+  });
+});
+
+describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tails FIXED)", () => {
+  it("delta only (4200 tokens) → 'added ~4.2k tokens'; no bloat clause; no trailing newline", () => {
+    const out = renderDriftNudge({ deltaTokens: 4200, bloatHits: [] });
+    expect(out).toBe(["[mulligan] Previous turn added ~4.2k tokens to your context.", ...DRIFT_TAIL].join("\n"));
+    expect(out.endsWith("\n")).toBe(false);
+    expect(out).not.toContain("bloated");
+  });
+
+  it("delta + 1 bloat hit → '… and produced 1 bloated result' (singular)", () => {
+    const out = renderDriftNudge({
+      deltaTokens: 5000,
+      bloatHits: [{ toolName: "read", approxTokens: 7680 }],
+    });
+    expect(out).toBe(
+      ["[mulligan] Previous turn added ~5k tokens to your context and produced 1 bloated result.", ...DRIFT_TAIL].join("\n"),
+    );
+  });
+
+  it("delta + 3 bloat hits → '… and produced 3 bloated results' (plural)", () => {
+    const out = renderDriftNudge({
+      deltaTokens: 8000,
+      bloatHits: [
+        { toolName: "read", approxTokens: 2000 },
+        { toolName: "bash", approxTokens: 1500 },
+        { toolName: "read", approxTokens: 3000 },
+      ],
+    });
+    expect(out).toContain("[mulligan] Previous turn added ~8k tokens to your context and produced 3 bloated results.");
+  });
+
+  it("null delta + 2 bloat hits (first turn) → bloat LEADS as 'Previous turn produced 2 bloated results' (GOTCHA #6)", () => {
+    const out = renderDriftNudge({
+      deltaTokens: null,
+      bloatHits: [
+        { toolName: "read", approxTokens: 2048 },
+        { toolName: "bash", approxTokens: 1024 },
+      ],
+    });
+    expect(out).toBe(["[mulligan] Previous turn produced 2 bloated results.", ...DRIFT_TAIL].join("\n"));
+    expect(out).not.toContain("added ~"); // the delta clause is DROPPED, not rendered as "~0k"
+  });
+
+  it("null delta + empty bloat (defensive, unreachable via shouldNudge) → neutral fallback line", () => {
+    const out = renderDriftNudge({ deltaTokens: null, bloatHits: [] });
+    expect(out).toBe(["[mulligan] Previous turn changed your context.", ...DRIFT_TAIL].join("\n"));
+  });
+
+  it("the two tail lines are FIXED and present in EVERY case", () => {
+    const cases: DriftNudgeInput[] = [
+      { deltaTokens: 4200, bloatHits: [] },
+      { deltaTokens: 5000, bloatHits: [{ toolName: "read", approxTokens: 7680 }] },
+      { deltaTokens: null, bloatHits: [{ toolName: "read", approxTokens: 2048 }] },
+      { deltaTokens: null, bloatHits: [] },
+    ];
+    for (const c of cases) {
+      const out = renderDriftNudge(c);
+      expect(out).toContain(DRIFT_TAIL[0]);
+      expect(out).toContain(DRIFT_TAIL[1]);
+    }
+  });
+});
+
+describe("renderDriftNudge — rounding & pluralization", () => {
+  it("kTokens: 3000→'3k' (trailing .0 dropped), 9800→'9.8k', 42000→'42k'", () => {
+    expect(renderDriftNudge({ deltaTokens: 3000, bloatHits: [] })).toContain("added ~3k tokens");
+    expect(renderDriftNudge({ deltaTokens: 9800, bloatHits: [] })).toContain("added ~9.8k tokens");
+    expect(renderDriftNudge({ deltaTokens: 42000, bloatHits: [] })).toContain("added ~42k tokens");
+  });
+
+  it("pluralization: 1→'result', 2→'results', 5→'results'", () => {
+    const one = renderDriftNudge({ deltaTokens: null, bloatHits: [{ toolName: "x", approxTokens: 1 }] });
+    expect(one).toContain("produced 1 bloated result.");
+    const two = renderDriftNudge({
+      deltaTokens: null,
+      bloatHits: [{ toolName: "a", approxTokens: 1 }, { toolName: "b", approxTokens: 2 }],
+    });
+    expect(two).toContain("produced 2 bloated results.");
+    const five = renderDriftNudge({
+      deltaTokens: null,
+      bloatHits: [1, 2, 3, 4, 5].map((i) => ({ toolName: `t${i}`, approxTokens: i })),
+    });
+    expect(five).toContain("produced 5 bloated results.");
+  });
+});
+
+describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
+  it("a null metric passed as DriftNudgeInput → neutral fallback, not a throw", () => {
+    expect(() => renderDriftNudge(null as unknown as DriftNudgeInput)).not.toThrow();
+    expect(renderDriftNudge(null as unknown as DriftNudgeInput)).toContain("[mulligan] Previous turn changed your context.");
+  });
+
+  it("an array metric → neutral fallback, not a throw", () => {
+    expect(() => renderDriftNudge([1, 2, 3] as unknown as DriftNudgeInput)).not.toThrow();
+  });
+
+  it("a metric with non-array bloatHits → no bloat clause, not a throw", () => {
+    const out = renderDriftNudge({ deltaTokens: 4000, bloatHits: "nope" as unknown as DriftNudgeInput["bloatHits"] });
+    expect(out).toContain("added ~4k tokens to your context.");
+    expect(out).not.toContain("bloated");
+  });
+
+  it("a metric with malformed bloat-hit entries → they are not counted", () => {
+    const out = renderDriftNudge({
+      deltaTokens: null,
+      bloatHits: [{ toolName: "read", approxTokens: 100 }, { foo: "bar" }, null, 42] as unknown as DriftNudgeInput["bloatHits"],
+    });
+    // only the first (valid) entry counts → "produced 1 bloated result."
+    expect(out).toContain("produced 1 bloated result.");
+  });
+
+  it("does not throw on a throwing-Proxy metric (readOwn swallows the get-trap)", () => {
+    const trap = new Proxy(
+      { deltaTokens: 4200, bloatHits: [] } as DriftNudgeInput,
+      new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("trap");
+          },
+        },
+      ),
+    );
+    expect(() => renderDriftNudge(trap)).not.toThrow();
+    // every read throws → delta null + bloat [] → neutral fallback
+    expect(renderDriftNudge(trap)).toContain("[mulligan] Previous turn changed your context.");
+  });
+});
+
+describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
+  it("representative drift-only nudge (~4.2k tokens)", () => {
+    expect(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toMatchInlineSnapshot(`
+      "[mulligan] Previous turn added ~4.2k tokens to your context.
+      If that growth was wasteful, consider \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result).
+      Run \`mulligan_audit\` for a breakdown."
+    `);
+  });
+
+  it("representative first-turn bloat-only nudge (null delta + 2 hits)", () => {
+    expect(
+      renderDriftNudge({
+        deltaTokens: null,
+        bloatHits: [
+          { toolName: "read", approxTokens: 2048 },
+          { toolName: "bash", approxTokens: 1024 },
+        ],
+      }),
+    ).toMatchInlineSnapshot(`
+      "[mulligan] Previous turn produced 2 bloated results.
+      If that growth was wasteful, consider \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result).
+      Run \`mulligan_audit\` for a breakdown."
+    `);
+  });
+});
+
+describe("renderers — types", () => {
+  it("renderBloatReminder returns a string", () => {
+    expectTypeOf(renderBloatReminder("read", 8192, 8192)).toEqualTypeOf<string>();
+  });
+
+  it("renderDriftNudge returns a string", () => {
+    expectTypeOf(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toEqualTypeOf<string>();
+  });
+
+  it("DriftNudgeInput is the 2-field metric projection (spec/04 §5)", () => {
+    expectTypeOf<DriftNudgeInput>().toEqualTypeOf<{
+      deltaTokens: number | null;
+      bloatHits: ReadonlyArray<{ toolName: string; approxTokens: number }>;
     }>();
   });
 });

@@ -104,8 +104,11 @@ The returned string is consumed VERBATIM as `CustomMessage.content` (an agent-fa
 ## 6. Baseline (verified live before writing)
 
 - `npx tsc --noEmit -p tsconfig.json` → **exit 0**.
-- `npx vitest run` → **6 files / 171 tests green** (config 21, ledger 39, log 15, notes 25, runtime 20, tokens 51).
-  - The 25 notes tests come from S1 (validateNote). S2 APPENDS renderNote tests ⇒ grows to 25+N.
+- `npx vitest run` → **6 files / 187 tests green** (config 21, ledger 39, log 15, notes 41, runtime 20, tokens 51).
+  - PARALLEL RACE: a concurrent implementer landed S2 during this research — `src/notes.ts` already has `renderNote`
+    (+ `readNoteField`/`readLedgerList` + the two `import type` lines) and `test/notes.test.ts` has 16 renderNote
+    tests (notes 25→41). The landed code matches this design nearly verbatim. Pre-S2 baseline was 6 files / 171 tests;
+    this PRP is now the SPEC + verification contract (see PRP top note).
 - No eslint/prettier/biome configured (devDeps = typescript + vitest + @types/node only) ⇒ the type+style gate
   is `tsc --noEmit` under `strict`. Do NOT invent a lint/format command.
 - `src/notes.ts` EXISTS (S1 landed it). S2 APPENDS to it; it does NOT rewrite the file.
