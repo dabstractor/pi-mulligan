@@ -753,7 +753,7 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     // root→leaf context-producing entries → messages (1:1):
     //   e1 user   → msgs[0]
     //   e2 asst   → msgs[1]   ← CHECKPOINT targetId = e2  (iTarget = 1)
-    //   e3 result → msgs[2]   ← removed (> iTarget, not excluded)
+    //   e3 result → msgs[2]   ← UNIT-SNAP (BUG-003): toolGroup [1,2]; iTarget snapped 1→2 → result(c1) idx2 now KEPT
     //   e4 asst(text) → msgs[3] ← removed
     const msgs: MessageLike[] = [user("u1"), asst("c1"), result("c1"), asstText("junk")];
     // branchEntries ROOT→LEAF (getBranch() order):
@@ -764,20 +764,51 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     // (assertions below UNCHANGED — see PRP GOTCHA C)
     const res = resolveCheckpoint(msgs, branchEntries, "ckpt");
     expect(res).not.toBeNull();
-    expect(res!.remove).toEqual([2, 3]); // e3(result) + e4(text asst); e2 (the checkpoint) KEPT at idx1
+    expect(res!.remove).toEqual([3]); // UNIT-SNAP (BUG-003): iTarget snapped 1→2 (unit [1,2]); result(c1) idx2 now KEPT → only asstText idx3 removed; pairing-safe
   });
 
   it("keeps the checkpoint point itself (iTarget never in remove) and everything before", () => {
     const msgs: MessageLike[] = [user("u"), asst("c"), result("c")]; // idx0 user, idx1 asst, idx2 result
-    // checkpoint targets e_asst (idx1). iTarget=1. remove=[2].
+    // checkpoint targets e_asst (idx1). UNIT-SNAP (BUG-003): iTarget 1→2 (unit [1,2]); remove=[]. Whole toolGroup kept.
     const branch: BranchEntry[] = [
       entry("e_user", "message"), entry("e_asst", "message"), labelEntry("eL", "e_asst", "p"),
       entry("e_result", "message"),
     ];
     const res = resolveCheckpoint(msgs, branch, "p");
-    expect(res!.remove).toEqual([2]);
+    expect(res!.remove).toEqual([]); // iTarget snapped to 2 → nothing > 2; asst+result both KEPT (orphan-safe)
     expect(res!.remove).not.toContain(1); // checkpoint point kept
     expect(res!.remove).not.toContain(0); // earlier message kept
+  });
+
+  it("UNIT-SNAP (BUG-003 secondary): a checkpoint on an assistant WITH tool calls keeps the WHOLE toolGroup — no orphaned toolCall", () => {
+    // messages: user0, asst(c1)1, result(c1)2, asstText3. checkpoint labels the asst entry (iTarget=1).
+    // WITHOUT the snap: remove=[2,3] → asst(c1) KEPT, result(c1) REMOVED → orphaned toolCall c1 → model API rejects.
+    // WITH the snap: toolGroup [1,2]; iTarget snapped 1→2; remove=[3] → asst(c1) AND result(c1) both KEPT.
+    const msgs: MessageLike[] = [user("u1"), asst("c1"), result("c1"), asstText("junk")];
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("e2", "message"), labelEntry("eL", "e2", "ckpt"),
+      entry("e3", "message"), entry("e4", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "ckpt");
+    expect(res).not.toBeNull();
+    expect(res!.remove).toEqual([3]);          // only asstText idx3 removed
+    expect(res!.remove).not.toContain(1);      // asst(c1) KEPT
+    expect(res!.remove).not.toContain(2);      // result(c1) KEPT — pairing preserved (THE point of the fix)
+  });
+
+  it("UNIT-SNAP: a checkpoint on an assistant with MULTIPLE parallel results keeps the whole multi-result toolGroup", () => {
+    // messages: user0, asst(p1,p2)1, result(p1)2, result(p2)3, asstText4. checkpoint labels asst (iTarget=1).
+    // toolGroup [1,2,3]; iTarget snapped 1→3; remove=[4] → asst + BOTH results KEPT.
+    const msgs: MessageLike[] = [user("u"), asst("p1", "p2"), result("p1"), result("p2"), asstText("tail")];
+    const branch: BranchEntry[] = [
+      entry("eu", "message"), entry("ea", "message"), labelEntry("eL", "ea", "m"),
+      entry("er1", "message"), entry("er2", "message"), entry("et", "message"),
+    ];
+    const res = resolveCheckpoint(msgs, branch, "m");
+    expect(res!.remove).toEqual([4]);          // only the trailing asstText removed
+    expect(res!.remove).not.toContain(1);
+    expect(res!.remove).not.toContain(2);
+    expect(res!.remove).not.toContain(3);      // both results survive → no orphan
   });
 
   it("tail-exclusion: the rewind's own unit (assistant+result issuing excludeToolCallId) survives after iTarget", () => {
@@ -826,7 +857,7 @@ describe("resolveCheckpoint — spec/06 §6 + mapping + compaction-refuse + defe
     ];
     const res = resolveCheckpoint(msgs, branch, "k");
     expect(res).not.toBeNull();
-    expect(res!.remove).toEqual([2, 3]); // result(idx2) + post-compaction asst(idx3) removed; checkpoint asst(idx1) kept
+    expect(res!.remove).toEqual([3]); // UNIT-SNAP (BUG-003): iTarget 1→2 (unit [1,2]); result(c1) idx2 now KEPT → only post-compaction asstText idx3 removed
   });
 
   it("checkpoint not found on branch → null (spec/08 E10)", () => {

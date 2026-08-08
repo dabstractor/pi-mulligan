@@ -419,7 +419,11 @@ export interface BranchEntry {
  *      yield < 0 (compaction/unknown → indeterminate) OR msgCursor+yield > messages.length (alignment lost) → null.
  *      If entry.id === targetId → iTarget = msgCursor + yield - 1 (the entry's LAST message index — kept); break.
  *      Else msgCursor += yield. Loop end without match → null (targetId labels a non-context-producing entry).
- *   5. remove (ascending): for j from iTarget+1..end, skip if rewindOwnIndices.has(j) (the rewind's own unit via
+ *   4b. UNIT-SNAP (BUG-003 secondary / spec/06 §2 cardinal pairing): partitionIntoUnits(messages); if iTarget is
+ *      inside a toolGroup unit, advance it to that unit's MAX index (so the assistant + ALL its toolResults are
+ *      KEPT and `remove` starts strictly after the unit — never orphan a toolCall). Plain (single-message) unit
+ *      → no-op (max === iTarget), so user / text-only-assistant checkpoints are unaffected.
+ *   5. remove (ascending): for j from (unit-snapped) iTarget+1..end, skip if rewindOwnIndices.has(j) (the rewind's own unit via
  *      partitionIntoUnits + assistantIssuedCall, only when excludeToolCallId is a non-empty string) or
  *      isMulliganCustomMessage(messages[j]) (the note/nudge). Else push. (IDENTICAL to resolveLastTurn's rule —
  *      spec/06 §6 step 5 "same tail-exclusion rules as resolveLastTurn".)
@@ -498,11 +502,28 @@ export function resolveCheckpoint(
   }
   if (!found) return null; // targetId labels a non-context-producing entry (filtered out) → refuse (never guess)
 
+  // 4b) UNIT-SNAP (BUG-003 secondary fix / spec/06 §2 cardinal pairing rule): if iTarget lands INSIDE a
+  //     toolGroup unit — e.g. the checkpointed entry is an assistant that issued tool calls — that assistant's
+  //     sibling toolResult indices (iTarget+1, iTarget+2, …) would otherwise be swept into `remove` by step 5,
+  //     KEEPING the toolCall but REMOVING its toolResult → an orphaned toolCall the model API rejects
+  //     (spec/06 §2; api_verification §6.4; spec/08 E1). Snap iTarget FORWARD to the END (max index) of
+  //     whatever unit contains it: the entire unit (assistant + all its results) is then KEPT, and `remove`
+  //     begins strictly AFTER the unit. For a plain (single-message) unit this is a no-op (max === iTarget),
+  //     so checkpoints on user / text-only-assistant messages are unaffected.
+  const units = partitionIntoUnits(messages);
+  for (const unit of units) {
+    if (unit.indices.includes(iTarget)) {
+      iTarget = Math.max(...unit.indices);
+      break;
+    }
+  }
+
   // 5) remove = indices > iTarget, EXCEPT the rewind's own unit + mulligan:* notes (IDENTICAL to resolveLastTurn).
+  //    Reuses `units` from step 4b (partitionIntoUnits is pure; messages is a const param, never mutated).
   const rewindOwnIndices = new Set<number>();
   const hasExclude = typeof excludeToolCallId === "string" && excludeToolCallId.length > 0;
   if (hasExclude) {
-    for (const unit of partitionIntoUnits(messages)) {
+    for (const unit of units) {
       if (unit.kind === "toolGroup" && assistantIssuedCall(messages, unit.indices, excludeToolCallId)) {
         for (const idx of unit.indices) rewindOwnIndices.add(idx); // keep the WHOLE unit (parallel-safe — §9)
       }

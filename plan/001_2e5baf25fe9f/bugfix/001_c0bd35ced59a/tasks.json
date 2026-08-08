@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Fix Checkpoint Resolution (BUG-003)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Fix the three checkpoint issues: (1) resolveCheckpoint branch ordering bug (tests use leaf→root but getBranch returns root→leaf), (2) setCheckpoint labels a transient/wrong entry via getLeafId(), (3) orphaned toolCall when checkpoint target is an assistant with toolCalls. These must be fixed before pinning because resolvePreview (at rewind-creation time) calls resolveCheckpoint to compute the removal set.",
           "tasks": [
             {
@@ -66,14 +66,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Add orphan prevention (unit-snap) to resolveCheckpoint",
-              "status": "Ready",
+              "status": "Complete",
               "description": "If the checkpoint target is an assistant message with toolCalls, resolveCheckpoint keeps the assistant (iTarget) but removes its toolResults (iTarget+1...) — orphaning the toolCall and violating the model API's pairing invariant. Fix by snapping iTarget to the END of its unit via partitionIntoUnits, so the whole toolGroup (assistant + results) is kept together.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Snap iTarget to unit boundary in resolveCheckpoint",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -100,14 +100,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Add hideEntryIds field to marker data model",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add hideEntryIds?: string[] to RewindMarker and RewindMarkerInput (markers.ts) and RewindMarkerLike (transforms.ts). This is the stable anchor field that makes hiding permanent.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Add hideEntryIds to marker type interfaces",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/fix_design.md §Change 1. RewindMarker (src/markers.ts:54-69) and RewindMarkerInput (src/markers.ts:71) are the frozen data model. RewindMarkerLike (src/transforms.ts:790-807) is the structural slice filterPipeline reads. The existing `checkpoint` field already rides the spread mechanism (GOTCHA #1 in rewind.ts) without being in the frozen type — hideEntryIds should work identically, but we add it to the types properly for type safety.\n2. INPUT: The existing RewindMarker interface (markers.ts:54), RewindMarkerInput type (markers.ts:71), RewindMarkerLike interface (transforms.ts:790).\n3. LOGIC: Add `hideEntryIds?: string[]` to all three interfaces. The field is OPTIONAL for backward compatibility (old markers lack it → filterPipeline falls back to relative resolution). Add a JSDoc comment explaining: 'Stable entry IDs of the messages to hide, pinned at marker-creation time. When present, filterPipeline resolves these IDs → current message indices via resolvePinnedHide and removes them. Absent (old markers) → falls back to relative re-resolution.' Run existing tests — they should all pass since the field is optional and additive.\n4. OUTPUT: RewindMarker, RewindMarkerInput, and RewindMarkerLike all have an optional hideEntryIds?: string[] field. No existing tests break.\n5. DOCS: [Mode A] Update JSDoc on RewindMarker/RewindMarkerLike to document hideEntryIds. This rides WITH the work.",
