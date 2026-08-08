@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, applyShrink, resolveShrinkTarget, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -1130,5 +1130,368 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     expectTypeOf(applyShrink([], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(applyShrink([user("u")], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(resolveShrinkTarget([], { by_tool_call_id: "x" })).toEqualTypeOf<number | null>();
+  });
+});
+
+describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3", () => {
+  // ── shared helpers (closure-local; do NOT clash with the module-scope user/asst/result/custom) ──
+  const cfg = { rewind: { protectedRoles: ["first:user", "latest:user"] } } as ProtectedConfig;
+
+  /** Build a RewindMarkerLike (the structural slice filterPipeline reads). */
+  function mkRewind(seq: number, granularity: RewindMarkerLike["granularity"], extra: Partial<RewindMarkerLike> = {}): RewindMarkerLike {
+    return { seq, granularity, ...extra };
+  }
+  /** Build a ShrinkMarkerLike. */
+  function mkShrink(seq: number, target: ShrinkTarget, replacement: string): ShrinkMarkerLike {
+    return { seq, target, replacement };
+  }
+  /** Read the first text block's text from a message (for shrink-content assertions). */
+  function textOf(m: MessageLike): string {
+    const c = m.content;
+    if (Array.isArray(c) && c.length > 0) {
+      const first = c[0] as { text?: unknown };
+      return typeof first.text === "string" ? first.text : "";
+    }
+    return "";
+  }
+
+  // ── stableSortBySeq ───────────────────────────────────────────────────────
+  describe("stableSortBySeq — ascending by seq, stable, non-mutating", () => {
+    it("sorts ascending by seq (oldest-first)", () => {
+      const ms = [{ seq: 3 }, { seq: 1 }, { seq: 2 }];
+      expect(stableSortBySeq(ms).map((m) => m.seq)).toEqual([1, 2, 3]);
+    });
+    it("is stable for equal seq (preserves input order)", () => {
+      const a = { seq: 1, id: "a" }, b = { seq: 1, id: "b" }, c = { seq: 1, id: "c" };
+      expect(stableSortBySeq([c, a, b]).map((m) => m.id)).toEqual(["c", "a", "b"]);
+    });
+    it("returns a NEW array; does not mutate the input", () => {
+      const ms = [{ seq: 2 }, { seq: 1 }];
+      const sorted = stableSortBySeq(ms);
+      expect(sorted).not.toBe(ms);                       // new array
+      expect(ms.map((m) => m.seq)).toEqual([2, 1]);      // input unchanged
+      expect(sorted.map((m) => m.seq)).toEqual([1, 2]);
+    });
+    it("defensive: non-array → []; non-finite seq → 0 (sorted first, stable)", () => {
+      expect(stableSortBySeq(null as unknown as { seq: number }[])).toEqual([]);
+      const ms = [{ seq: NaN }, { seq: 5 }, { seq: "x" as unknown as number }];
+      // NaN + non-number → 0 (sorted first, stable input order); the finite 5 sorts last.
+      const out = stableSortBySeq(ms);
+      expect(out.map((m) => m.seq)).toEqual([NaN, "x" as unknown as number, 5]);
+    });
+  });
+
+  // ── protectedOk ───────────────────────────────────────────────────────────
+  describe("protectedOk — spec/06 §8 first:user defense-in-depth", () => {
+    it("empty remove → true (vacuous)", () => {
+      expect(protectedOk([user("u"), asst("c"), result("c")], [], cfg)).toBe(true);
+    });
+    it("min(remove) > iFirstUser → true (removal stays after the first user)", () => {
+      expect(protectedOk([user("u"), asst("c"), result("c")], [1, 2], cfg)).toBe(true);
+    });
+    it("min(remove) <= iFirstUser → false (would remove the original-task user)", () => {
+      expect(protectedOk([user("u"), asst("c"), result("c")], [0, 1], cfg)).toBe(false);
+    });
+    it("no user message → true (nothing protected by first:user)", () => {
+      expect(protectedOk([asst("c"), result("c")], [0, 1], cfg)).toBe(true);
+    });
+    it("config protectedRoles omits first:user → true (protection disabled by config)", () => {
+      const noFirst = { rewind: { protectedRoles: ["latest:user"] } } as ProtectedConfig;
+      expect(protectedOk([user("u"), asst("c")], [0], noFirst)).toBe(true);
+    });
+    it("defensive: non-array remove → true; undefined config → FAIL SAFE (enforce first:user)", () => {
+      expect(protectedOk([user("u")], null as unknown as number[], cfg)).toBe(true);
+      expect(protectedOk([user("u"), asst("c")], [0], undefined)).toBe(false); // fail safe: protect the original task
+    });
+    it("defensive: throwing-Proxy messages never crash protectedOk", () => {
+      const trap = new Proxy({ role: "user" } as MessageLike, { get() { throw new Error("trap"); } });
+      expect(() => protectedOk([trap], [0], cfg)).not.toThrow(); // reads via isRecord/readOwn → role unreadable → not "user" → no iFirstUser → true
+    });
+  });
+
+  // ── filterPipeline — spec/10 §1.9 composition ─────────────────────────────
+  describe("filterPipeline — spec/10 §1.9 composition (rewinds then shrinks)", () => {
+    it("spec/10 §1.9 bullet 1 — two rewinds compose (rewind#1 removes the mistake; rewind#2 no-ops)", () => {
+      // messages: [u0, a1(mistake call cM), r1, aR1(rewind#1 own call cR1), resR1, note1]
+      const msgs: MessageLike[] = [
+        user("u0"), asst("cM"), result("cM"), asst("cR1"), result("cR1"), custom("mulligan:note"),
+      ];
+      const markers: MarkerBundle = {
+        // rewind#1 (older, applied first) excludes its own call cR1 → resolves to the last non-excluded toolGroup
+        // (a1/r1 at indices 1,2). rewind#2 (same exclude cR1) re-resolves against the reduced array: the only toolGroup
+        // left is aR1/resR1 (excluded) → null → no-op. (The exclude-own-call mechanic is single-rewind; see GOTCHA #3
+        // for why spec/06 §11's "two distinct removals" narrative is an erratum.)
+        rewinds: [
+          mkRewind(1, "last_tool_call_group", { excludeToolCallId: "cR1" }),
+          mkRewind(2, "last_tool_call_group", { excludeToolCallId: "cR1" }),
+        ],
+        shrinks: [],
+      };
+      const out = filterPipeline(msgs, markers, cfg);
+      expect(out).toHaveLength(4);                                  // a1/r1 removed; aR1/resR1/note kept
+      expect(out.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "custom"]);
+      expect(out[3]).toBe(msgs[5]);                                 // the note survives (same ref)
+    });
+
+    it("spec/10 §1.9 bullet 2 — rewind-then-shrink-on-removed-target → shrink no-ops", () => {
+      // rewind removes a1/r1 (the bloated result); the shrink targets r1's callId cM (now gone) → resolveShrinkTarget
+      // returns null → applyShrink no-ops (SAME ref). Harmless composition (spec/06 §5 "shrink after rewind … no-ops").
+      const msgs: MessageLike[] = [
+        user("u0"),
+        asst("cM"),
+        { ...result("cM"), content: [{ type: "text", text: "BIG" }] },
+        asst("cR1"),
+        result("cR1"),
+        custom("mulligan:note"),
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [mkRewind(1, "last_tool_call_group", { excludeToolCallId: "cR1" })],
+        shrinks: [mkShrink(2, { by_tool_call_id: "cM" }, "[shrunk]")],
+      };
+      const out = filterPipeline(msgs, markers, cfg);
+      expect(out).toHaveLength(4);                                  // a1/r1 removed by rewind
+      expect(out.some((m) => textOf(m) === "[shrunk]")).toBe(false); // shrink no-op'd (target gone)
+    });
+
+    it("spec/10 §1.9 bullet 3 — protected message → rewind skipped (first user never removed)", () => {
+      // A last_turn rewind with to_previous_prompt on a SINGLE-user session: resolveLastTurn REFUSES (iFirst===iLast)
+      // → remove=[] → protectedOk vacuously true → applyRewind no-op. The first user is never removed (layered
+      // protection: resolver refusal + protectedOk defense-in-depth — GOTCHA #7).
+      const msgs: MessageLike[] = [user("u0"), asst("c"), result("c")];
+      const markers: MarkerBundle = {
+        rewinds: [mkRewind(1, "last_turn", { options: { to_previous_prompt: true }, excludeToolCallId: "c" })],
+        shrinks: [],
+      };
+      const out = filterPipeline(msgs, markers, cfg);
+      expect(out).toHaveLength(3);                                  // nothing removed — first user protected
+      expect(out[0].role).toBe("user");
+    });
+
+    it("shrinks compose through the pipeline oldest-first (two shrinks → both applied)", () => {
+      const msgs: MessageLike[] = [
+        user("u0"),
+        asst("c1"),
+        { ...result("c1"), content: [{ type: "text", text: "BIG1" }] },
+        asst("c2"),
+        { ...result("c2"), content: [{ type: "text", text: "BIG2" }] },
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [
+          mkShrink(1, { by_tool_call_id: "c1" }, "[s1]"),
+          mkShrink(2, { by_tool_call_id: "c2" }, "[s2]"),
+        ],
+      };
+      const out = filterPipeline(msgs, markers, cfg);
+      expect(out).toHaveLength(5);
+      expect(textOf(out[2])).toBe("[s1]");
+      expect(textOf(out[4])).toBe("[s2]");
+    });
+
+    it("last_turn rewind through the pipeline keeps the rewind's own unit + the note", () => {
+      // [u0, a1, r1, u1, a2, r2, aR1, resR1, note1] — last_turn (default, exclude cR1) removes a2/r2 (the turn's work
+      // after u1) but KEEPS u1, the rewind's own unit (aR1/resR1), and the note.
+      const msgs: MessageLike[] = [
+        user("u0"), asst("c1"), result("c1"), user("u1"),
+        asst("c2"), result("c2"), asst("cR1"), result("cR1"), custom("mulligan:note"),
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [mkRewind(1, "last_turn", { excludeToolCallId: "cR1" })],
+        shrinks: [],
+      };
+      const out = filterPipeline(msgs, markers, cfg);
+      expect(out.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "user", "assistant", "toolResult", "custom"]);
+      // u0,a1,r1,u1 kept; a2,r2 removed (turn work); aR1,resR1 (rewind's own unit) + note kept.
+    });
+
+    it("checkpoint rewind through the pipeline removes everything after the checkpoint point", () => {
+      // branchEntries (leaf→root): [message u0, message a1, label checkpoint "x" targeting a1]. messages = [u0, a1, r1?]
+      // — to keep it simple: a 2-message prefix [u0, a1text] with a checkpoint labeling a1; a checkpoint rewind hides
+      // everything after the checkpoint (nothing here → remove=[]). We instead label an EARLIER point to force a removal.
+      const msgs: MessageLike[] = [user("u0"), asstText("keep"), asstText("drop1"), asstText("drop2")];
+      // branchEntries leaf→root: label "mulligan:checkpoint:x" targets the entry yielding message index 1 (asstText keep).
+      const branchEntries: BranchEntry[] = [
+        { type: "message", id: "e3", parentId: "e2" }, // msg index 3 (drop2) — leaf
+        { type: "message", id: "e2", parentId: "e1" }, // msg index 2 (drop1)
+        { type: "message", id: "e1", parentId: "e0" }, // msg index 1 (keep)
+        { type: "label", id: "L1", parentId: "e0", targetId: "e1", label: "mulligan:checkpoint:x" },
+        { type: "message", id: "e0", parentId: null }, // msg index 0 (u0) — root
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [mkRewind(1, "checkpoint", { checkpoint: "x", excludeToolCallId: undefined })],
+        shrinks: [],
+      };
+      const out = filterPipeline(msgs, markers, cfg, branchEntries);
+      // iTarget = 1 (the checkpointed message "keep"); remove = indices > 1 → [2,3]. Result = [u0, keep].
+      expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+      expect((out[1].content as unknown as { text: string }[])[0].text).toBe("keep");
+    });
+
+    it("defensive: no markers → SAME reference; non-array messages → []; non-record markers → pass-through", () => {
+      const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+      expect(filterPipeline(msgs, undefined, cfg)).toBe(msgs);          // no markers → same ref
+      expect(filterPipeline(msgs, null as unknown as MarkerBundle, cfg)).toBe(msgs); // non-record markers → same ref
+      expect(filterPipeline(msgs, { rewinds: [], shrinks: [] }, cfg)).toBe(msgs);    // empty markers → same ref
+      expect(filterPipeline(null as unknown as MessageLike[], { rewinds: [], shrinks: [] }, cfg)).toEqual([]);
+    });
+
+    it("defensive: unknown granularity + malformed markers are skipped (never throws — spec/08 E13)", () => {
+      const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
+      const markers = {
+        rewinds: [{ seq: 1, granularity: "bogus" }, { seq: 2 }], // unknown granularity + missing granularity
+        shrinks: [{ seq: 1 }],                                    // missing target/replacement → applyShrink no-ops
+      } as unknown as MarkerBundle;
+      expect(() => filterPipeline(msgs, markers, cfg)).not.toThrow();
+      expect(filterPipeline(msgs, markers, cfg)).toBe(msgs);          // all no-ops → same ref
+    });
+
+    it("purity: never mutates the input messages array or the markers", () => {
+      const msgs: MessageLike[] = [user("u"), asst("cM"), result("cM"), asst("cR1"), result("cR1"), custom("mulligan:note")];
+      const markers: MarkerBundle = {
+        rewinds: [mkRewind(1, "last_tool_call_group", { excludeToolCallId: "cR1" })],
+        shrinks: [],
+      };
+      const snapshotRoles = msgs.map((m) => m.role);
+      filterPipeline(msgs, markers, cfg);
+      expect(msgs.map((m) => m.role)).toEqual(snapshotRoles);         // input untouched
+      expect(msgs).toHaveLength(6);
+      expect(markers.rewinds[0].seq).toBe(1);                         // markers untouched
+    });
+
+    it("returns MessageLike[] (stableSortBySeq is generic; protectedOk returns boolean)", () => {
+      expectTypeOf(filterPipeline([], undefined, undefined)).toEqualTypeOf<MessageLike[]>();
+      expectTypeOf(filterPipeline([user("u")], { rewinds: [], shrinks: [] }, cfg)).toEqualTypeOf<MessageLike[]>();
+      expectTypeOf(protectedOk([], [], cfg)).toEqualTypeOf<boolean>();
+    });
+  });
+
+  // ── filterPipeline — spec/10 §3 property/invariant tests (seeded, deterministic; no external dep) ──
+  describe("filterPipeline — spec/10 §3 property/invariant tests (seeded)", () => {
+    /** Deterministic mulberry32 PRNG (no external dep). Fixed seed → reproducible. */
+    function mulberry32(seed: number): () => number {
+      let s = seed >>> 0;
+      return function () {
+        s = (s + 0x6d2b79f5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    /** Build a WELL-FORMED random message list: user / text-assistant / fully-paired assistant+results (ADJACENT, so
+     *  pairs are never split across a turn boundary → removals preserve pairing). */
+    function genMessages(rng: () => number): MessageLike[] {
+      const n = 2 + Math.floor(rng() * 8); // 2..9 entries
+      const msgs: MessageLike[] = [];
+      let callCounter = 0;
+      for (let i = 0; i < n; i++) {
+        const roll = rng();
+        if (roll < 0.34) {
+          msgs.push(user(`u${i}`));
+        } else if (roll < 0.6) {
+          msgs.push(asstText(`text${i}`));
+        } else {
+          const calls = 1 + Math.floor(rng() * 2); // 1-2 calls
+          const ids: string[] = [];
+          for (let k = 0; k < calls; k++) { callCounter++; ids.push(`c${callCounter}`); }
+          msgs.push(asst(...ids));
+          for (const id of ids) msgs.push(result(id)); // ADJACENT → pair block is contiguous
+        }
+      }
+      return msgs;
+    }
+    /** Assert the output never contains an orphan toolCall or toolResult (the pairing invariant — spec/10 §3). */
+    function expectNoOrphans(msgs: MessageLike[]): void {
+      const calls = new Set<string>();
+      const results = new Set<string>();
+      for (const m of msgs) {
+        const c = m.content;
+        if (Array.isArray(c)) {
+          for (const b of c) {
+            const blk = b as { type?: string; id?: string };
+            if (blk?.type === "toolCall" && typeof blk.id === "string") calls.add(blk.id);
+          }
+        }
+        if (m.role === "toolResult" && typeof m.toolCallId === "string") results.add(m.toolCallId);
+      }
+      for (const id of calls) expect(results.has(id), `orphan toolCall ${id} (no matching result)`).toBe(true);
+      for (const id of results) expect(calls.has(id), `orphan toolResult ${id} (no matching call)`).toBe(true);
+    }
+
+    it("pairing invariant: random markers never produce an orphan toolCall/toolResult (spec/10 §3)", () => {
+      const rng = mulberry32(0xc0ffee);
+      for (let iter = 0; iter < 300; iter++) {
+        const msgs = genMessages(rng);
+        const rewinds: RewindMarkerLike[] = [];
+        for (let r = 0; r < 2; r++) {
+          if (rng() < 0.5) {
+            rewinds.push(
+              mkRewind(r + 1, rng() < 0.5 ? "last_tool_call_group" : "last_turn", {
+                excludeToolCallId: rng() < 0.5 ? `c${1 + Math.floor(rng() * 4)}` : undefined,
+              }),
+            );
+          }
+        }
+        const out = filterPipeline(msgs, { rewinds, shrinks: [] }, cfg);
+        expectNoOrphans(out);
+      }
+    });
+
+    it("monotonic shrinkage: a rewind never increases the message count (spec/10 §3)", () => {
+      const rng = mulberry32(0xbeef);
+      for (let iter = 0; iter < 300; iter++) {
+        const msgs = genMessages(rng);
+        const rewinds: RewindMarkerLike[] = [];
+        if (rng() < 0.7) {
+          rewinds.push(
+            mkRewind(1, rng() < 0.5 ? "last_tool_call_group" : "last_turn", {
+              excludeToolCallId: `c${1 + Math.floor(rng() * 3)}`,
+            }),
+          );
+        }
+        const out = filterPipeline(msgs, { rewinds, shrinks: [] }, cfg);
+        expect(out.length, "rewind never increases count").toBeLessThanOrEqual(msgs.length);
+      }
+    });
+
+    it("idempotency (shrinks): filterPipeline(filterPipeline(m)) === filterPipeline(m) (spec/10 §3)", () => {
+      // Shrinks are STRICTLY idempotent: a by_tool_call_id shrink re-matches the same toolResult (the first shrink's
+      // spread PRESERVED toolCallId) and re-substitutes the SAME replacement → identical output. (The general
+      // filterPipeline∘filterPipeline property does NOT hold for multi-group last_tool_call_group rewinds under live
+      // re-resolution — GOTCHA #8; this test exercises the shrink path where it always holds.)
+      const rng = mulberry32(0xf00d);
+      for (let iter = 0; iter < 200; iter++) {
+        const msgs = genMessages(rng);
+        const callIds: string[] = [];
+        for (const m of msgs) if (m.role === "toolResult" && typeof m.toolCallId === "string") callIds.push(m.toolCallId);
+        const shrinks: ShrinkMarkerLike[] = [];
+        for (let s = 0; s < 2 && callIds.length > 0; s++) {
+          const id = callIds[Math.floor(rng() * callIds.length)];
+          shrinks.push(mkShrink(s + 1, { by_tool_call_id: id }, `[s${s}]`));
+        }
+        const markers: MarkerBundle = { rewinds: [], shrinks };
+        const once = filterPipeline(msgs, markers, cfg);
+        const twice = filterPipeline(once, markers, cfg);
+        expect(twice).toEqual(once);
+      }
+    });
+
+    it("determinism: the same input always yields the same output (spec/03 §5 / spec/06 §11 re-fire idempotency)", () => {
+      // The spec's idempotency guarantee is "re-firing on the same session reproduces the same result" = DETERMINISM
+      // (same input → same output). This ALWAYS holds for the pure pipeline (GOTCHA #8).
+      const rng = mulberry32(0x1234);
+      for (let iter = 0; iter < 200; iter++) {
+        const msgs = genMessages(rng);
+        const rewinds: RewindMarkerLike[] = [];
+        if (rng() < 0.6) {
+          rewinds.push(
+            mkRewind(1, "last_tool_call_group", { excludeToolCallId: `c${1 + Math.floor(rng() * 3)}` }),
+          );
+        }
+        const markers: MarkerBundle = { rewinds, shrinks: [] };
+        const a = filterPipeline(msgs, markers, cfg);
+        const b = filterPipeline(msgs, markers, cfg);
+        expect(b).toEqual(a);
+      }
+    });
   });
 });

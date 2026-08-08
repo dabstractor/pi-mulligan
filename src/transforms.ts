@@ -763,3 +763,266 @@ function stringifyContent(content: unknown): string {
   }
   return "";
 }
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// COMPOSITION CORE — filterPipeline + stableSortBySeq + protectedOk (P1.M3.T5.S1)
+// The single PURE entry point the context handler (filter.ts, P1.M4.T2) calls:
+// `return { messages: filterPipeline(event.messages, readMarkers(ctx), config, branchEntries) }`.
+// Reuses partitionIntoUnits / resolveLastToolCallGroup / resolveLastTurn / resolveCheckpoint / applyRewind /
+// applyShrink / ShrinkTarget / MessageLike / BranchEntry + the module-private isRecord / readOwn — all in scope.
+// ZERO new imports (the module is Pi-FREE; `grep -c '^import'` stays 0). The four marker/config types are declared
+// LOCALLY (structurally identical to markers.ts/config.ts exports — a real one assigns in with NO cast — GOTCHA #1).
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * RewindMarkerLike — the structural slice of a persisted RewindMarker that filterPipeline READS (spec/04 §3; spec/06
+ * §1/§12). Declared LOCALLY (structurally identical to markers.ts's RewindMarker) so transforms.ts stays Pi-FREE
+ * (0 imports — it must NOT import from markers.ts, which pulls in Pi). This mirrors the MessageLike / ShrinkTarget /
+ * BranchEntry convention. A real markers.ts RewindMarker assigns in with NO cast. EXPORTED so filter.ts (P1.M4.T2),
+ * the audit tool, and tests share one shape at the pure tier.
+ *
+ * NOTE: spec/04 §3 RewindMarker lists granularity as only the two relative literals, but spec/05 §1/§6 + config.ts's
+ * Granularity union require "checkpoint"; and spec/04 §3 has NO `checkpoint` field though spec/06 §12 + spec/05 require
+ * it for checkpoint granularity. This type includes BOTH (granularity union + optional checkpoint) — a real checkpoint
+ * rewind marker (built by the rewind tool P1.M5.T1) assigns in; filterPipeline reads checkpoint defensively via readOwn
+ * (absent → checkpoint rewind no-ops).
+ */
+export interface RewindMarkerLike {
+  /** Monotonic per-session counter (runtime.ts nextSeq); orders markers oldest-first (stableSortBySeq). */
+  seq: number;
+  /** The targeting spec the filter resolves each inference (config.ts Granularity union). */
+  granularity: "last_tool_call_group" | "last_turn" | "checkpoint";
+  /** last_turn only — nuclear mode (also discard the most recent user message). Default false. */
+  options?: { to_previous_prompt?: boolean };
+  /** toolCallId of THIS rewind's own tool call (filter skips its group for last_tool_call_group; keeps its unit for
+   *  last_turn/checkpoint). Absent/empty/non-string → not skipped/kept. */
+  excludeToolCallId?: string;
+  /** checkpoint only — the checkpoint name (without the mulligan:checkpoint: prefix). Absent → checkpoint rewind no-ops. */
+  checkpoint?: string;
+}
+
+/**
+ * ShrinkMarkerLike — the structural slice of a persisted ShrinkMarker that filterPipeline READS + ORDERS (spec/04 §4;
+ * spec/06 §5). Structurally identical to markers.ts's ShrinkMarker minus the envelope/id/ts/reason; adds `seq` (which
+ * applyShrink's {target, replacement} param does not name) so stableSortBySeq can order shrinks oldest-first. A real
+ * ShrinkMarker assigns in with NO cast; ShrinkMarkerLike is ASSIGNABLE to applyShrink's {target, replacement} param
+ * (extra `seq` is fine for a non-literal argument — GOTCHA #4). EXPORTED.
+ */
+export interface ShrinkMarkerLike {
+  seq: number;
+  target: ShrinkTarget;
+  replacement: string;
+}
+
+/**
+ * MarkerBundle — the marker set filterPipeline transforms (spec/06 §1 readMarkers output, MINUS the turn-metric which
+ * the nudge injector consumes — NOT this pipeline). rewinds are applied oldest-first (stableSortBySeq) BEFORE shrinks
+ * (spec/03 §5; spec/06 §1/§12). EXPORTED so filter.ts (P1.M4.T2) types its readMarkers return + tests build typed fixtures.
+ */
+export interface MarkerBundle {
+  rewinds: RewindMarkerLike[];
+  shrinks: ShrinkMarkerLike[];
+}
+
+/**
+ * ProtectedConfig — the structural slice of MulliganConfig that protectedOk READS (spec/06 §8; spec/04 §7
+ * config.rewind.protectedRoles). Declared LOCALLY (a real MulliganConfig from config.ts assigns in with NO cast) so
+ * transforms.ts stays Pi-FREE (0 imports — config.ts is Pi-free BUT importing it would break the foundational 0-import
+ * invariant). v1 protectedRoles selectors: "first:user", "latest:user". EXPORTED.
+ */
+export interface ProtectedConfig {
+  rewind: { protectedRoles: string[] };
+}
+
+/**
+ * stableSortBySeq — return a NEW array of markers sorted ASCENDING by `seq` (oldest-first), preserving input order for
+ * equal seq (stable). seq is a monotonic per-session counter (runtime.ts nextSeq — ties impossible by construction, but
+ * the sort is stable regardless). Used by filterPipeline to apply rewinds then shrinks oldest-first (spec/06 §1
+ * "stableSortBySeq orders markers by their seq"; spec/03 §5 "oldest marker first … later rewinds resolve against the
+ * already-reduced array").
+ *
+ * Defensive + TOTAL: a non-array `markers` → []; a marker whose seq is not a finite number is treated as 0 (sorted
+ * first); a throwing-Proxy marker's seq is read via readOwn (never throws — E13). NEVER mutates the input (returns a
+ * shallow copy via [...markers]; the marker OBJECTS are shared by reference — filterPipeline does not mutate them).
+ *
+ * @param markers the marker array (rewinds OR shrinks); non-array → []
+ * @returns a NEW array, sorted ascending by seq (stable); the input array is unchanged
+ */
+export function stableSortBySeq<T extends { seq?: unknown }>(markers: T[]): T[] {
+  if (!Array.isArray(markers)) return [];
+  // Shallow copy (do NOT mutate the input) then stable ascending sort by seq. Array.prototype.sort is stable in Node
+  // (ES2019-mandated) so equal-seq markers keep input order (ties impossible by construction, but stable regardless).
+  return [...markers].sort((a, b) => readOwnSeq(a) - readOwnSeq(b));
+}
+
+/** Module-private: read a marker's `seq` as a finite number (0 if missing/non-finite/throwing-Proxy). Never throws. */
+function readOwnSeq(marker: unknown): number {
+  const s = readOwn(marker, "seq");
+  return typeof s === "number" && Number.isFinite(s) ? s : 0;
+}
+
+/**
+ * protectedOk — the FILTER's defense-in-depth protected-message check for a rewind's removal set (spec/06 §8; spec/03
+ * §3). Returns true when the rewind is ALLOWED to remove `remove`; false when it must be SKIPPED (the pipeline no-ops
+ * the rewind; filter.ts logs a warn).
+ *
+ * RULE (spec/06 §8, verbatim): "compute iFirstUser and iLatestUser in messages. A rewind's remove set MUST satisfy
+ * min(remove) > iFirstUser." This function enforces the FIRST:USER boundary — a rewind may not remove the original-task
+ * user message (or anything at/before it). The LATEST:USER boundary + the to_previous_prompt refusal are enforced BY
+ * CONSTRUCTION in resolveLastTurn (default keeps iLastUser; nuclear refuses when iFirstUser===iLastUser — already
+ * implemented + tested). protectedOk is the filter's DOUBLE-CHECK (spec/06 §8 "the filter double-checks and no-ops as
+ * defense-in-depth") so a buggy/adversarial resolver cannot cross the line (GOTCHA #7: the real resolvers never cross
+ * iFirstUser by construction, so this block is defense-in-depth).
+ *
+ * v1 config.rewind.protectedRoles supports exactly ["first:user","latest:user"] (spec/04 §7; config.ts KNOWN set). This
+ * function honors "first:user" when present (the default — always present in a valid config). An empty/absent/malformed
+ * protectedRoles → STILL enforce first:user (FAIL SAFE: when in doubt, protect the original task — never silently remove
+ * it — GOTCHA #10). A non-empty protectedRoles that explicitly OMITS "first:user" → protection disabled (→ true). NEVER
+ * throws (every read via isRecord/readOwn).
+ *
+ * @param messages the CURRENT message list (a real Pi AgentMessage[] assigns in); non-array → true (vacuous)
+ * @param remove the rewind's removal index set; empty/non-array → true (nothing to remove → vacuously ok)
+ * @param config the config slice (rewind.protectedRoles); missing/malformed → enforce first:user (fail safe)
+ * @returns true if the rewind may proceed; false if it must be skipped (crosses the first:user boundary)
+ */
+export function protectedOk(
+  messages: MessageLike[],
+  remove: number[],
+  config: ProtectedConfig | undefined,
+): boolean {
+  // Nothing to remove → vacuously allowed (resolver returned [] — a no-op/refused rewind).
+  if (!Array.isArray(remove) || remove.length === 0) return true;
+  if (!Array.isArray(messages)) return true; // vacuous (filterPipeline guards non-array → [] upstream)
+
+  // Does the config protect the FIRST user message? Default YES (v1 always includes "first:user"). FAIL SAFE: enforce
+  // UNLESS protectedRoles is a NON-EMPTY array that explicitly OMITS "first:user" (GOTCHA #10).
+  let protectFirstUser = true;
+  const rewindCfg = isRecord(config) ? readOwn(config, "rewind") : undefined;
+  const roles = isRecord(rewindCfg) ? readOwn(rewindCfg, "protectedRoles") : undefined;
+  if (Array.isArray(roles) && roles.length > 0) {
+    protectFirstUser = roles.some((r) => r === "first:user");
+  }
+  if (!protectFirstUser) return true; // config explicitly disables first:user protection → allow
+
+  // iFirstUser = index of the FIRST "user" message (the original task).
+  let iFirstUser = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") {
+      iFirstUser = i;
+      break;
+    }
+  }
+  if (iFirstUser === -1) return true; // no user message → nothing protected by first:user → allow
+
+  // min(remove) MUST be > iFirstUser (spec/06 §8). Non-number/NaN entries are ignored (never a valid array index).
+  let minRemove = Infinity;
+  for (const r of remove) {
+    if (typeof r === "number" && !Number.isNaN(r) && r < minRemove) minRemove = r;
+  }
+  if (!Number.isFinite(minRemove)) return true; // no numeric remove entries → vacuous
+  return minRemove > iFirstUser;
+}
+
+/**
+ * filterPipeline — Mulligan's composition core: apply persisted markers to a message list, returning the filtered view
+ * the model sees (spec/06-context-filter.md §1, §5, §8, §11, §12; spec/03 §5 ordering/composition/idempotency). The
+ * single PURE entry point the context handler (filter.ts, P1.M4.T2) calls: `return { messages: filterPipeline(...) }`.
+ *
+ * ORDER (FIXED — spec/03 §5; spec/06 §1/§12):
+ *   1. REWINDS oldest-first (stableSortBySeq). For each rewind: resolve its removal set by granularity AGAINST THE
+ *      CURRENT (already-reduced) array, check protectedOk (defense-in-depth — skip on false), then applyRewind
+ *      (gap-closing index removal). Each rewind mutates the working array; later rewinds resolve against the
+ *      already-reduced array (spec/03 §5).
+ *   2. SHRINKS oldest-first (stableSortBySeq), on the post-rewind array: applyShrink per marker (content substitution).
+ *   3. Return the array. (Nudge injection — spec/06 §1 step 3 / §12 — is filter.ts's concern, NOT this pure pipeline;
+ *      filterPipeline transforms markers ONLY. GOTCHA #13.)
+ *
+ * GRANULARITY DISPATCH (spec/06 §12, with the re-partition FIX — GOTCHA #2):
+ *   - "last_tool_call_group": RE-PARTITION the current array FRESH (partitionIntoUnits(m)), then
+ *     resolveLastToolCallGroup(units, m, excludeToolCallId). (The §12 pseudocode partitions ONCE before the loop — a
+ *     stale-index bug after the first rewind reduces m, because resolveLastToolCallGroup returns unit.indices that index
+ *     the partitioned array. Re-partitioning each iteration keeps them valid against the current m.)
+ *   - "last_turn": resolveLastTurn(m, rw.options, excludeToolCallId).remove. (options carries to_previous_prompt
+ *     VERBATIM — GOTCHA #5.)
+ *   - "checkpoint": resolveCheckpoint(m, branchEntries ?? [], rw.checkpoint, excludeToolCallId)?.remove ?? []. (Takes
+ *     branchEntries DATA, NOT ctx — GOTCHA #6.)
+ *
+ * IDEMPOTENCY (spec/03 §5; spec/06 §11): re-firing the pipeline on the SAME input reproduces the SAME output
+ * (deterministic — the spec's "re-firing on the same session reproduces the same result"). Shrinks are STRICTLY
+ * idempotent under filterPipeline∘filterPipeline (re-substituting the same replacement = same result). Rewinds are
+ * idempotent in the common single-mistake case (after removal, no further non-excluded group remains → second pass
+ * no-ops); the general filterPipeline(filterPipeline(m))===filterPipeline(m) does NOT hold for multi-group
+ * last_tool_call_group rewinds under live re-resolution (GOTCHA #8). See research/verification.md §4.
+ *
+ * Pure + defensive + TOTAL: non-array messages → []; non-record markers → pass-through (rewinds/shrinks default to []);
+ * protectedOk false → rewind skipped (no throw); a throwing-Proxy message never crashes (every read via
+ * isRecord/readOwn; applyRewind never reads message internals; applyShrink is already try/caught — GOTCHA #12).
+ * Side-effect-free (never mutates `messages` or the markers). NO new imports (reuses everything already in module
+ * scope; the Pi-free `grep -c '^import'` invariant stays 0).
+ *
+ * @param messages      the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
+ * @param markers       { rewinds, shrinks } (a real readMarkers output assigns in); undefined/non-record → pass-through
+ * @param config        the config slice protectedOk reads (rewind.protectedRoles); undefined → enforce first:user
+ * @param branchEntries getBranch() output for checkpoint rewinds (leaf→root); optional — absent → checkpoint no-ops
+ * @returns the filtered message array; the SAME reference as `messages` when no marker transforms anything
+ */
+export function filterPipeline(
+  messages: MessageLike[],
+  markers: MarkerBundle | undefined,
+  config: ProtectedConfig | undefined,
+  branchEntries?: BranchEntry[],
+): MessageLike[] {
+  // Defensive: a non-array messages → [] (mirrors partitionIntoUnits/applyRewind/applyShrink).
+  if (!Array.isArray(messages)) return [];
+
+  // Read the marker arrays defensively (non-record markers / missing arrays → []).
+  const bundle = isRecord(markers) ? markers : undefined;
+  const rewindsRaw = bundle ? readOwn(bundle, "rewinds") : undefined;
+  const shrinksRaw = bundle ? readOwn(bundle, "shrinks") : undefined;
+  const rewinds: RewindMarkerLike[] = Array.isArray(rewindsRaw) ? (rewindsRaw as RewindMarkerLike[]) : [];
+  const shrinks: ShrinkMarkerLike[] = Array.isArray(shrinksRaw) ? (shrinksRaw as ShrinkMarkerLike[]) : [];
+
+  let m = messages;
+
+  // 1) REWINDS, oldest-first (stableSortBySeq). Each resolves against the CURRENT m; protectedOk gates each.
+  for (const rw of stableSortBySeq(rewinds)) {
+    const granularity = readOwn(rw, "granularity");
+    const excludeRaw = readOwn(rw, "excludeToolCallId");
+    const excludeId = typeof excludeRaw === "string" ? excludeRaw : undefined;
+
+    let remove: number[];
+    if (granularity === "last_tool_call_group") {
+      // RE-PARTITION fresh each iteration so unit.indices index the CURRENT m (GOTCHA #2 — the §12 pseudocode's
+      // partition-once is a stale-index bug after the first rewind reduces m).
+      const units = partitionIntoUnits(m);
+      remove = resolveLastToolCallGroup(units, m, excludeId) ?? [];
+    } else if (granularity === "last_turn") {
+      // options carries to_previous_prompt VERBATIM (GOTCHA #5). resolveLastTurn refuses nuclear when iFirst===iLast.
+      remove = resolveLastTurn(
+        m,
+        readOwn(rw, "options") as { to_previous_prompt?: boolean } | undefined,
+        excludeId,
+      ).remove;
+    } else if (granularity === "checkpoint") {
+      // resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6). Absent/empty → null → no-op.
+      const cpRaw = readOwn(rw, "checkpoint");
+      const cpName = typeof cpRaw === "string" ? cpRaw : "";
+      remove = resolveCheckpoint(m, Array.isArray(branchEntries) ? branchEntries : [], cpName, excludeId)?.remove ?? [];
+    } else {
+      remove = []; // unknown granularity → no-op
+    }
+
+    // Defense-in-depth: skip (no-op) rewinds that cross the protected first:user boundary. (filter.ts logs the warn.)
+    if (!protectedOk(m, remove, config)) continue;
+
+    m = applyRewind(m, remove);
+  }
+
+  // 2) SHRINKS, oldest-first (stableSortBySeq), on the post-rewind array. ShrinkMarkerLike is structurally assignable
+  //    to applyShrink's {target, replacement} param (extra seq is fine — GOTCHA #4). applyShrink is defensive + total.
+  for (const sh of stableSortBySeq(shrinks)) {
+    m = applyShrink(m, sh);
+  }
+
+  return m;
+}
