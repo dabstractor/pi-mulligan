@@ -1758,3 +1758,191 @@ describe("permanent hiding across fires (BUG-001/002 regression)", () => {
     expect(out).toContain(msgs[2]);
   });
 });
+
+// ── checkpoint permanent hiding + multi-rewind composition + pinned/shrink (BUG-003 regression + pinned composition) ──
+// Complementary to P1.M2.T4.S1's "permanent hiding across fires (BUG-001/002 regression)" describe ABOVE: that one
+// covers last_tool_call_group + last_turn single-span permanence + last_tool_call_group legacy + compaction refusal.
+// THIS describe covers the CHECKPOINT granularity (BUG-003), pinned MULTI-TARGET composition, the pinned/shrink
+// interaction, and CHECKPOINT legacy — none of which P1.M2.T4.S1 touches. See research/multi_rewind_findings.md.
+
+describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink (BUG-003 regression + pinned composition)", () => {
+  // LOCAL cfg (the filterPipeline describe's cfg is closure-local; P1.M2.T4.S1 GOTCHA #10). protectedRoles keeps
+  // protectedOk happy: every removal here starts strictly after the first user message → min(remove) > iFirstUser.
+  const cfg = { rewind: { protectedRoles: ["first:user", "latest:user"] } } as ProtectedConfig;
+
+  // ── (a) checkpoint permanent hiding (BUG-003 regression; spec_and_test_analysis §KEY QUESTION 4) ──
+  it("(a) checkpoint — post-checkpoint work hidden fire 1, STILL hidden fire 2 (PERMANENT), new work VISIBLE", () => {
+    // msgs1 = [user, asst(cp), result(cp), asst(read), result(read)]. The checkpoint was set at asst(cp) (e_cp_a).
+    // A NEW checkpoint marker carries hideEntryIds = the post-checkpoint entry ids (captureHideEntryIds/resolvePreview,
+    // tools/rewind.ts:341 — calls resolveCheckpoint to get remove=[3,4], maps those → e_read_a/e_read_r).
+    const msgs1: MessageLike[] = [user("u"), asst("cp"), result("cp"), asst("read"), result("read")];
+    // branch1: one "message" entry per message (1:1). NO labelEntry needed — the PINNED path (resolvePinnedHide) does
+    // not read labels; it maps hideEntryIds by id directly.
+    const branch1: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_cp_a", "message"), entry("e_cp_r", "message"),
+      entry("e_read_a", "message"), entry("e_read_r", "message"),
+    ];
+    const marker: RewindMarkerLike = {
+      seq: 1, granularity: "checkpoint", checkpoint: "cp", hideEntryIds: ["e_read_a", "e_read_r"],
+    };
+    // ── Fire 1: resolvePinnedHide maps e_read_a/e_read_r → indices [3,4] → read work HIDDEN; checkpoint toolGroup KEPT.
+    const view1 = filterPipeline(msgs1, { rewinds: [marker], shrinks: [] }, cfg, branch1);
+    expect(view1).not.toContain(msgs1[3]); // asst(read) HIDDEN
+    expect(view1).not.toContain(msgs1[4]); // result(read) HIDDEN
+    expect(view1).toContain(msgs1[0]);     // user kept
+    expect(view1).toContain(msgs1[1]);     // asst(cp) kept (checkpoint point — NOT pinned)
+    expect(view1).toContain(msgs1[2]);     // result(cp) kept (NOT pinned)
+    expect(view1).toHaveLength(3);
+
+    // ── Fire 2: the agent resumed — appended NEW work (NEW entries, NEW ids NOT in the pinned set) ──
+    const msgs2: MessageLike[] = [...msgs1, asst("new"), result("new")]; // msgs2[5]=new asst, msgs2[6]=new result
+    const branch2: BranchEntry[] = [...branch1, entry("e_new_a", "message"), entry("e_new_r", "message")];
+    // SAME marker (persisted). resolvePinnedHide STILL maps e_read_a/e_read_r → [3,4]; e_new_* NOT pinned → visible.
+    const view2 = filterPipeline(msgs2, { rewinds: [marker], shrinks: [] }, cfg, branch2);
+    // THE PERMANENCE ASSERTION: read work STILL hidden (would reappear if the marker re-resolved relatively — BUG-003).
+    expect(view2).not.toContain(msgs2[3]); // asst(read) STILL hidden
+    expect(view2).not.toContain(msgs2[4]); // result(read) STILL hidden
+    // THE NEW-WORK ASSERTION: the agent's resumed work is VISIBLE (no infinite loop, no leak-back).
+    expect(view2).toContain(msgs2[5]); // asst(new) visible
+    expect(view2).toContain(msgs2[6]); // result(new) visible
+    expect(view2).toContain(msgs2[0]); // user kept
+    expect(view2).toContain(msgs2[1]); // asst(cp) kept
+    expect(view2).toHaveLength(5);
+  });
+
+  // ── (b-1) multi-target composition — SUPPORTED: a SINGLE pinned marker hides a MULTI-UNIT span ──
+  it("(b-1) single pinned marker hiding a multi-unit span → BOTH spans hidden fire 1, STILL hidden fire 2, new work visible", () => {
+    // One marker pinning BOTH toolGroups (A and B) hides them in ONE aligned resolvePinnedHide walk (full msgs ↔ full
+    // branch). This is the SUPPORTED multi-target pattern (vs two separate markers — see (b-2)).
+    const msgs1: MessageLike[] = [
+      user("u"), asst("A"), result("A"), asst("B"), result("B"), custom("mulligan:note"),
+    ];
+    const branch1: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_a_a", "message"), entry("e_a_r", "message"),
+      entry("e_b_a", "message"), entry("e_b_r", "message"), entry("e_note", "message"),
+    ];
+    const marker: RewindMarkerLike = {
+      seq: 1, granularity: "last_tool_call_group",
+      hideEntryIds: ["e_a_a", "e_a_r", "e_b_a", "e_b_r"], // BOTH toolGroups pinned in ONE marker
+    };
+    // Fire 1: resolvePinnedHide → remove [1,2,3,4] → view = [user, note]. BOTH spans hidden; no interference.
+    const view1 = filterPipeline(msgs1, { rewinds: [marker], shrinks: [] }, cfg, branch1);
+    expect(view1).not.toContain(msgs1[1]); // asst(A) hidden
+    expect(view1).not.toContain(msgs1[2]); // result(A) hidden
+    expect(view1).not.toContain(msgs1[3]); // asst(B) hidden
+    expect(view1).not.toContain(msgs1[4]); // result(B) hidden
+    expect(view1).toContain(msgs1[0]);     // user kept
+    expect(view1).toContain(msgs1[5]);     // note kept
+    expect(view1).toHaveLength(2);
+
+    // Fire 2: new work appended → A and B STILL hidden (permanent), new work visible.
+    const msgs2: MessageLike[] = [...msgs1, asst("C"), result("C")]; // msgs2[6]=C asst, msgs2[7]=C result
+    const branch2: BranchEntry[] = [...branch1, entry("e_c_a", "message"), entry("e_c_r", "message")];
+    const view2 = filterPipeline(msgs2, { rewinds: [marker], shrinks: [] }, cfg, branch2);
+    expect(view2).not.toContain(msgs2[1]); // A STILL hidden
+    expect(view2).not.toContain(msgs2[2]);
+    expect(view2).not.toContain(msgs2[3]); // B STILL hidden
+    expect(view2).not.toContain(msgs2[4]);
+    expect(view2).toContain(msgs2[6]); // C visible
+    expect(view2).toContain(msgs2[7]);
+    expect(view2).toContain(msgs2[0]); // user kept
+    expect(view2).toContain(msgs2[5]); // note kept
+    expect(view2).toHaveLength(4);
+  });
+
+  // ── (b-2) multi-target composition — KNOWN LIMITATION: two SEPARATE pinned markers do NOT union ──
+  // KNOWN LIMITATION (research/multi_rewind_findings.md §FINDING 4): filterPipeline applies applyRewind (gap-closing)
+  // BETWEEN rewinds but passes the FULL branchEntries to every resolvePinnedHide. After the first rewind gap-closes m,
+  // the second rewind's full-branch walk MISALIGNS with the shortened m (msgCursor + yield > m.length) → resolvePinnedHide
+  // SAFELY refuses (returns []) → the second marker NO-OPS. Only the FIRST marker's span is hidden. This is a SOFT,
+  // SAFE gap (under-hiding): no crash, no pairing break, no over-hiding. The SUPPORTED multi-target pattern is a SINGLE
+  // marker pinning a multi-unit span (see (b-1)). FIX DIRECTION (future work, OUT OF SCOPE for this test-only subtask):
+  // union ALL pinned removal sets against the ORIGINAL message list BEFORE gap-closing (resolve every hideEntryIds
+  // against the un-reduced m, union the indices, applyRewind once). WHEN THAT FIX LANDS, UPDATE this test to assert
+  // both spans are hidden.
+  it("(b-2) two SEPARATE pinned markers — first hides, second safely NO-OPS on alignment (KNOWN LIMITATION; no crash/pairing-break)", () => {
+    const msgs1: MessageLike[] = [
+      user("u"), asst("A"), result("A"), asst("B"), result("B"), custom("mulligan:note"),
+    ];
+    const branch1: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_a_a", "message"), entry("e_a_r", "message"),
+      entry("e_b_a", "message"), entry("e_b_r", "message"), entry("e_note", "message"),
+    ];
+    const m1: RewindMarkerLike = { seq: 1, granularity: "last_tool_call_group", hideEntryIds: ["e_a_a", "e_a_r"] };
+    const m2: RewindMarkerLike = { seq: 2, granularity: "last_tool_call_group", hideEntryIds: ["e_b_a", "e_b_r"] };
+    // m1 (seq1) runs FIRST: resolvePinnedHide(full msgs1, full branch1, [e_a_a,e_a_r]) → remove [1,2] → m gap-closed.
+    // m2 (seq2) runs SECOND: resolvePinnedHide(m=LEN 4, branch1=6 entries, [e_b_a,e_b_r]) → at e_b_r cursor 4: 4+1>4 →
+    //   return [] → m2 NO-OPS. Span B stays VISIBLE.
+    const out = filterPipeline(msgs1, { rewinds: [m1, m2], shrinks: [] }, cfg, branch1);
+    expect(out).not.toContain(msgs1[1]); // asst(A) HIDDEN (m1 ran first)
+    expect(out).not.toContain(msgs1[2]); // result(A) HIDDEN
+    expect(out).toContain(msgs1[3]);     // asst(B) STILL VISIBLE — the LIMITATION (m2 no-op'd)
+    expect(out).toContain(msgs1[4]);     // result(B) STILL VISIBLE — pairing INTACT (B's call+result both present)
+    expect(out).toContain(msgs1[0]);     // user kept
+    expect(out).toContain(msgs1[5]);     // note kept
+    // Pairing sanity: for every toolResult present, a matching toolCall assistant is present (no orphan).
+    const presentCalls = new Set<string>();
+    for (const m of out) {
+      const c = (m as MessageLike).content;
+      if (Array.isArray(c)) for (const b of c) if (b && typeof b === "object" && (b as Record<string, unknown>).type === "toolCall" && typeof (b as Record<string, unknown>).id === "string") presentCalls.add((b as Record<string, unknown>).id as string);
+    }
+    for (const m of out) {
+      if ((m as MessageLike).role === "toolResult") expect(presentCalls.has((m as MessageLike).toolCallId as string)).toBe(true);
+    }
+  });
+
+  // ── (c) pinned rewind + shrink on the removed target → shrink NO-OPS (spec/08 E8) ──
+  it("(c) pinned rewind removes span A (incl result A); a shrink targeting result A → no-op (target already removed)", () => {
+    // filterPipeline order = rewinds FIRST (gap-closing), THEN shrinks on the reduced array. The rewind removes
+    // result(A) (e_a_r ∈ hideEntryIds); the subsequent applyShrink → resolveShrinkTarget(by_tool_call_id "A") finds
+    // no toolResult with toolCallId "A" in the reduced m → null → no-op (m unchanged). spec/08 E8.
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A"), asst("B"), result("B")];
+    const branch: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_a_a", "message"), entry("e_a_r", "message"),
+      entry("e_b_a", "message"), entry("e_b_r", "message"),
+    ];
+    const rw: RewindMarkerLike = { seq: 1, granularity: "last_tool_call_group", hideEntryIds: ["e_a_a", "e_a_r"] };
+    const sh: ShrinkMarkerLike = { seq: 2, target: { by_tool_call_id: "A" }, replacement: "SHRUNK" };
+    const out = filterPipeline(msgs, { rewinds: [rw], shrinks: [sh] }, cfg, branch);
+    expect(out).not.toContain(msgs[1]); // asst(A) removed by the pinned rewind
+    expect(out).not.toContain(msgs[2]); // result(A) removed by the pinned rewind
+    // The shrink NO-OP'd: no "SHRUNK" text anywhere (its target — result(A) — was already removed; resolveShrinkTarget → null).
+    const hasShrunk = out.some((m) => {
+      const c = (m as MessageLike).content;
+      if (Array.isArray(c)) return c.some((b) => b && typeof b === "object" && (b as Record<string, unknown>).text === "SHRUNK");
+      return false;
+    });
+    expect(hasShrunk).toBe(false);
+    expect(out).toContain(msgs[3]); // asst(B) kept (untouched)
+    expect(out).toContain(msgs[4]); // result(B) kept
+    expect(out).toHaveLength(3);
+  });
+
+  // ── (d) checkpoint backward compat — an OLD marker (no hideEntryIds) uses resolveCheckpoint (the M1-fixed path) ──
+  it("(d) checkpoint LEGACY (no hideEntryIds) → resolveCheckpoint hides post-checkpoint work (unit-snapped toolGroup kept)", () => {
+    // An OLD checkpoint marker (pre-pin) lacks hideEntryIds → the dispatch falls through to the `checkpoint` branch →
+    // resolveCheckpoint (the M1 fix: branch ordering + stable entry + UNIT-SNAP). Proves backward compat: old markers
+    // still hide via the fixed relative path.
+    const msgs: MessageLike[] = [user("u"), asst("cp"), result("cp"), asst("read"), result("read")];
+    // branch: root→leaf, with a labelEntry targeting e_cp_a (the checkpoint point). The label is type:"label" (NOT
+    // context-producing → filtered out of the ctxEntries walk → does not count toward alignment).
+    const branch: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_cp_a", "message"), entry("e_cp_r", "message"),
+      labelEntry("eL", "e_cp_a", "start"), // label points at the checkpoint assistant
+      entry("e_read_a", "message"), entry("e_read_r", "message"),
+    ];
+    const legacyMarker: RewindMarkerLike = {
+      seq: 1, granularity: "checkpoint", checkpoint: "start",
+      // hideEntryIds intentionally ABSENT (old marker) → resolveCheckpoint path
+    };
+    const out = filterPipeline(msgs, { rewinds: [legacyMarker], shrinks: [] }, cfg, branch);
+    // resolveCheckpoint: label → targetId e_cp_a → iTarget=1; UNIT-SNAP → 2 (toolGroup [1,2] = asst(cp)+result(cp));
+    // remove = indices > 2 → [3,4] (the read work). The checkpoint toolGroup is KEPT (unit-snapped — no orphan).
+    expect(out).not.toContain(msgs[3]); // asst(read) HIDDEN
+    expect(out).not.toContain(msgs[4]); // result(read) HIDDEN
+    expect(out).toContain(msgs[0]);     // user kept
+    expect(out).toContain(msgs[1]);     // asst(cp) KEPT (checkpoint point, unit-snapped)
+    expect(out).toContain(msgs[2]);     // result(cp) KEPT (unit-snap avoids orphaning asst(cp)'s call)
+    expect(out).toHaveLength(3);
+  });
+});

@@ -211,21 +211,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Regression Tests for Real Usage Pattern",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Add comprehensive regression tests for the 'rewind then resume work then re-fire' usage pattern across all three granularities, and enhance the smoke test scenarios to assert actual content hiding (not just marker persistence). These tests directly implement the PRD recommendation: 'Add integration tests that drive the real usage pattern: perform tool work, rewind, then perform MORE tool work, and assert the originally-hidden content is STILL absent from every subsequent context.fire.'",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Checkpoint permanent-hiding + multi-rewind regression tests",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add the checkpoint-specific permanent-hiding test (set checkpoint → do work → rewind → do more work → re-fire → checkpoint span STILL hidden) and multi-rewind composition tests that verify pinned markers compose correctly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Checkpoint permanent-hiding + multi-rewind composition tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T4.S1",
@@ -249,14 +249,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Enhance smoke test assertions",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The F-rewind-core and F-checkpoint smoke scenarios (test/integration/smoke.ts) currently only assert that markers PERSIST (hasRewindMarker:true). Enhance them to assert that the hidden content is actually absent from the filtered view, and that K > 0 for checkpoint rewinds.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Enhance F-rewind-core and F-checkpoint smoke assertions",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T4.S1",
