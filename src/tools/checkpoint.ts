@@ -107,10 +107,10 @@ function refusal(reason: string, name: string): AgentToolResult<CheckpointDetail
 /**
  * checkpointExecute — the tool body. Steps (spec/05 §3):
  *   1. Validate `name` format — refuse (text) if it fails. THE TOOL OWNS THIS (GOTCHA #3).
- *   2. Delegate to `setCheckpoint(pi, ctx, name)` (markers.ts: null-checks getLeafId, prefixes with
- *      `mulligan:checkpoint:`, try/catches; trusts the caller's name).
+ *   2. Delegate to `setCheckpoint(pi, ctx, name)` (markers.ts: walks getBranch() to the last real message,
+ *      prefixes with `mulligan:checkpoint:`, try/catches; trusts the caller's name).
  *   3a. On `{ entryId }` → success text (verbatim spec/05 §3) + `{ name, entryId }` details.
- *   3b. On `{ error }` (e.g. "no leaf" or a swallowed setLabel throw) → refusal text + `{ name }` details.
+ *   3b. On `{ error }` (e.g. "no stable entry to checkpoint" or a swallowed setLabel throw) → refusal text + `{ name }` details.
  * The whole body is wrapped in try/catch → failure text (GOTCHA #5: never throw on the tool hot path).
  *
  * `pi` is captured by the `makeCheckpointTool(pi)` factory closure (it is NOT an execute argument).
@@ -132,7 +132,7 @@ async function checkpointExecute(
         name,
       );
     }
-    // (2) Delegate (markers.ts setCheckpoint: null-checks getLeafId, prefixes, try/catches; trusts the name).
+    // (2) Delegate (markers.ts setCheckpoint: walks getBranch() to the last real message, prefixes, try/catches; trusts the name).
     const res = setCheckpoint(pi, ctx, name);
     if ("entryId" in res) {
       // (3a) success — spec/05 §3 return text, VERBATIM (apostrophes around the name; the literal rewind wording).
@@ -144,7 +144,7 @@ async function checkpointExecute(
         details: { name, entryId: res.entryId },
       };
     }
-    // (3b) wrapper-reported failure (e.g. {error:"no leaf"} or a swallowed setLabel throw).
+    // (3b) wrapper-reported failure (e.g. {error:"no stable entry to checkpoint"} or a swallowed setLabel throw).
     return refusal(`could not set checkpoint: ${res.error}`, name);
   } catch (e) {
     // Shared tool convention: never throw — return a text result describing the failure (GOTCHA #5).

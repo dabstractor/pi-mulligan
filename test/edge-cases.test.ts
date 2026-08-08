@@ -821,7 +821,10 @@ describe("E13 — Tool/handler throws internally (fail-open — the cardinal saf
   it("makeCheckpointTool: a throwing pi.setLabel → execute does NOT throw (setCheckpoint swallows → {error}; tool returns refusal text)", async () => {
     // setCheckpoint wraps setLabel in try/catch → returns {error} → the tool renders a refusal text. NO-THROW.
     const { pi } = makePi({ throwOnSetLabel: true });
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ branch: [
+      { type: "message", id: "u1", parentId: null, timestamp: "t", message: { role: "user", content: [], timestamp: 0 } },
+      { type: "message", id: "leaf-1", parentId: "u1", timestamp: "t", message: { role: "assistant", content: [], timestamp: 0 } },
+    ] });
     const tool = makeCheckpointTool(pi);
     let res: AgentToolResult<{ name: string; entryId?: string }> | undefined;
     expect(() => {

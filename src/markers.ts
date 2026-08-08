@@ -303,25 +303,34 @@ export function leaveNote(pi: ExtensionAPI, content: string, rewindId: string): 
 export type SetCheckpointResult = { entryId: string } | { error: string };
 
 /**
- * setCheckpoint — label the current leaf as a named checkpoint (spec/04 §6, spec/05 §3; constraints C9, C1).
+ * setCheckpoint — label the last REAL message entry on the branch as a named checkpoint (spec/04 §6,
+ * spec/05 §3; constraints C9, C1; BUG-003 fix).
  *
  * A checkpoint is a Pi `LabelEntry` (NOT a CustomEntry) — it does NOT participate in LLM context. It is resolved by
  * the context filter (P1.M4.T2, spec/06 §6) ONLY when a later `mulligan_rewind(granularity:"checkpoint",
  * checkpoint:"<name>")` targets it (the filter maps the labeled entry → a position in event.messages). The label uses
  * the `mulligan:checkpoint:` prefix so Mulligan checkpoints are distinct from user/bookmark labels.
  *
+ * Anchor selection (BUG-003): the wrapper does NOT label `getLeafId()`. It walks
+ * `ctx.sessionManager.getBranch()` (ROOT→LEAF) BACKWARDS to the last `message` entry whose `message.role` is a
+ * non-empty string — a deterministic, always-context-producing, genuine conversation turn. `getLeafId()` after
+ * any Mulligan write is a `custom`/`label`/note entry that `resolveCheckpoint` (spec/06 §6) cannot map (its walk
+ * filters to context-producing types and refuses), which made checkpoint rewinds silently no-op. A transient
+ * no-role message is also skipped by the role guard.
+ *
  * Writes through `pi.setLabel` (ExtensionAPI — C9/C1/GOTCHA #3: setLabel is on `pi`, NOT on ReadonlySessionManager);
- * reads the target leaf id through `ctx.sessionManager.getLeafId()` (`string | null` — GOTCHA #4: must null-check).
+ * reads the branch through `ctx.sessionManager.getBranch()` (ROOT→LEAF `SessionEntry[]` — read-only, C1).
  * Reads `ctx.sessionManager` FRESH each call (C12/GOTCHA #10).
  *
- * Returns `{entryId: leafId}` on success, `{error: "no leaf"}` when `getLeafId()` is null (and does NOT call setLabel),
- * or `{error: <msg>}` on any thrown failure (try/catch). NEVER throws.
+ * Returns `{entryId: stableId}` (the labeled message entry id) on success; `{error: "no stable entry to checkpoint"}`
+ * when the branch has no `message` entry with a real role (and does NOT call setLabel); or `{error: <msg>}` on any
+ * thrown failure (try/catch — e.g. a throwing getBranch). NEVER throws.
  *
  * NOTE (GOTCHA #7): `name` validation (`/^[a-z0-9_-]{1,40}$/`, spec/05 §3 step 1) is the checkpoint TOOL's job, NOT
  * this wrapper's — the wrapper trusts the caller's `name` and only prefixes it.
  *
  * @param pi   the Pi ExtensionAPI (setLabel lives here).
- * @param ctx  the Pi ExtensionContext (sessionManager.getLeafId lives here — read-only, C1).
+ * @param ctx  the Pi ExtensionContext (sessionManager.getBranch lives here — read-only, C1).
  * @param name the checkpoint name (ALREADY validated by the caller); the wrapper prefixes it with `mulligan:checkpoint:`.
  */
 export function setCheckpoint(
@@ -330,10 +339,29 @@ export function setCheckpoint(
   name: string,
 ): SetCheckpointResult {
   try {
-    const leafId = ctx.sessionManager.getLeafId();
-    if (!leafId) return { error: "no leaf" };
-    pi.setLabel(leafId, `mulligan:checkpoint:${name}`);
-    return { entryId: leafId };
+    // BUG-003 fix: label the last REAL message entry, NOT the raw getLeafId() leaf.
+    // After any Mulligan write the leaf is a non-context-producing entry (a `custom` marker / `label` /
+    // note `custom_message`) that resolveCheckpoint CANNOT map (its walk filters to context-producing types
+    // and refuses — "targetId labels a non-context-producing entry → null"). A transient no-role message is
+    // also not a genuine turn. Walking getBranch() (ROOT→LEAF) BACKWARDS to the last `message` entry with a
+    // real role guarantees a deterministic, always-mappable checkpoint anchor.
+    const branch = ctx.sessionManager.getBranch();
+    let stableId: string | null = null;
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const e = branch[i];
+      if (
+        e.type === "message" &&
+        e.message &&
+        typeof e.message.role === "string" &&
+        e.message.role.length > 0
+      ) {
+        stableId = e.id;
+        break;
+      }
+    }
+    if (!stableId) return { error: "no stable entry to checkpoint" };
+    pi.setLabel(stableId, `mulligan:checkpoint:${name}`);
+    return { entryId: stableId };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }

@@ -64,18 +64,34 @@ function makePi(opts: {
 
 /**
  * A minimal fake ExtensionContext. Tracks sessionManager method-call ORDER (for the C7 proof) and scripts the leaf
- * id (default "leaf-1"; pass leafId: null to test the null path; throwOn* to simulate failures).
+ * id (default "leaf-1"; pass leafId: null to test the null path; throwOn* to simulate failures). Also scripts
+ * getBranch() for setCheckpoint (BUG-003 fix): default branch ends in a stable message whose id == scriptedLeafId,
+ * so existing success assertions stay valid; pass an explicit `branch` (ROOT→LEAF) or leafId:null (→ empty branch,
+ * no stable message) to exercise the other paths.
  */
 function makeCtx(opts: {
   sessionId?: string;
   leafId?: string | null;
+  branch?: unknown[];
   throwOnGetSessionId?: boolean;
   throwOnGetLeafId?: boolean;
+  throwOnGetBranch?: boolean;
 } = {}) {
   const sessionId = opts.sessionId ?? "s1";
   const calls: string[] = [];
   // default to "leaf-1" UNLESS leafId is explicitly passed (incl. null) — lets callers test the null return.
   const scriptedLeafId: string | null = opts.leafId === undefined ? "leaf-1" : opts.leafId;
+  // Default branch (ROOT→LEAF, matching getBranch() / T1's contract): ends in a stable message whose id ==
+  // scriptedLeafId, so setCheckpoint's stable anchor id equals the old scripted leaf id (GOTCHA F). leafId:null
+  // → empty branch → no stable message → exercises the no-stable-entry path.
+  const defaultBranch =
+    scriptedLeafId === null
+      ? []
+      : [
+          { type: "message", id: "u1", parentId: null, timestamp: "t", message: { role: "user", content: [], timestamp: 0 } },
+          { type: "message", id: scriptedLeafId, parentId: "u1", timestamp: "t", message: { role: "assistant", content: [], timestamp: 0 } },
+        ];
+  const branch = opts.branch ?? defaultBranch;
   const sessionManager = {
     getSessionId() {
       calls.push("getSessionId");
@@ -86,6 +102,11 @@ function makeCtx(opts: {
       calls.push("getLeafId");
       if (opts.throwOnGetLeafId) throw new Error("getLeafId boom");
       return scriptedLeafId;
+    },
+    getBranch() {
+      calls.push("getBranch");
+      if (opts.throwOnGetBranch) throw new Error("getBranch boom");
+      return branch;
     },
   };
   return { calls, ctx: { sessionManager } as unknown as ExtensionContext };
@@ -472,7 +493,7 @@ describe("leaveNote — sendMessage mulligan:note, in-context, no triggerTurn (C
 // ── setCheckpoint — setLabel mulligan:checkpoint:<name> (spec/04 §6, spec/05 §3; C9, C1) ────────────────────
 
 describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (spec/04 §6, C9)", () => {
-  it("calls pi.setLabel once with (leafId, 'mulligan:checkpoint:'+name) and returns {entryId: leafId}", () => {
+  it("calls pi.setLabel once with (stableId, 'mulligan:checkpoint:'+name) and returns {entryId: stableId}", () => {
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({ leafId: "leaf-9" });
     const res = setCheckpoint(pi, ctx, "before-refactor");
@@ -488,11 +509,11 @@ describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (s
     expect(labels[0].label).toBe("mulligan:checkpoint:x_y-z1");
   });
 
-  it("returns {error:'no leaf'} when getLeafId() is null, and does NOT call setLabel", () => {
+  it("returns {error:'no stable entry to checkpoint'} when the branch has no message, and does NOT call setLabel", () => {
     const { labels, pi } = makePi();
-    const { ctx } = makeCtx({ leafId: null });
+    const { ctx } = makeCtx({ leafId: null });   // → defaultBranch = [] (no stable message)
     const res = setCheckpoint(pi, ctx, "x");
-    expect(res).toEqual({ error: "no leaf" });
+    expect(res).toEqual({ error: "no stable entry to checkpoint" });
     expect(labels).toHaveLength(0);
   });
 
@@ -505,18 +526,18 @@ describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (s
     expect(typeof (res as { error: string }).error).toBe("string");
   });
 
-  it("never throws — a throwing getLeafId yields {error: string} (try/catch)", () => {
+  it("never throws — a throwing getBranch yields {error: string} (try/catch)", () => {
     const { pi } = makePi();
-    const { ctx } = makeCtx({ throwOnGetLeafId: true });
+    const { ctx } = makeCtx({ throwOnGetBranch: true });
     expect(() => setCheckpoint(pi, ctx, "x")).not.toThrow();
     const res = setCheckpoint(pi, ctx, "x");
     expect("error" in res).toBe(true);
     expect(typeof (res as { error: string }).error).toBe("string");
   });
 
-  it("writes through pi.setLabel, reads through ctx.sessionManager.getLeafId (C1/C9 split — GOTCHA #3)", () => {
+  it("writes through pi.setLabel, reads through ctx.sessionManager.getBranch (C1/C9 split — GOTCHA #3)", () => {
     const setLabelCalls: string[] = [];
-    const getLeafIdCalls: string[] = [];
+    const getBranchCalls: string[] = [];
     const pi = {
       setLabel: (id: string, label: string) => {
         setLabelCalls.push(`setLabel:${id}:${label}`);
@@ -524,16 +545,32 @@ describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (s
     } as unknown as ExtensionAPI;
     const ctx = {
       sessionManager: {
-        getLeafId: () => {
-          getLeafIdCalls.push("getLeafId");
-          return "L";
+        getBranch: () => {
+          getBranchCalls.push("getBranch");
+          return [
+            { type: "message", id: "u", parentId: null, timestamp: "t", message: { role: "user", content: [], timestamp: 0 } },
+            { type: "message", id: "L", parentId: "u", timestamp: "t", message: { role: "assistant", content: [], timestamp: 0 } },
+          ];
         },
       },
     } as unknown as ExtensionContext;
     const res = setCheckpoint(pi, ctx, "n");
     expect(setLabelCalls).toEqual(["setLabel:L:mulligan:checkpoint:n"]);
-    expect(getLeafIdCalls).toEqual(["getLeafId"]);
+    expect(getBranchCalls).toEqual(["getBranch"]);
     expect(res).toEqual({ entryId: "L" });
+  });
+
+  it("labels the last real MESSAGE, not a non-message leaf (BUG-003): branch ending in a custom marker", () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ branch: [
+      { type: "message", id: "u1", parentId: null, timestamp: "t", message: { role: "user", content: [], timestamp: 0 } },
+      { type: "message", id: "asst-7", parentId: "u1", timestamp: "t", message: { role: "assistant", content: [], timestamp: 0 } },
+      { type: "custom", id: "marker-leaf", parentId: "asst-7", timestamp: "t", customType: "mulligan:rewind", data: {} },
+    ] });
+    const res = setCheckpoint(pi, ctx, "ckpt");
+    expect(res).toEqual({ entryId: "asst-7" });      // the last real MESSAGE, NOT the custom leaf "marker-leaf"
+    expect(labels[0].entryId).toBe("asst-7");
+    expect(labels[0].label).toBe("mulligan:checkpoint:ckpt");
   });
 
   it("returns the discriminated union {entryId:string} | {error:string}", () => {

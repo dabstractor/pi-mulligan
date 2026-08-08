@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Fix Checkpoint Resolution (BUG-003)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Fix the three checkpoint issues: (1) resolveCheckpoint branch ordering bug (tests use leaf→root but getBranch returns root→leaf), (2) setCheckpoint labels a transient/wrong entry via getLeafId(), (3) orphaned toolCall when checkpoint target is an assistant with toolCalls. These must be fixed before pinning because resolvePreview (at rewind-creation time) calls resolveCheckpoint to compute the removal set.",
           "tasks": [
             {
@@ -42,14 +42,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Fix setCheckpoint to label a stable entry",
-              "status": "Researching",
+              "status": "Complete",
               "description": "setCheckpoint (markers.ts:327) labels getLeafId() which may return a transient or wrong entry at tool-execute time. Fix it to walk getBranch() backwards and label the last stable message entry (type 'message' with a real message.role). This ensures the checkpoint label points to a real context-producing entry that resolveCheckpoint can map correctly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Fix setCheckpoint to walk getBranch for stable entry",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_2e5baf25fe9f/bugfix/001_c0bd35ced59a/architecture/pi_session_model.md. setCheckpoint (src/markers.ts:327) currently does `const leafId = ctx.sessionManager.getLeafId(); pi.setLabel(leafId, ...)`. At tool-execute time, getLeafId() may return a transient entry (PRD BUG-003) or simply not the ideal entry to checkpoint. The fix: walk ctx.sessionManager.getBranch() (returns ROOT→LEAF array) backwards from the end, and find the last entry where type==='message' AND entry.message exists AND entry.message.role is a non-empty string. That is the last real committed message — the correct checkpoint anchor. If no such entry exists, return {error:'no stable entry to checkpoint'}.\n2. INPUT: The existing setCheckpoint function at src/markers.ts:327-339. It has access to ctx.sessionManager.getBranch().\n3. LOGIC: Replace `const leafId = ctx.sessionManager.getLeafId()` with a branch walk: `const branch = ctx.sessionManager.getBranch(); let stableId = null; for (let i = branch.length-1; i >= 0; i--) { const e = branch[i]; if (e.type === 'message' && e.message && typeof e.message.role === 'string' && e.message.role.length > 0) { stableId = e.id; break; } }`. Then `if (!stableId) return {error:'no stable entry to checkpoint'}; pi.setLabel(stableId, ...)`. Return {entryId: stableId}. NEVER throws (keep the existing try/catch). Update test/tools/checkpoint.test.ts: the makeCtx fake must return a getBranch() array with realistic entries. Assert that the labeled entry is a stable message, not getLeafId().\n4. OUTPUT: setCheckpoint labels a real message entry. The checkpoint rewind's resolveCheckpoint (after P1.M1.T1.S1 fix) maps it to the correct message index.\n5. DOCS: [Mode A] Update the setCheckpoint JSDoc (src/markers.ts) to document the stable-entry walk. This rides WITH the work.",
@@ -66,14 +66,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Add orphan prevention (unit-snap) to resolveCheckpoint",
-              "status": "Planned",
+              "status": "Researching",
               "description": "If the checkpoint target is an assistant message with toolCalls, resolveCheckpoint keeps the assistant (iTarget) but removes its toolResults (iTarget+1...) — orphaning the toolCall and violating the model API's pairing invariant. Fix by snapping iTarget to the END of its unit via partitionIntoUnits, so the whole toolGroup (assistant + results) is kept together.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Snap iTarget to unit boundary in resolveCheckpoint",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
