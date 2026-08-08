@@ -238,3 +238,103 @@ export function appendTurnMetric(
     return null;
   }
 }
+
+// ── Note details envelope (spec/04-data-model.md §3 — the mulligan:note CustomMessage details) ─────────────
+
+/**
+ * NoteDetails — the `details` payload of the mulligan:note CustomMessage (spec/04 §3 end). Correlates the in-context
+ * note back to the rewind marker that produced it. EXPORTED so the rewind tool (P1.M5.T1.S1), audit (P1.M5.T4), and
+ * tests share ONE shape.
+ *
+ * NOTE (GOTCHA #5): this is NOT a `MulliganEnvelope` — `kind:"note"` is the message-level discriminator and is
+ * intentionally OUTSIDE the marker kind union ("rewind"|"shrink"|"turn-metric"). The note is a CustomMessage
+ * (custom_message entry, IN LLM context); markers are CustomEntrys (NOT in context).
+ */
+export interface NoteDetails {
+  schema: "pi-mulligan";
+  v: 1;
+  kind: "note";
+  /** Correlates the note to its rewind marker. The rewind tool passes appendRewindMarker's return value (the marker's
+   *  entry id); spec/04 §3 literally names `<marker.id>` (uuid). Both are unique-per-entry, so correlation holds either
+   *  way — see the PRP's interface note. */
+  rewindId: string;
+}
+
+// ── leaveNote: append the rewind note as an in-context CustomMessage (spec/04 §3, spec/05 §1 step6; C8) ─────
+
+/**
+ * leaveNote — append the agent's self-authored rewind note as an in-context CustomMessage (spec/04 §3, spec/05 §1
+ * step 6; constraint C8). The note IS in LLM context — the resumed model reads it as its most-recent context and uses
+ * it to re-attempt the turn better-informed. The control marker (NOT in context) is persisted SEPARATELY by
+ * appendRewindMarker BEFORE this call (the rewind tool calls appendRewindMarker first, then leaveNote).
+ *
+ * CRITICAL (C8 / GOTCHA #2): do NOT pass `options.triggerTurn:true` — leaveNote runs from inside a tool (we are
+ * mid-turn); the default mid-turn behavior is correct. The wrapper passes ONLY the message object (no second arg).
+ *
+ * `display:true` (spec/04 §3) so the note is visible in the UI transcript (/tree). `content` is the rendered note
+ * string (notes.renderNote output).
+ *
+ * Returns void. NEVER throws (markers.ts hot-path discipline, matching appendRewindMarker/appendShrinkMarker/
+ * appendTurnMetric): a throwing `sendMessage` is swallowed (GOTCHA #1). This is SAFE because the rewind marker — the
+ * authoritative control state — is already persisted by the caller; a failed note only means the resumed model has one
+ * fewer hint, never a broken agent turn.
+ *
+ * @param pi       the Pi ExtensionAPI (sendMessage lives here — C8).
+ * @param content  the rendered note string (notes.renderNote output).
+ * @param rewindId correlates the note to its marker (rewindId-agnostic; see the PRP interface note).
+ */
+export function leaveNote(pi: ExtensionAPI, content: string, rewindId: string): void {
+  try {
+    const details: NoteDetails = { schema: "pi-mulligan", v: 1, kind: "note", rewindId };
+    // C8: NO second `options` arg — we are mid-turn; triggerTurn must stay default (false).
+    pi.sendMessage({ customType: "mulligan:note", content, display: true, details });
+  } catch {
+    // never throw on the tool hot path — the rewind marker is already persisted; a failed note is non-fatal (GOTCHA #1)
+  }
+}
+
+// ── setCheckpoint: label the current leaf as a named checkpoint (spec/04 §6, spec/05 §3; C9, C1) ───────────
+
+/**
+ * SetCheckpointResult — the discriminated return of setCheckpoint. Success carries the labeled entry id (the checkpoint
+ * tool echoes this to the agent); failure carries a short reason. Narrow with `"entryId" in r` / `"error" in r`.
+ * EXPORTED for the checkpoint tool (P1.M5.T3.S1) + tests.
+ */
+export type SetCheckpointResult = { entryId: string } | { error: string };
+
+/**
+ * setCheckpoint — label the current leaf as a named checkpoint (spec/04 §6, spec/05 §3; constraints C9, C1).
+ *
+ * A checkpoint is a Pi `LabelEntry` (NOT a CustomEntry) — it does NOT participate in LLM context. It is resolved by
+ * the context filter (P1.M4.T2, spec/06 §6) ONLY when a later `mulligan_rewind(granularity:"checkpoint",
+ * checkpoint:"<name>")` targets it (the filter maps the labeled entry → a position in event.messages). The label uses
+ * the `mulligan:checkpoint:` prefix so Mulligan checkpoints are distinct from user/bookmark labels.
+ *
+ * Writes through `pi.setLabel` (ExtensionAPI — C9/C1/GOTCHA #3: setLabel is on `pi`, NOT on ReadonlySessionManager);
+ * reads the target leaf id through `ctx.sessionManager.getLeafId()` (`string | null` — GOTCHA #4: must null-check).
+ * Reads `ctx.sessionManager` FRESH each call (C12/GOTCHA #10).
+ *
+ * Returns `{entryId: leafId}` on success, `{error: "no leaf"}` when `getLeafId()` is null (and does NOT call setLabel),
+ * or `{error: <msg>}` on any thrown failure (try/catch). NEVER throws.
+ *
+ * NOTE (GOTCHA #7): `name` validation (`/^[a-z0-9_-]{1,40}$/`, spec/05 §3 step 1) is the checkpoint TOOL's job, NOT
+ * this wrapper's — the wrapper trusts the caller's `name` and only prefixes it.
+ *
+ * @param pi   the Pi ExtensionAPI (setLabel lives here).
+ * @param ctx  the Pi ExtensionContext (sessionManager.getLeafId lives here — read-only, C1).
+ * @param name the checkpoint name (ALREADY validated by the caller); the wrapper prefixes it with `mulligan:checkpoint:`.
+ */
+export function setCheckpoint(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  name: string,
+): SetCheckpointResult {
+  try {
+    const leafId = ctx.sessionManager.getLeafId();
+    if (!leafId) return { error: "no leaf" };
+    pi.setLabel(leafId, `mulligan:checkpoint:${name}`);
+    return { entryId: leafId };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}

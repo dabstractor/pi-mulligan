@@ -3,6 +3,8 @@ import {
   appendRewindMarker,
   appendShrinkMarker,
   appendTurnMetric,
+  leaveNote,
+  setCheckpoint,
   type MulliganEnvelope,
   type RewindMarker,
   type RewindMarkerInput,
@@ -11,6 +13,8 @@ import {
   type ShrinkTarget,
   type TurnMetric,
   type TurnMetricInput,
+  type NoteDetails,
+  type SetCheckpointResult,
 } from "../src/markers.js";
 import { clearAll } from "../src/runtime.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -22,16 +26,40 @@ afterEach(() => clearAll());
 
 // ── fakes (the looper-smoke A1.appendEntry capture pattern, with hand-rolled objects) ─────────
 
-/** A minimal fake ExtensionAPI capturing appendEntry calls. Set throwOnAppend to simulate a Pi failure. */
-function makePi(opts: { throwOnAppend?: boolean } = {}) {
+/** A minimal fake ExtensionAPI capturing appendEntry + sendMessage + setLabel calls (GOTCHA: hand-rolled, no vi.fn()).
+ *  Set a throwOn* flag to simulate a Pi failure on any of the three write methods. */
+function makePi(opts: {
+  throwOnAppend?: boolean;
+  throwOnSendMessage?: boolean;
+  throwOnSetLabel?: boolean;
+} = {}) {
   const appended: { customType: string; data: unknown }[] = [];
+  const sent: {
+    customType: string;
+    content: unknown;
+    display: boolean;
+    details?: unknown;
+    options?: unknown; // captured to assert leaveNote passes NO options (C8)
+  }[] = [];
+  const labels: { entryId: string; label: string | undefined }[] = [];
   const pi = {
     appendEntry(customType: string, data?: unknown) {
       if (opts.throwOnAppend) throw new Error("appendEntry boom");
       appended.push({ customType, data });
     },
+    sendMessage(
+      message: { customType: string; content: unknown; display: boolean; details?: unknown },
+      options?: unknown,
+    ) {
+      if (opts.throwOnSendMessage) throw new Error("sendMessage boom");
+      sent.push({ ...message, options });
+    },
+    setLabel(entryId: string, label: string | undefined) {
+      if (opts.throwOnSetLabel) throw new Error("setLabel boom");
+      labels.push({ entryId, label });
+    },
   };
-  return { appended, pi: pi as unknown as ExtensionAPI };
+  return { appended, sent, labels, pi: pi as unknown as ExtensionAPI };
 }
 
 /**
@@ -390,5 +418,155 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(t).not.toHaveProperty("seq");
     const s: ShrinkMarkerInput = SHRINK_DATA;
     expectTypeOf(s.target).toEqualTypeOf<ShrinkTarget>();
+  });
+});
+
+// ── leaveNote — sendMessage mulligan:note, in-context, no triggerTurn (spec/04 §3, spec/05 §1 step6; C8) ────
+
+describe("leaveNote — sendMessage mulligan:note, in-context, no triggerTurn (C8)", () => {
+  it("calls pi.sendMessage once with customType 'mulligan:note', display:true, content=renderedNote", () => {
+    const { sent, pi } = makePi();
+    leaveNote(pi, "RENDERED NOTE BODY", "rewind-entry-7");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].customType).toBe("mulligan:note");
+    expect(sent[0].content).toBe("RENDERED NOTE BODY");
+    expect(sent[0].display).toBe(true);
+  });
+
+  it("stamps details envelope {schema, v:1, kind:'note', rewindId} and passes rewindId verbatim", () => {
+    const { sent, pi } = makePi();
+    leaveNote(pi, "x", "leaf-abc");
+    expect(sent[0].details).toEqual({
+      schema: "pi-mulligan",
+      v: 1,
+      kind: "note",
+      rewindId: "leaf-abc",
+    });
+  });
+
+  it("does NOT pass options (no triggerTurn) — sendMessage receives NO second arg (C8, GOTCHA #2)", () => {
+    const { sent, pi } = makePi();
+    leaveNote(pi, "n", "r");
+    expect(sent[0].options).toBeUndefined();
+  });
+
+  it("does NOT call appendEntry or setLabel (the note is a sendMessage, not a marker/label)", () => {
+    const { appended, labels, pi } = makePi();
+    leaveNote(pi, "n", "r");
+    expect(appended).toHaveLength(0);
+    expect(labels).toHaveLength(0);
+  });
+
+  it("returns void", () => {
+    const { pi } = makePi();
+    expectTypeOf(leaveNote(pi, "n", "r")).toEqualTypeOf<void>();
+  });
+
+  it("never throws — a throwing sendMessage is swallowed (GOTCHA #1; marker already persisted by caller)", () => {
+    const { pi } = makePi({ throwOnSendMessage: true });
+    expect(() => leaveNote(pi, "n", "r")).not.toThrow();
+    expect(leaveNote(pi, "n", "r")).toBeUndefined();
+  });
+});
+
+// ── setCheckpoint — setLabel mulligan:checkpoint:<name> (spec/04 §6, spec/05 §3; C9, C1) ────────────────────
+
+describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (spec/04 §6, C9)", () => {
+  it("calls pi.setLabel once with (leafId, 'mulligan:checkpoint:'+name) and returns {entryId: leafId}", () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ leafId: "leaf-9" });
+    const res = setCheckpoint(pi, ctx, "before-refactor");
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toEqual({ entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" });
+    expect(res).toEqual({ entryId: "leaf-9" });
+  });
+
+  it("owns the mulligan:checkpoint: namespace (prefixes); passes the raw name through", () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ leafId: "L" });
+    setCheckpoint(pi, ctx, "x_y-z1");
+    expect(labels[0].label).toBe("mulligan:checkpoint:x_y-z1");
+  });
+
+  it("returns {error:'no leaf'} when getLeafId() is null, and does NOT call setLabel", () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ leafId: null });
+    const res = setCheckpoint(pi, ctx, "x");
+    expect(res).toEqual({ error: "no leaf" });
+    expect(labels).toHaveLength(0);
+  });
+
+  it("never throws — a throwing setLabel yields {error: string} (try/catch)", () => {
+    const { pi } = makePi({ throwOnSetLabel: true });
+    const { ctx } = makeCtx();
+    expect(() => setCheckpoint(pi, ctx, "x")).not.toThrow();
+    const res = setCheckpoint(pi, ctx, "x");
+    expect("error" in res).toBe(true);
+    expect(typeof (res as { error: string }).error).toBe("string");
+  });
+
+  it("never throws — a throwing getLeafId yields {error: string} (try/catch)", () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({ throwOnGetLeafId: true });
+    expect(() => setCheckpoint(pi, ctx, "x")).not.toThrow();
+    const res = setCheckpoint(pi, ctx, "x");
+    expect("error" in res).toBe(true);
+    expect(typeof (res as { error: string }).error).toBe("string");
+  });
+
+  it("writes through pi.setLabel, reads through ctx.sessionManager.getLeafId (C1/C9 split — GOTCHA #3)", () => {
+    const setLabelCalls: string[] = [];
+    const getLeafIdCalls: string[] = [];
+    const pi = {
+      setLabel: (id: string, label: string) => {
+        setLabelCalls.push(`setLabel:${id}:${label}`);
+      },
+    } as unknown as ExtensionAPI;
+    const ctx = {
+      sessionManager: {
+        getLeafId: () => {
+          getLeafIdCalls.push("getLeafId");
+          return "L";
+        },
+      },
+    } as unknown as ExtensionContext;
+    const res = setCheckpoint(pi, ctx, "n");
+    expect(setLabelCalls).toEqual(["setLabel:L:mulligan:checkpoint:n"]);
+    expect(getLeafIdCalls).toEqual(["getLeafId"]);
+    expect(res).toEqual({ entryId: "L" });
+  });
+
+  it("returns the discriminated union {entryId:string} | {error:string}", () => {
+    const { pi } = makePi();
+    const ok = setCheckpoint(pi, makeCtx().ctx, "n");
+    const fail = setCheckpoint(pi, makeCtx({ leafId: null }).ctx, "n");
+    expectTypeOf(ok).toEqualTypeOf<{ entryId: string } | { error: string }>();
+    expectTypeOf(fail).toEqualTypeOf<{ entryId: string } | { error: string }>();
+  });
+});
+
+// ── NoteDetails / SetCheckpointResult types ──────────────────────────────────────────────────────────────────
+
+describe("NoteDetails + SetCheckpointResult types (GOTCHA #5 — NoteDetails is NOT a MulliganEnvelope)", () => {
+  it("NoteDetails is { schema:'pi-mulligan'; v:1; kind:'note'; rewindId:string }", () => {
+    const d = {} as NoteDetails;
+    expectTypeOf(d.schema).toEqualTypeOf<"pi-mulligan">();
+    expectTypeOf(d.v).toEqualTypeOf<1>();
+    expectTypeOf(d.kind).toEqualTypeOf<"note">();
+    expectTypeOf(d.rewindId).toEqualTypeOf<string>();
+  });
+
+  it("NoteDetails is NOT assignable to MulliganEnvelope (kind 'note' ∉ the marker union)", () => {
+    // @ts-expect-error — NoteDetails.kind:'note' is not in MulliganEnvelope.kind's union
+    const _: MulliganEnvelope = {} as NoteDetails;
+    expectTypeOf(_).toEqualTypeOf<MulliganEnvelope>();
+  });
+
+  it("SetCheckpointResult is the discriminated union", () => {
+    const ok: SetCheckpointResult = { entryId: "x" };
+    const err: SetCheckpointResult = { error: "boom" };
+    expectTypeOf(ok).toMatchTypeOf<SetCheckpointResult>();
+    expectTypeOf(err).toMatchTypeOf<SetCheckpointResult>();
+    expectTypeOf<SetCheckpointResult>().toEqualTypeOf<{ entryId: string } | { error: string }>();
   });
 });

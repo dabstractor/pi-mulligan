@@ -430,14 +430,14 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Pi Integration Layer",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Bridge the pure transform logic to Pi's runtime: implement markers.ts (thin wrappers around pi.appendEntry/sendMessage/setLabel with seq and leaf-id capture) and filter.ts (the context event handler that reads markers, calls the pure pipeline, caches lastFiltered, and fails open on any error).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Marker Persistence Wrappers (markers.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement thin wrappers that persist markers via pi.appendEntry (control state, NOT in context), notes via pi.sendMessage (context message, IN context), and checkpoints via pi.setLabel. Each wrapper captures the leaf id immediately after appendEntry (constraint C7) and increments seq.",
               "subtasks": [
                 {
@@ -461,7 +461,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Implement leaveNote and setCheckpoint wrappers",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1"
@@ -478,14 +478,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Context Event Filter Handler (filter.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the context event handler — the heart of the extension. On every inference: read markers from ctx.sessionManager.getEntries(), call the pure filterPipeline, cache lastFiltered for audit, inject the drift nudge if warranted, and fail open on any error (return nothing = pass-through).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Implement context handler — read markers, call pipeline, cache, fail-open",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T5.S1",
