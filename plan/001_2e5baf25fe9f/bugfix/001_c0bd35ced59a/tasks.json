@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Fix Checkpoint Resolution (BUG-003)",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Fix the three checkpoint issues: (1) resolveCheckpoint branch ordering bug (tests use leaf→root but getBranch returns root→leaf), (2) setCheckpoint labels a transient/wrong entry via getLeafId(), (3) orphaned toolCall when checkpoint target is an assistant with toolCalls. These must be fixed before pinning because resolvePreview (at rewind-creation time) calls resolveCheckpoint to compute the removal set.",
           "tasks": [
             {
@@ -66,14 +66,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Add orphan prevention (unit-snap) to resolveCheckpoint",
-              "status": "Researching",
+              "status": "Ready",
               "description": "If the checkpoint target is an assistant message with toolCalls, resolveCheckpoint keeps the assistant (iTarget) but removes its toolResults (iTarget+1...) — orphaning the toolCall and violating the model API's pairing invariant. Fix by snapping iTarget to the END of its unit via partitionIntoUnits, so the whole toolGroup (assistant + results) is kept together.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Snap iTarget to unit boundary in resolveCheckpoint",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
