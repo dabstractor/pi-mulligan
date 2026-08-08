@@ -15,6 +15,6 @@
   },
   "scripts": {
     "test": "vitest run",
-    "smoke": "pi -e ./src/index.ts -p \"$(cat test/integration/scenarios.md)\""
+    "smoke": "node test/integration/run-smoke.mjs"
   }
 }
