@@ -20,9 +20,10 @@ pi.on("tool_result", async (event, ctx) => {
     if (event.toolName?.startsWith("mulligan_")) return;     // don't annotate our own tools
 
     const bytes = resultBytes(event.content);
-    if (bytes < config.nudges.bloatThresholdBytes) return;   // under threshold → no-op
+    const threshold = bloatThresholdFor(event.toolName, config);  // per-tool override, else global
+    if (bytes < threshold) return;                              // under threshold → no-op
 
-    const reminder = renderBloatReminder(event.toolName, bytes, config.nudges.bloatThresholdBytes);
+    const reminder = renderBloatReminder(event.toolName, bytes, threshold);
     // Append the reminder to the existing content (do not replace — the agent may need the data).
     const content = [...(event.content ?? []), { type: "text", text: reminder }];
     // Also record a turn-metric contribution so the per-turn nudge (Nudge B) can aggregate.
@@ -48,9 +49,20 @@ call was a mistake. (The hidden/shrunk content stays on disk for the human.)
 The reminder is **appended**, not replacing — the agent may genuinely need the full output right now; the hint is about *future turns*. It is a single block; modest token cost (~40 tokens) incurred once, only when the threshold is crossed.
 
 ### Threshold default & calibration
-- Default `bloatThresholdBytes = 8192` (8 KB ≈ 2k tokens in-context). This is deliberately **below** Pi's built-in 50 KB truncation cap, so Mulligan catches meaningful-but-not-catastrophic results that slip under the built-in cap (e.g. a 30 KB `read`, or several results that individually are fine).
+- Default `bloatThresholdBytes = 16384` (16 KB ≈ 4k tokens in-context), deliberately **below** Pi's built-in 50 KB truncation cap so Mulligan catches meaningful-but-not-catastrophic results that slip under the built-in cap. The previous default was 8192 (8 KB); it was raised after observation showed 8 KB nagging on every routine source-file read (9–17 KB) — i.e. firing on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.).
+- The threshold is **per tool**: each tool may override the global default via `bloatThresholdBytesByTool`. Resolution is a single helper:
+  ```ts
+  function bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number {
+    const global = config.nudges.bloatThresholdBytes;
+    if (!toolName) return global;
+    const byTool = config.nudges.bloatThresholdBytesByTool ?? {};
+    return byTool[toolName] ?? global;
+  }
+  ```
+  Rationale: legitimate output size differs sharply by tool. A `bash` build/test/`git log` run routinely and legitimately produces tens of KB; an `lsp_hover` payload is a few hundred bytes. One global threshold either over-nags the noisy tools or under-catches the quiet ones. Shipped defaults: `{ "bash": 32768, "read": 20480 }`, with all other tools falling back to the 16 KB global.
+  - *Limitation:* the override is keyed by Pi `toolName` (e.g. `"bash"`), not by subcommand — a `git log` and an `echo` both present as `bash`. Sub-command-level sensitivity is out of scope for v1; the `perTurnDrift` nudge (§2) catches aggregate turn growth regardless of which tool produced it.
 - The threshold is in **bytes of the in-context text representation** (sum of `.text` lengths across content blocks, UTF-8 byte length). Not model tokens (we don't tokenize here — keep it cheap and deterministic).
-- Configurable; a project that routinely handles large legitimate outputs (log analysis) may raise it.
+- Configurable; a project that routinely handles large legitimate outputs (log analysis) may raise either the global value or a specific tool's entry.
 
 ### Interaction with shrink/rewind
 - If the agent heeds the reminder and shrinks, the shrink marker substitutes the content (including the appended reminder) with the agent's replacement on the next turn — so the reminder disappears automatically once acted on. Clean.

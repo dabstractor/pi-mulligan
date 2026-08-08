@@ -143,7 +143,7 @@ Both are **permanent until... nothing** — there is no undo. They persist acros
 
 > Full detail: `@07-preventive-and-nudges.md`.
 
-- **Bloated-result reminder.** A `tool_result` hook measures each result; if it exceeds a configurable threshold, the hook appends a short reminder to that result's content telling the agent a rewind is available. This rides the result itself — no extra request.
+- **Bloated-result reminder.** A `tool_result` hook measures each result; if it exceeds a configurable threshold, the hook appends a short reminder to that result's content telling the agent a rewind is available. The threshold is resolved **per tool** — each tool may carry its own override, falling back to a global default — because legitimate output size differs sharply by tool (a `bash` build log vs. an `lsp_hover` payload). This rides the result itself — no extra request.
 - **Per-turn drift nudge.** At `turn_end`, Mulligan records how much the context grew that turn and whether it crossed a drift threshold. On the *next* inference, the `context` handler injects a one-line annotation into the message copy (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). This rides the inference that was already going to happen — **zero extra requests**, ~20 tokens when it fires.
 
 ---
@@ -152,7 +152,7 @@ Both are **permanent until... nothing** — there is no undo. They persist acros
 
 > Full detail: `@09-configuration.md`.
 
-Mulligan reads `mulligan` from Pi `settings.json` (global or project-local). Key knobs: bloat threshold, drift threshold, protected roles (messages that can never be rewound past — default: system, first user task, latest user prompt), max rewind depth, and on/off toggles for each nudge. All have safe defaults; the extension works with zero configuration.
+Mulligan reads `mulligan` from Pi `settings.json` (global or project-local). Key knobs: bloat threshold (a global default plus an optional **per-tool override map** — `bloatThresholdBytes` = 16384/16 KB, with `bash` at 32 KB and `read` at 20 KB out of the box), drift threshold, protected roles (messages that can never be rewound past — default: system, first user task, latest user prompt), max rewind depth, and on/off toggles for each nudge. All have safe defaults; the extension works with zero configuration.
 
 ---
 

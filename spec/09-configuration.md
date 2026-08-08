@@ -32,7 +32,11 @@
     "nudges": {
       "bloatReminder": true,          // tool_result annotation when a result exceeds threshold
       "perTurnDrift": true,           // context-annotation when a turn grew past threshold
-      "bloatThresholdBytes": 8192,    // 8 KB in-context → reminder (below Pi's 50 KB built-in cap)
+      "bloatThresholdBytes": 16384,   // 16 KB in-context → reminder (global catch-all; below Pi's 50 KB built-in cap)
+      "bloatThresholdBytesByTool": {  // OPTIONAL per-tool overrides (keyed by toolName); fall back to bloatThresholdBytes
+        "bash": 32768,                // 32 KB — builds/tests/git logs legitimately produce tens of KB
+        "read": 20480                 // 20 KB — large source-file reads are routine and legitimate
+      },
       "driftThresholdTokens": 3000    // turn token delta → drift nudge
     },
 
@@ -59,7 +63,8 @@
 | `shrink.enabled` | `true` | Core feature. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
-| `nudges.bloatThresholdBytes` | `8192` | Below Pi's 50 KB cap to catch meaningful-but-not-catastrophic results (a 30 KB `read`, etc.). Tunable per project (log-analysis projects may raise). |
+| `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
+| `nudges.bloatThresholdBytesByTool` | `{ "bash": 32768, "read": 20480 }` | Legitimate output size differs sharply by tool: `bash` (builds, test runs, `git log`) routinely and legitimately produces tens of KB, while `read` of a large source file is normal. A single global threshold either over-nags the noisy tools or under-catches the quiet ones. Resolution: look up `event.toolName` in the map; on miss, use `bloatThresholdBytes`. |
 | `nudges.driftThresholdTokens` | `3000` | A turn that adds ~3k+ tokens is worth a glance. Tunable. |
 | `audit.estimateConfidence` | `"medium"` | Honest default; token estimates are approximate. |
 | `log.file` | `null` | Off by default (no disk chatter). Enable for debugging/testing. |
@@ -69,6 +74,7 @@
 - Booleans: coerce with `!!`; invalid → default.
 - Numbers: must be finite, `>= 0` (thresholds `> 0`); invalid → default.
 - `protectedRoles`: must be an array of known selector strings (`"first:user"`, `"latest:user"`); unknown entries ignored (with warn). v1 does not support arbitrary role rules.
+- `bloatThresholdBytesByTool`: if present, must be an object mapping tool-name strings to finite numbers `> 0`. Non-object → discard entirely (use global only). Any non-numeric or `<= 0` value in the map is dropped with a warn (the rest of the map is kept). Unknown tool names are permitted (forward-compat — the map is only consulted when a matching `event.toolName` arrives).
 - `estimateConfidence`: must be one of `"low"|"medium"|"high"`; else default.
 - `log.file`: if set, must be a string; opening is deferred to first write (and wrapped — a bad path must not crash the extension).
 - On any per-field validation failure: log a warn naming the field and the value, use the default, continue. **Never throw.**
