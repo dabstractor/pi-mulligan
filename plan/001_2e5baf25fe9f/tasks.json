@@ -298,7 +298,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Rewind Resolution Algorithms",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Implement the two relative rewind resolvers: resolveLastToolCallGroup (find the most recent tool-call group, excluding the rewind's own call) and resolveLastTurn (find the last user message and compute the removal range). Both return index ranges for applyRewind.",
               "subtasks": [
                 {
@@ -320,7 +320,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Implement resolveLastTurn with to_previous_prompt option",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
