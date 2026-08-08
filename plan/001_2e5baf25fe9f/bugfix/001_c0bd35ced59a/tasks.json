@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Fix Rewind Hiding Permanence",
-      "status": "Planned",
+      "status": "Ready",
       "description": "Fix the three critical bugs where rewind hiding is not permanent: BUG-001 (last_tool_call_group leaks back after new work), BUG-002 (last_turn traps agent in infinite loop), BUG-003 (checkpoint hides nothing). The shared root cause is that rewind markers store relative specs re-resolved against the growing message list every context fire. The fix pins stable entry IDs at marker-creation time and fixes the checkpoint resolution path.",
       "milestones": [
         {
@@ -211,7 +211,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Regression Tests for Real Usage Pattern",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Add comprehensive regression tests for the 'rewind then resume work then re-fire' usage pattern across all three granularities, and enhance the smoke test scenarios to assert actual content hiding (not just marker persistence). These tests directly implement the PRD recommendation: 'Add integration tests that drive the real usage pattern: perform tool work, rewind, then perform MORE tool work, and assert the originally-hidden content is STILL absent from every subsequent context.fire.'",
           "tasks": [
             {
@@ -249,14 +249,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Enhance smoke test assertions",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The F-rewind-core and F-checkpoint smoke scenarios (test/integration/smoke.ts) currently only assert that markers PERSIST (hasRewindMarker:true). Enhance them to assert that the hidden content is actually absent from the filtered view, and that K > 0 for checkpoint rewinds.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Enhance F-rewind-core and F-checkpoint smoke assertions",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T4.S1",
@@ -281,21 +281,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Update the specification documents to reflect the architectural changes: the corrected idempotency assumption, the pinning mechanism, the hideEntryIds field, and the resolveCheckpoint ordering fix. This is Mode B documentation (changeset-level, cross-cutting) that depends on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Update spec/06 §11 (idempotency), spec/06 §3/§4/§6/§12 (resolver descriptions), spec/04 §3 (RewindMarker hideEntryIds field), and perform a JSDoc sweep on all modified functions.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Update spec/06 idempotency + resolver descriptions",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

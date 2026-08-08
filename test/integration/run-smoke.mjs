@@ -47,20 +47,27 @@ const SMOKE_TMP_DIR = join(tmpdir(), "mulligan-smoke");
 mkdirSync(SMOKE_TMP_DIR, { recursive: true });
 const PI_TIMEOUT_MS = 120_000;
 
+// SEED-canary string literals for the deterministic HIDING assertions (P1.M3.T2.S1). MUST be byte-identical to the
+// consts in smoke.ts (GOTCHA #8 — there is no shared module; a mismatch → seed never matches → K=0 → fail).
+const SEED_ANCHOR = "MULLIGAN-SMOKE-SEED-ANCHOR";
+const SEED_HIDDEN = "MULLIGAN-SMOKE-SEED-HIDDEN";
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * runPi — spawn pi for a scenario. Returns { status, stdout, stderr }. The two -p flags are load-bearing:
- * the first dispatches the /mulligan_smoke command; the second triggers the observing model turn.
+ * runPi — spawn pi for a scenario. Returns { status, stdout, stderr, logPath }. By default it drives the
+ * 2-prompt deterministic flow (`/mulligan_smoke <scenario>` then `Reply with exactly: OK`); pass { prompts } to
+ * drive a custom prompt sequence (the SEED flows for F-rewind-core / F-checkpoint — P1.M3.T2.S1).
  */
-function runPi(scenario, extraArgs = []) {
+function runPi(scenario, { prompts, extraArgs = [] } = {}) {
   const logPath = join(SMOKE_TMP_DIR, `${scenario}.log`);
+  // Default = the existing 2-prompt deterministic flow (unchanged for the 12 non-seeded scenarios).
+  const ps = prompts ?? [`/mulligan_smoke ${scenario}`, "Reply with exactly: OK"];
   const argv = [
     "-e", "./src/index.ts",
     "-e", "./test/integration/smoke.ts",
     "--session-id", `smoke-${scenario}`,
-    "-p", `/mulligan_smoke ${scenario}`,
-    "-p", "Reply with exactly: OK",
+    ...ps.flatMap((p) => ["-p", p]),
     ...extraArgs,
   ];
   const res = spawnSync("pi", argv, {
@@ -186,15 +193,24 @@ function assertRewindCore({ smoke, piRes }) {
   const sessionFile = smoke.sessionFile;
   const entries = readSessionEntries(sessionFile);
   const rewindLines = smoke.lines.filter((l) => l.test === "tool.rewind");
-  // The rewind tool ran and succeeded (not a refusal).
-  assert(results, "tool.rewind ran", rewindLines.length >= 1, rewindLines.length ? "" : "no tool.rewind line");
   const lastRewind = rewindLines[rewindLines.length - 1];
-  assert(results, "tool.rewind succeeded (not refused)", lastRewind && !/refused/i.test(lastRewind.detail?.text ?? ""), lastRewind?.detail?.text?.slice(0, 80) ?? "");
+  const text = lastRewind?.detail?.text ?? "";
+  assert(results, "tool.rewind ran", rewindLines.length >= 1, rewindLines.length ? "" : "no tool.rewind line");
+  assert(results, "tool.rewind succeeded (not refused)", lastRewind && !/refused/i.test(text), text.slice(0, 80));
+  // NEW (P1.M3.T2.S1): the seed flow commits a hideable assistant reply BEFORE the command, so the rewind MUST pin
+  // ≥1 message. K=0 means the seed did not commit (model timeout) OR the resolver found nothing — either way the
+  // hiding assertion below is meaningless, so fail here with a clear message.
+  assert(results, "tool.rewind hid content (K≥1; not '0 messages will be hidden')", !/0 messages will be hidden/i.test(text), text.slice(0, 80));
   // context.fire shows the filter sees the persisted marker + note.
   const cf = smoke.contextFires[smoke.contextFires.length - 1];
   assert(results, "context.fire observed", !!cf, cf ? "" : "no context.fire");
   assert(results, "context.fire hasRewindMarker:true", cf?.hasRewindMarker === true, String(cf?.hasRewindMarker));
   assert(results, "context.fire notePresent:true", cf?.notePresent === true, String(cf?.notePresent));
+  // NEW: the seed reply MUST be hidden on the observing inference (BUG-001/002 regression guard). Read back the HARD
+  // smokeLog verdict emitted by the context handler (GOTCHA #7 — logging alone does not fail a scenario).
+  const hidingLines = smoke.lines.filter((l) => l.test === "F-rewind-core.hiding");
+  const lastHiding = hidingLines[hidingLines.length - 1];
+  assert(results, "seed reply HIDDEN on observing inference (BUG-001/002 guard)", lastHiding && lastHiding.status === "pass", JSON.stringify(lastHiding?.detail ?? {}));
   // JSONL: mulligan:rewind (custom) + mulligan:note (custom_message)
   if (entries.length > 0) {
     assert(results, "JSONL has mulligan:rewind (custom)", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
@@ -203,8 +219,7 @@ function assertRewindCore({ smoke, piRes }) {
   } else {
     console.log(`  ⚠ JSONL unavailable (model may have timed out) — smoke-log assertions are primary`);
   }
-  // SOFT (warn, not fail): the canary-drop / auto-prompt is model-driven (GOTCHA #8).
-  return { results, entries, soft: "canary-drop (count decrease) + auto-prompt are model-driven; see scenarios.md" };
+  return { results, entries }; // NOTE: no `soft` — hiding is now DETERMINISTIC (seed flow), not model-driven.
 }
 
 function assertShrinkPersist({ smoke, piRes }) {
@@ -313,8 +328,22 @@ function assertCheckpoint({ smoke, piRes }) {
   const entries = readSessionEntries(sessionFile);
   const cpLines = smoke.lines.filter((l) => l.test === "tool.checkpoint");
   const rwLines = smoke.lines.filter((l) => l.test === "tool.rewind");
+  const cpLine = cpLines[cpLines.length - 1];
+  const cpText = cpLine?.detail?.text ?? "";
+  const rwLine = rwLines[rwLines.length - 1];
+  const rwText = rwLine?.detail?.text ?? "";
+  // setCheckpoint RAN + SUCCEEDED (not refused). This is the baseline-breakage fix: a fresh 2-prompt session made
+  // setCheckpoint refuse "no stable entry to checkpoint"; the seed flow commits SEED_ANCHOR first so it succeeds.
   assert(results, "tool.checkpoint ran", cpLines.length >= 1, "");
+  assert(results, "checkpoint SET succeeded (not refused — baseline-breakage fix)", cpLine && !/refused/i.test(cpText), cpText.slice(0, 80));
+  // checkpoint rewind RAN + K>0. K=0 (or refusal) is the BUG-003 signature (resolveCheckpoint → remove=[]). The seed
+  // flow commits SEED_HIDDEN AFTER the checkpoint so the rewind hides it (K>0).
   assert(results, "checkpoint rewind ran", rwLines.length >= 1, "");
+  assert(results, "checkpoint rewind K>0 (BUG-003 guard)", rwLine && !/refused|0 messages will be hidden/i.test(rwText), rwText.slice(0, 80));
+  // The post-checkpoint seed MUST be hidden AND the anchor MUST survive (read back the HARD context-handler verdict).
+  const hidingLines = smoke.lines.filter((l) => l.test === "F-checkpoint.hiding");
+  const lastHiding = hidingLines[hidingLines.length - 1];
+  assert(results, "post-checkpoint seed hidden + anchor survives (BUG-003/001 guard)", lastHiding && lastHiding.status === "pass", JSON.stringify(lastHiding?.detail ?? {}));
   if (entries.length > 0) {
     assert(results, "JSONL has label mulligan:checkpoint:alpha", countLabel(entries, "mulligan:checkpoint:alpha") >= 1, "");
     assert(results, "JSONL has mulligan:rewind (custom)", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
@@ -461,12 +490,42 @@ const ASSERTERS = {
 };
 
 function runScenario(scenario) {
+  // F-rewind-core: 3-prompt SEED flow. A seed model turn commits a hideable assistant reply BEFORE the command, so the
+  // last_turn rewind pins it (K≥1) and the observing inference shows it HIDDEN. (The 2-prompt path gives K=0 — nothing
+  // after the user message at command time.)
+  if (scenario === "F-rewind-core") {
+    const piRes = runPi(scenario, {
+      prompts: [
+        `Reply with exactly: ${SEED_HIDDEN}`,
+        `/mulligan_smoke F-rewind-core`,
+        "Reply with exactly: OK",
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
+  // F-checkpoint: 5-prompt SET/SEED/REWIND flow. SEED_ANCHOR → set checkpoint (labels the anchor) → SEED_HIDDEN
+  // (post-checkpoint content) → rewind to 'alpha' (K>0) → observing turn. Fixes the baseline breakage (setCheckpoint
+  // refused on a fresh 2-prompt session) AND asserts hiding (the single-handler set+rewind always gave K=0).
+  if (scenario === "F-checkpoint") {
+    const piRes = runPi(scenario, {
+      prompts: [
+        `Reply with exactly: ${SEED_ANCHOR}`,
+        `/mulligan_smoke F-checkpoint-set`,
+        `Reply with exactly: ${SEED_HIDDEN}`,
+        `/mulligan_smoke F-checkpoint-rewind`,
+        "Reply with exactly: OK",
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
   if (scenario === "F-reload" || scenario === "E11") {
     // Two spawns sharing --session-id smoke-<scenario> (run 2 reopens the same session).
     const r1 = runPi(scenario);
     const smoke1 = parseSmokeLog(r1.logPath);
     // Run 2: just trigger an observing turn on the SAME session (--session-id reopens it).
-    const r2 = runPi(scenario, ["-p", "Reply with exactly: OK"]); // a third prompt for run 2's observing turn
+    const r2 = runPi(scenario, { extraArgs: ["-p", "Reply with exactly: OK"] }); // a third prompt for run 2's observing turn
     const smoke2 = parseSmokeLog(r2.logPath);
     return { piRes: r1, smoke: smoke1, r2, smoke2 };
   }

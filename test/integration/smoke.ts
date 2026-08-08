@@ -46,6 +46,18 @@ const MSG_CANARY = "MULLIGAN-SMOKE-MSG-CANARY"; // injected at session_start; ta
 const RESULT_CANARY = "MULLIGAN-SMOKE-RESULT-CANARY"; // in mulligan_smoke_big; target of shrink
 const SHRUNK_MARKER = "MULLIGAN-SMOKE-SHRUNK"; // the shrink replacement string
 
+// SEED canaries for the deterministic HIDING assertions (P1.M3.T2.S1). The session-start MSG_CANARY precedes the first
+// user message, so a last_turn rewind (which hides content AFTER the last user message) can NEVER hide it. Instead, a
+// SEED model turn (a prepended `-p "Reply with exactly: <SEED>"`) commits a real assistant message AFTER the first user
+// message — which the rewind CAN pin + hide. SEED_HIDDEN is the content asserted ABSENT on the observing inference;
+// SEED_ANCHOR is the F-checkpoint anchor asserted PRESENT (the checkpoint must keep its anchor, not over-hide).
+const SEED_ANCHOR = "MULLIGAN-SMOKE-SEED-ANCHOR";
+const SEED_HIDDEN = "MULLIGAN-SMOKE-SEED-HIDDEN";
+
+// Which logical scenario is running (set+normalized in driveScenario; read by the context handler so its scenario-scoped
+// hiding assertions fire on the right post-rewind fire). Module-local mutable — never exported.
+let currentScenario = "";
+
 // A canonical 4-field note for the REAL rewind tool (validated by validateNote — all fields non-empty).
 const SMOKE_NOTE = {
   what_happened: "smoke test rewind setup",
@@ -145,6 +157,8 @@ function bigResult(): string {
 async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, scenario: string): Promise<void> {
   smokeLog("scenario.start", "info", { scenario });
   try {
+    // Normalize so the context-handler assertion fires during BOTH F-checkpoint phases (set + rewind).
+    currentScenario = scenario.startsWith("F-checkpoint") ? "F-checkpoint" : scenario;
     switch (scenario) {
       case "F-rewind-core": {
         // Deterministic path: create a last_turn rewind marker + note. The CANARY-DROP observation (context.fire
@@ -235,6 +249,28 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         } catch (e) {
           smokeLog("tool.checkpoint", "fail", { error: String(e) });
         }
+        await rewindNow(pi, ctx, "smoke-cp-rw-1", "checkpoint", { checkpoint: "alpha" });
+        break;
+      }
+      case "F-checkpoint-set": {
+        // Phase 1 of the F-checkpoint HIDING flow (run-smoke.mjs drives a SEED_ANCHOR model turn BEFORE this command):
+        // set the checkpoint ONLY. The SEED_ANCHOR assistant (committed by the preceding prompt) is the stable entry
+        // setCheckpoint labels — so it SUCCEEDS (fixes the baseline breakage where a fresh 2-prompt session has no
+        // stable entry). A SEED_HIDDEN model turn runs AFTER this, then F-checkpoint-rewind hides it (K>0).
+        try {
+          const cpTool = makeCheckpointTool(pi);
+          const cpRes = await cpTool.execute("smoke-cp-1", { name: "alpha" }, undefined, undefined, ctx);
+          const cpText = resultText(cpRes.content as unknown as { type: string; text?: string }[]);
+          smokeLog("tool.checkpoint", "info", { phase: "set", text: cpText.slice(0, 120) });
+        } catch (e) {
+          smokeLog("tool.checkpoint", "fail", { phase: "set", error: String(e) });
+        }
+        break;
+      }
+      case "F-checkpoint-rewind": {
+        // Phase 2 of the F-checkpoint HIDING flow (a SEED_HIDDEN model turn has run BETWEEN set and this): rewind to
+        // 'alpha' → hides the post-checkpoint SEED_HIDDEN turn (K>0). The orchestrator's final `-p "Reply OK"` is the
+        // observing inference on which F-checkpoint.hiding is asserted.
         await rewindNow(pi, ctx, "smoke-cp-rw-1", "checkpoint", { checkpoint: "alpha" });
         break;
       }
@@ -404,6 +440,15 @@ export default function (pi: ExtensionAPI): void {
           (e as Record<string, unknown>).type === "custom" &&
           (e as Record<string, unknown>).customType === "mulligan:rewind",
       );
+      // ── SEED-canary hiding detection (P1.M3.T2.S1). Role-gated: the user PROMPT also contains the canary text, so
+      //    gate on role:"assistant" to detect the seed REPLY specifically (GOTCHA #5). smoke loads SECOND → these read
+      //    the POST-filter view, so seed-absence = seed-hidden-by-the-filter.
+      const seedAnchorInAssistant = msgs.some(
+        (m) => m?.role === "assistant" && JSON.stringify(m).includes(SEED_ANCHOR),
+      );
+      const seedHiddenInAssistant = msgs.some(
+        (m) => m?.role === "assistant" && JSON.stringify(m).includes(SEED_HIDDEN),
+      );
       smokeLog("context.fire", "info", {
         count: msgs.length,
         msgCanaryPresent: has(MSG_CANARY),
@@ -412,7 +457,33 @@ export default function (pi: ExtensionAPI): void {
         hasRewindMarker,
         shrunkInContext: has(SHRUNK_MARKER),
         hasNudge: msgs.some((m) => m?.customType === "mulligan:nudge"),
+        seedAnchorInAssistant,
+        seedHiddenInAssistant,
       });
+      // ── Scenario-scoped HARD hiding assertions (emitted on the post-rewind fire only). These are READ BACK by
+      //    run-smoke.mjs assertRewindCore/assertCheckpoint and converted to assert() — logging alone does not fail a
+      //    scenario (GOTCHA #7). Two-signal guard: the tool.rewind K-text (read by the asserter) proves the seed
+      //    existed+was pinned; seed-absence here proves it is hidden. If pinning regressed (BUG-001/002) the seed
+      //    reply LEAKS BACK → seedHiddenInAssistant===true → FAIL.
+      if (currentScenario === "F-rewind-core" && hasRewindMarker) {
+        smokeLog("F-rewind-core.hiding", seedHiddenInAssistant ? "fail" : "pass", {
+          seedHiddenInAssistant,
+          note: seedHiddenInAssistant ? "LEAKED BACK (BUG-001/002 regression: pinned hide lost)" : "seed reply hidden on observing inference",
+        });
+      }
+      if (currentScenario === "F-checkpoint" && hasRewindMarker) {
+        // The checkpoint must HIDE the post-checkpoint SEED_HIDDEN turn AND KEEP its SEED_ANCHOR (not over-hide).
+        const cpPass = !seedHiddenInAssistant && seedAnchorInAssistant;
+        smokeLog("F-checkpoint.hiding", cpPass ? "pass" : "fail", {
+          seedHiddenInAssistant,
+          seedAnchorInAssistant,
+          note: cpPass
+            ? "post-checkpoint seed hidden; anchor survives"
+            : seedHiddenInAssistant
+              ? "post-checkpoint seed LEAKED BACK (BUG-003/001 regression)"
+              : "checkpoint anchor MISSING (over-hid / checkpoint not set)",
+        });
+      }
     } catch (e) {
       smokeLog("context.fire", "fail", { error: String(e) });
     }
