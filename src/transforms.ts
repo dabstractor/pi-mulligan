@@ -1073,8 +1073,18 @@ export function protectedOk(
  *   3. Return the array. (Nudge injection — spec/06 §1 step 3 / §12 — is filter.ts's concern, NOT this pure pipeline;
  *      filterPipeline transforms markers ONLY. GOTCHA #13.)
  *
- * GRANULARITY DISPATCH (spec/06 §12, with the re-partition FIX — GOTCHA #2):
- *   - "last_tool_call_group": RE-PARTITION the current array FRESH (partitionIntoUnits(m)), then
+ * GRANULARITY DISPATCH (fix_design.md §Change 4 — PINNED FIRST, then granularity legacy):
+ *   - PINNED (hideEntryIds present + non-empty): NEW markers carry stable ENTRY ids pinned at marker-creation time
+ *     (captureHideEntryIds, P1.M2.T3) for PERMANENT soft-delete hiding (fixes BUG-001 leak-back + BUG-002 infinite
+ *     loop). resolvePinnedHide(m, branchEntries, hideEntryIds) maps those stable ids → current message indices by
+ *     IDENTITY (not position) → the hidden set is invariant across session growth: the originally-hidden mistake stays
+ *     hidden every fire; the agent's NEW work (new entries, new ids NOT in the pinned set) stays visible. Pairing-safe
+ *     by construction (producer pins whole-unit ids). On compaction/alignment REFUSAL it returns [] (NOT null) →
+ *     applyRewind(m,[]) is the idempotent no-op THIS fire; the marker persists and retries next fire. A refused pinned
+ *     hide MUST NOT fall back to the relative branches (that re-introduces the bug) — enforced by control flow (the
+ *     length>0 gate already fired, so the else-if chain is skipped). Backward compat: old markers / K=0 / capture-
+ *     failure (hideEntryIds absent or []) fall through to the granularity branches below.
+ *   - "last_tool_call_group" (LEGACY FALLBACK): RE-PARTITION the current array FRESH (partitionIntoUnits(m)), then
  *     resolveLastToolCallGroup(units, m, excludeToolCallId). (The §12 pseudocode partitions ONCE before the loop — a
  *     stale-index bug after the first rewind reduces m, because resolveLastToolCallGroup returns unit.indices that index
  *     the partitioned array. Re-partitioning each iteration keeps them valid against the current m.)
@@ -1126,10 +1136,22 @@ export function filterPipeline(
     const excludeRaw = readOwn(rw, "excludeToolCallId");
     const excludeId = typeof excludeRaw === "string" ? excludeRaw : undefined;
 
+    // fix_design.md §Change 4: dispatch on PINNED hideEntryIds FIRST (permanent hiding across session growth — fixes
+    // BUG-001/BUG-002). New markers carry hideEntryIds (captureHideEntryIds, P1.M2.T3) — the stable ENTRY ids of the
+    // span to hide, captured ONCE at marker-creation time. resolvePinnedHide maps those ids → current message indices
+    // by IDENTITY every fire → the hidden set never shifts as the session grows (the agent's NEW work has NEW ids NOT
+    // in the pinned set → visible). On compaction/alignment refusal resolvePinnedHide returns [] (NOT null) → no-op
+    // this fire; it does NOT fall back to the relative branches (that re-introduces the bug). Old markers / K=0 /
+    // capture-failure (hideEntryIds absent or []) fall through to the granularity LEGACY branches below.
+    const hideEntryIdsRaw = readOwn(rw, "hideEntryIds");
     let remove: number[];
-    if (granularity === "last_tool_call_group") {
-      // RE-PARTITION fresh each iteration so unit.indices index the CURRENT m (GOTCHA #2 — the §12 pseudocode's
-      // partition-once is a stale-index bug after the first rewind reduces m).
+    if (Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0) {
+      // PINNED PATH: stable anchors → permanent hiding. branchEntries default [] is safe (resolver returns [] on absent).
+      remove = resolvePinnedHide(m, Array.isArray(branchEntries) ? branchEntries : [], hideEntryIdsRaw as string[]);
+    } else if (granularity === "last_tool_call_group") {
+      // LEGACY FALLBACK: relative re-resolution (old markers without hideEntryIds). "Last" = newest toolGroup = the
+      // moving target that caused BUG-001 — present only for backward compat. RE-PARTITION fresh each iteration so
+      // unit.indices index the CURRENT m (GOTCHA #2 — the §12 pseudocode's partition-once is a stale-index bug).
       const units = partitionIntoUnits(m);
       remove = resolveLastToolCallGroup(units, m, excludeId) ?? [];
     } else if (granularity === "last_turn") {

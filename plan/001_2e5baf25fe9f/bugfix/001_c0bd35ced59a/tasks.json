@@ -93,7 +93,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Pin Stable Anchors at Marker Creation (BUG-001 + BUG-002)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "The core fix for BUG-001 and BUG-002: capture the session entry IDs of the messages to hide at rewind-creation time (when the session state is correct), store them in the marker as hideEntryIds, and resolve them at filter time via a new resolvePinnedHide function. This makes hiding stable across session growth because entry IDs are permanent anchors — new work produces new entries with new IDs that are NOT in the pinned set.",
           "tasks": [
             {
@@ -181,14 +181,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Update filterPipeline dispatch + add permanent-hiding tests",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Update filterPipeline's rewind loop to check hideEntryIds first: if present, use resolvePinnedHide (stable, permanent). Fall back to the existing relative resolution for old markers without hideEntryIds (backward compat). Add the CRITICAL missing test pattern: 'rewind then resume work then re-fire' that asserts permanent hiding.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Update filterPipeline dispatch + permanent-hiding tests",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S1",
@@ -218,14 +218,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Checkpoint permanent-hiding + multi-rewind regression tests",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the checkpoint-specific permanent-hiding test (set checkpoint → do work → rewind → do more work → re-fire → checkpoint span STILL hidden) and multi-rewind composition tests that verify pinned markers compose correctly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Checkpoint permanent-hiding + multi-rewind composition tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T4.S1",

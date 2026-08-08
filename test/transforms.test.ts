@@ -1648,3 +1648,113 @@ describe("resolvePinnedHide — types (fix_design.md §Change 3)", () => {
     expectTypeOf(resolvePinnedHide(msgs, branch, hide)).toEqualTypeOf<number[]>();
   });
 });
+
+// ── permanent hiding across fires (fix_design.md §Change 4; THE BUG-001/002 regression — spec_and_test_analysis §KEY QUESTION 3) ──
+
+describe("permanent hiding across fires (BUG-001/002 regression)", () => {
+  // LOCAL cfg (the filterPipeline describe's cfg is closure-local). protectedRoles keeps the first:user guard satisfied
+  // for these removals (all removals are after the first user → protectedOk true → rewind applied, not skipped).
+  const cfg = { rewind: { protectedRoles: ["first:user", "latest:user"] } } as ProtectedConfig;
+
+  it("last_tool_call_group — BAD hidden on fire 1, STILL hidden on fire 2 (PERMANENT), and GOOD new work is VISIBLE", () => {
+    // ── Fire 1: right after the rewind. msgs1 = [user, asst('BAD'), result('BAD'), asst('RW'), result('RW'), note] ──
+    const msgs1: MessageLike[] = [
+      user("u"), asst("BAD"), result("BAD"), asst("RW"), result("RW"), custom("mulligan:note"),
+    ];
+    // branch1: one "message" entry per message (1:1 alignment; entryMessageYield('message') === 1).
+    const branch1: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_bad_a", "message"), entry("e_bad_r", "message"),
+      entry("e_rw_a", "message"), entry("e_rw_r", "message"), entry("e_note", "message"),
+    ];
+    // The marker the PRODUCER (P1.M2.T3) would persist: pinned entry ids of the BAD toolGroup + the rewind's own exclude.
+    const marker: RewindMarkerLike = {
+      seq: 1, granularity: "last_tool_call_group", excludeToolCallId: "RW", hideEntryIds: ["e_bad_a", "e_bad_r"],
+    };
+    const view1 = filterPipeline(msgs1, { rewinds: [marker], shrinks: [] }, cfg, branch1);
+    // Fire 1: BAD toolGroup (msgs1[1] asst, msgs1[2] result) is HIDDEN. resolvePinnedHide → remove=[1,2].
+    expect(view1).not.toContain(msgs1[1]); // BAD assistant hidden
+    expect(view1).not.toContain(msgs1[2]); // BAD result hidden
+    expect(view1).toContain(msgs1[0]);     // user kept
+    expect(view1).toContain(msgs1[3]);     // rewind's own assistant kept
+    expect(view1).toContain(msgs1[5]);     // note kept
+
+    // ── Fire 2: the agent resumed work — read /etc/os-release (NEW entries, NEW ids NOT in the pinned set) ──
+    // msgs2 = [...msgs1, asst('GOOD'), result('GOOD')] → msgs2[6]=GOOD asst, msgs2[7]=GOOD result. (msgs2[1..5] === msgs1.)
+    const msgs2: MessageLike[] = [...msgs1, asst("GOOD"), result("GOOD")];
+    const branch2: BranchEntry[] = [...branch1, entry("e_good_a", "message"), entry("e_good_r", "message")];
+    // SAME marker (persisted). resolvePinnedHide still maps ['e_bad_a','e_bad_r'] → [1,2]; e_good_* NOT pinned → visible.
+    const view2 = filterPipeline(msgs2, { rewinds: [marker], shrinks: [] }, cfg, branch2);
+    // THE PERMANENCE ASSERTION: BAD STILL hidden (would have LEAKED BACK under the old relative resolver — BUG-001).
+    expect(view2).not.toContain(msgs2[1]); // BAD assistant STILL hidden
+    expect(view2).not.toContain(msgs2[2]); // BAD result STILL hidden
+    // THE NEW-WORK ASSERTION: GOOD (the agent's redo) is VISIBLE (would have been HIDDEN under the old resolver — BUG-001).
+    expect(view2).toContain(msgs2[6]); // GOOD assistant visible
+    expect(view2).toContain(msgs2[7]); // GOOD result visible
+    expect(view2).toContain(msgs2[0]); // user kept
+    expect(view2).toContain(msgs2[5]); // note kept
+  });
+
+  it("last_turn — same permanence: BAD hidden on fire 1, STILL hidden on fire 2, GOOD new work VISIBLE", () => {
+    // Same message shape; granularity differs but the PINNED path ignores granularity (hideEntryIds wins). The producer
+    // (T3) captures the same BAD entries for last_turn (resolveLastTurn removes idx 1,2 → entry ids e_bad_a,e_bad_r).
+    const msgs1: MessageLike[] = [
+      user("u"), asst("BAD"), result("BAD"), asst("RW"), result("RW"), custom("mulligan:note"),
+    ];
+    const branch1: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_bad_a", "message"), entry("e_bad_r", "message"),
+      entry("e_rw_a", "message"), entry("e_rw_r", "message"), entry("e_note", "message"),
+    ];
+    const marker: RewindMarkerLike = {
+      seq: 1, granularity: "last_turn", excludeToolCallId: "RW", hideEntryIds: ["e_bad_a", "e_bad_r"],
+    };
+    const view1 = filterPipeline(msgs1, { rewinds: [marker], shrinks: [] }, cfg, branch1);
+    expect(view1).not.toContain(msgs1[1]); // BAD hidden
+    expect(view1).not.toContain(msgs1[2]);
+
+    // Fire 2: new GOOD work appended. Under the OLD last_turn resolver, GOOD (after the last user msg) would be HIDDEN
+    // every fire → infinite loop (BUG-002). The pinned path keeps GOOD visible.
+    const msgs2: MessageLike[] = [...msgs1, asst("GOOD"), result("GOOD")];
+    const branch2: BranchEntry[] = [...branch1, entry("e_good_a", "message"), entry("e_good_r", "message")];
+    const view2 = filterPipeline(msgs2, { rewinds: [marker], shrinks: [] }, cfg, branch2);
+    expect(view2).not.toContain(msgs2[1]); // BAD STILL hidden (permanent)
+    expect(view2).not.toContain(msgs2[2]);
+    expect(view2).toContain(msgs2[6]); // GOOD visible — the agent can SEE its own redo (no infinite loop)
+    expect(view2).toContain(msgs2[7]);
+  });
+
+  it("legacy fallback — a marker WITHOUT hideEntryIds uses the relative resolver (backward compat; unchanged behavior)", () => {
+    // An OLD marker (pre-fix) lacks hideEntryIds → the dispatch falls through to the granularity branch. This proves
+    // backward compatibility: the dispatch is additive; old markers behave EXACTLY as before.
+    const msgs: MessageLike[] = [
+      user("u0"), asst("cM"), result("cM"), asst("cR1"), result("cR1"), custom("mulligan:note"),
+    ];
+    // last_tool_call_group, exclude cR1 → resolveLastToolCallGroup resolves the cM group (idx 1,2) → remove=[1,2].
+    const legacyMarker: RewindMarkerLike = {
+      seq: 1, granularity: "last_tool_call_group", excludeToolCallId: "cR1",
+      // hideEntryIds intentionally ABSENT (old marker)
+    };
+    const out = filterPipeline(msgs, { rewinds: [legacyMarker], shrinks: [] }, cfg);
+    expect(out).not.toContain(msgs[1]); // cM assistant removed by the LEGACY relative resolver
+    expect(out).not.toContain(msgs[2]); // cM result removed
+    expect(out).toHaveLength(4);
+  });
+
+  it("compaction refusal — pinned marker whose branch contains a compaction entry → nothing hidden (refuse; NO legacy fallback)", () => {
+    // resolvePinnedHide returns [] when a compaction entry is on the walk (entryMessageYield('compaction') === -1 → refuse).
+    // Because hideEntryIds.length > 0 already passed the dispatch gate, the ELSE chain is NOT entered → remove=[] → no-op.
+    // This fire the marker hides nothing; it retries next fire. (Falling back to legacy here would re-introduce BUG-001.)
+    const msgs: MessageLike[] = [user("u"), asst("BAD"), result("BAD"), asst("RW"), result("RW"), custom("mulligan:note")];
+    const branchWithCompaction: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_bad_a", "message"), entry("eC", "compaction"), // compaction between pinned ids
+      entry("e_bad_r", "message"), entry("e_rw_a", "message"), entry("e_rw_r", "message"), entry("e_note", "message"),
+    ];
+    const marker: RewindMarkerLike = {
+      seq: 1, granularity: "last_tool_call_group", excludeToolCallId: "RW", hideEntryIds: ["e_bad_a", "e_bad_r"],
+    };
+    const out = filterPipeline(msgs, { rewinds: [marker], shrinks: [] }, cfg, branchWithCompaction);
+    // Refused → remove=[] → applyRewind no-op → SAME reference, nothing hidden this fire (no crash, no legacy fallback).
+    expect(out).toBe(msgs);
+    expect(out).toContain(msgs[1]); // BAD NOT hidden this fire (refusal); retries next fire when session stabilizes
+    expect(out).toContain(msgs[2]);
+  });
+});
