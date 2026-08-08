@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Foundation & Infrastructure",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Scaffold the project (package.json, tsconfig, directory structure), and implement the three infrastructure modules: configuration system (config.ts), structured JSONL logger (log.ts), and per-session runtime state map (runtime.ts). These are the non-Pi-dependent-but-Pi-adjacent foundation that everything else builds on.",
           "tasks": [
             {
@@ -56,7 +56,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Configuration System (config.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the configuration loader that reads 'mulligan' from Pi settings.json, validates and coerces all fields with safe defaults, and never throws. Works with zero configuration.",
               "subtasks": [
                 {
@@ -78,7 +78,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Implement getConfig() with validation, coercion, and fail-safe defaults",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"

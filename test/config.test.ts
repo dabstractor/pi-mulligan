@@ -144,6 +144,24 @@ describe("validateConfig", () => {
     validateConfig({ nudges: { bloatThresholdBytes: 1 }, rewind: { maxDepth: 99 } });
     expect(DEFAULT_CONFIG).toEqual(snapshot);
   });
+
+  it("does NOT warn for ABSENT fields in a partial override (warns only on present-but-invalid, spec/09 §4)", () => {
+    // A partial valid override must NOT spew warns about its absent sibling fields.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // driftThresholdTokens absent
+      expect(cfg.nudges.bloatThresholdBytes).toBe(100);
+      expect(cfg.nudges.driftThresholdTokens).toBe(3000); // absent → default, silently
+      expect(warn).not.toHaveBeenCalled(); // ZERO warns for a fully-valid partial override
+      // …but a present-but-INVALID value DOES warn (exactly once, naming the field):
+      warn.mockClear();
+      validateConfig({ nudges: { bloatThresholdBytes: -1 } });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytes");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("getConfig / setConfig cache", () => {

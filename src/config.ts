@@ -127,9 +127,6 @@ const KNOWN_PROTECTED_ROLES = new Set<string>(["first:user", "latest:user"]);
  */
 let cachedConfig: MulliganConfig | null = null;
 
-/** Sentinel distinguishing "property absent" from "present-but-undefined". */
-const UNSET = Symbol("mulligan:config:unset");
-
 /**
  * getConfig() — the public read API (spec/09 §1: "loaded lazily on first use and cached for the session").
  *
@@ -178,57 +175,61 @@ export function validateConfig(raw: unknown): MulliganConfig {
       return cfg;
     }
 
+    // Each known field is read via safeGet (which returns `undefined` for ABSENT properties and for a
+    // throwing Proxy `get` trap). The `if (v !== undefined)` guard therefore SKIPS absent fields (they
+    // keep their default with NO warn — spec/09 §4 warns only on present-but-invalid values) and only runs
+    // the coercer on a genuinely-present value. (GOTCHA #1)
     let v: unknown;
 
     // Top-level master switch.
     v = safeGet(raw, "enabled");
-    if (v !== UNSET) cfg.enabled = coerceBoolean(v, cfg.enabled);
+    if (v !== undefined) cfg.enabled = coerceBoolean(v, cfg.enabled);
 
     // rewind.*
     const rewindRaw = safeGet(raw, "rewind");
     if (isRecord(rewindRaw)) {
       v = safeGet(rewindRaw, "enabled");
-      if (v !== UNSET) cfg.rewind.enabled = coerceBoolean(v, cfg.rewind.enabled);
+      if (v !== undefined) cfg.rewind.enabled = coerceBoolean(v, cfg.rewind.enabled);
       v = safeGet(rewindRaw, "protectedRoles");
-      if (v !== UNSET) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
+      if (v !== undefined) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
       v = safeGet(rewindRaw, "maxDepth");
-      if (v !== UNSET) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
+      if (v !== undefined) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
       v = safeGet(rewindRaw, "requireMutationWarning");
-      if (v !== UNSET) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
+      if (v !== undefined) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
     }
 
     // shrink.*  (autoOnBloat intentionally NOT honored — reserved, not v1; S1 GOTCHA #1)
     const shrinkRaw = safeGet(raw, "shrink");
     if (isRecord(shrinkRaw)) {
       v = safeGet(shrinkRaw, "enabled");
-      if (v !== UNSET) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
+      if (v !== undefined) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
     }
 
     // nudges.*
     const nudgesRaw = safeGet(raw, "nudges");
     if (isRecord(nudgesRaw)) {
       v = safeGet(nudgesRaw, "bloatReminder");
-      if (v !== UNSET) cfg.nudges.bloatReminder = coerceBoolean(v, cfg.nudges.bloatReminder);
+      if (v !== undefined) cfg.nudges.bloatReminder = coerceBoolean(v, cfg.nudges.bloatReminder);
       v = safeGet(nudgesRaw, "perTurnDrift");
-      if (v !== UNSET) cfg.nudges.perTurnDrift = coerceBoolean(v, cfg.nudges.perTurnDrift);
+      if (v !== undefined) cfg.nudges.perTurnDrift = coerceBoolean(v, cfg.nudges.perTurnDrift);
       v = safeGet(nudgesRaw, "bloatThresholdBytes");
-      if (v !== UNSET) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
+      if (v !== undefined) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
       v = safeGet(nudgesRaw, "driftThresholdTokens");
-      if (v !== UNSET) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
+      if (v !== undefined) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
     }
 
     // audit.*
     const auditRaw = safeGet(raw, "audit");
     if (isRecord(auditRaw)) {
       v = safeGet(auditRaw, "estimateConfidence");
-      if (v !== UNSET) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
+      if (v !== undefined) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
     }
 
     // log.*  (opening/writing the file is log.ts / P1.M1.T3 — NOT this module)
     const logRaw = safeGet(raw, "log");
     if (isRecord(logRaw)) {
       v = safeGet(logRaw, "file");
-      if (v !== UNSET) cfg.log.file = coerceLogFile(v, cfg.log.file);
+      if (v !== undefined) cfg.log.file = coerceLogFile(v, cfg.log.file);
     }
 
     return cfg;
@@ -245,12 +246,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Read a property without throwing (a Proxy `get` trap may throw). Returns UNSET if absent/unreadable. */
+/** Read a property without throwing (a Proxy `get` trap may throw). Returns `undefined` if the property
+ *  is absent OR the read throws — both are treated as "not provided" (keep default, no warn). */
 function safeGet(obj: object, key: string): unknown {
   try {
     return (obj as Record<string, unknown>)[key];
   } catch {
-    return UNSET;
+    return undefined;
   }
 }
 
