@@ -274,14 +274,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Message Partitioning & Tool-Call Pairing (partitionIntoUnits)",
-              "status": "Complete",
+              "status": "Ready",
               "description": "Implement the foundational pairing-aware message partitioner that groups assistant messages with their tool results into atomic 'units'. Every removal operation operates on units, never raw indices, guaranteeing pairing by construction.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Implement partitionIntoUnits — pairing-aware grouping",
-                  "status": "Complete",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -298,14 +298,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Rewind Resolution Algorithms",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the two relative rewind resolvers: resolveLastToolCallGroup (find the most recent tool-call group, excluding the rewind's own call) and resolveLastTurn (find the last user message and compute the removal range). Both return index ranges for applyRewind.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Implement resolveLastToolCallGroup",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -320,7 +320,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Implement resolveLastTurn with to_previous_prompt option",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M3.T1.S1"

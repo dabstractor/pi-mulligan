@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, type Unit, type MessageLike } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, type Unit, type MessageLike } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -374,5 +374,160 @@ describe("types", () => {
   it("accepts null | undefined input (defensive signature)", () => {
     expectTypeOf(partitionIntoUnits(null)).toEqualTypeOf<Unit[]>();
     expectTypeOf(partitionIntoUnits(undefined)).toEqualTypeOf<Unit[]>();
+  });
+});
+
+// ── resolveLastToolCallGroup — spec/10 §1.2 + corner + defensive + parallel + types ────
+
+describe("resolveLastToolCallGroup — spec/10 §1.2 PINNED contract", () => {
+  it("no exclude → returns the LAST toolGroup's indices (a(B)+r(B))", () => {
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("plain:0:1 | toolGroup:1:2 | toolGroup:3:2");
+    expect(resolveLastToolCallGroup(units, msgs)).toEqual([3, 4]); // the a(B)+r(B) toolGroup
+  });
+
+  it("excludeToolCallId='B' → returns the a(A)+r(A) toolGroup's indices (skips the rewind's own)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(resolveLastToolCallGroup(units, msgs, "B")).toEqual([1, 2]); // the a(A)+r(A) toolGroup
+  });
+
+  it("no toolGroup at all → null", () => {
+    const msgs: MessageLike[] = [user("u"), asstText("thinking"), custom("mulligan:note")];
+    const units = partitionIntoUnits(msgs);
+    expect(units.every((u) => u.kind === "plain")).toBe(true);
+    expect(resolveLastToolCallGroup(units, msgs)).toBeNull();
+  });
+});
+
+describe("resolveLastToolCallGroup — exclude semantics", () => {
+  it("excludeToolCallId matching NO unit → returns the last toolGroup (nothing skipped)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(resolveLastToolCallGroup(units, msgs, "DOES-NOT-EXIST")).toEqual([3, 4]);
+  });
+
+  it("only ONE toolGroup and exclude matches it → null (the only toolGroup was the rewind's own)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("only"), result("only")];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("plain:0:1 | toolGroup:1:2");
+    expect(resolveLastToolCallGroup(units, msgs, "only")).toBeNull();
+  });
+
+  it("excludeToolCallId is undefined → never skips (same as no exclude)", () => {
+    const msgs: MessageLike[] = [asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(resolveLastToolCallGroup(units, msgs, undefined)).toEqual([2, 3]);
+  });
+
+  it("excludeToolCallId is empty string / non-string → never skips", () => {
+    const msgs: MessageLike[] = [asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(resolveLastToolCallGroup(units, msgs, "")).toEqual([2, 3]);
+    expect(resolveLastToolCallGroup(units, msgs, 123 as unknown as string)).toEqual([2, 3]);
+  });
+
+  it("skips EVERY toolGroup whose assistant issued the exclude id, landing on an earlier one", () => {
+    // three toolGroups: X(0,1), Y(2,3), Z(4,5); exclude 'Z' → returns Y([2,3])
+    const msgs: MessageLike[] = [asst("X"), result("X"), asst("Y"), result("Y"), asst("Z"), result("Z")];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("toolGroup:0:2 | toolGroup:2:2 | toolGroup:4:2");
+    expect(resolveLastToolCallGroup(units, msgs, "Z")).toEqual([2, 3]);
+  });
+});
+
+describe("resolveLastToolCallGroup — parallel-tool mode (spec/06 §9 / spec/08 E6)", () => {
+  it("rewind shares an assistant message with a sibling call → that toolGroup is skipped, previous returned", () => {
+    // one assistant carries call 'X' AND the rewind call 'REW' (parallel execution) + both results
+    const msgs: MessageLike[] = [
+      asst("prev"),
+      result("prev"),
+      asst("X", "REW"), // shared assistant message
+      result("X"),
+      result("REW"),
+    ];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("toolGroup:0:2 | toolGroup:2:3"); // shared message is ONE toolGroup of 3 indices
+    // exclude the rewind's own call 'REW' → the shared toolGroup [2,3,4] is skipped → previous [0,1] returned
+    expect(resolveLastToolCallGroup(units, msgs, "REW")).toEqual([0, 1]);
+  });
+
+  it("only the shared toolGroup exists → exclude it → null", () => {
+    const msgs: MessageLike[] = [asst("A", "REW"), result("A"), result("REW")];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("toolGroup:0:3");
+    expect(resolveLastToolCallGroup(units, msgs, "REW")).toBeNull();
+  });
+});
+
+describe("resolveLastToolCallGroup — defensive (NEVER throws — spec/08 E13)", () => {
+  it("non-array units → null (no throw)", () => {
+    expect(resolveLastToolCallGroup(null as unknown as Unit[], [])).toBeNull();
+    expect(resolveLastToolCallGroup(undefined as unknown as Unit[], [])).toBeNull();
+    expect(resolveLastToolCallGroup("nope" as unknown as Unit[], [])).toBeNull();
+  });
+
+  it("a toolGroup whose assistant is a throwing-Proxy → no match → returned (fail-safe, no throw)", () => {
+    // the rewind's own call id 'self' is NOT readable (every read throws) → cannot match → unit is returned
+    const trap: MessageLike = new Proxy(
+      { role: "assistant", content: [{ type: "toolCall", id: "self", name: "mulligan_rewind", arguments: {} }] } as MessageLike,
+      new Proxy({}, { get() { throw new Error("trap"); } }),
+    );
+    const msgs: MessageLike[] = [asst("real"), result("real"), trap, result("self")];
+    const units = partitionIntoUnits(msgs); // trap reads throw → treated as non-assistant → may land as plain/toolGroup
+    expect(() => resolveLastToolCallGroup(units, msgs, "self")).not.toThrow();
+    // 'self' can never be confirmed issued → the toolGroup 'real' (or the last confirmable toolGroup) is returned
+    expect(resolveLastToolCallGroup(units, msgs, "self")).not.toBeNull();
+  });
+
+  it("malformed messages array (non-array) → exclude never matches → returns last toolGroup", () => {
+    const msgs = "garbage" as unknown as MessageLike[];
+    const units: Unit[] = [
+      { indices: [0, 1], kind: "toolGroup" },
+      { indices: [2, 3], kind: "toolGroup" },
+    ];
+    expect(resolveLastToolCallGroup(units, msgs, "whatever")).toEqual([2, 3]);
+  });
+
+  it("a malformed unit record in the list is skipped, not crashing", () => {
+    const msgs: MessageLike[] = [asst("A"), result("A")];
+    const units = [
+      null,
+      { kind: "toolGroup" }, // no indices
+      { indices: [0, 1], kind: "toolGroup" },
+    ] as unknown as Unit[];
+    expect(() => resolveLastToolCallGroup(units, msgs)).not.toThrow();
+    expect(resolveLastToolCallGroup(units, msgs)).toEqual([0, 1]);
+  });
+});
+
+describe("resolveLastToolCallGroup — ordering, purity, types", () => {
+  it("plain units interspersed between toolGroups are skipped", () => {
+    const msgs: MessageLike[] = [asst("A"), result("A"), asstText("chat"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    expect(summary(units)).toBe("toolGroup:0:2 | plain:2:1 | toolGroup:3:2");
+    expect(resolveLastToolCallGroup(units, msgs)).toEqual([3, 4]);
+  });
+
+  it("is pure / idempotent — same input → same output, no mutation", () => {
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A"), asst("B"), result("B")];
+    const units = partitionIntoUnits(msgs);
+    const a = resolveLastToolCallGroup(units, msgs, "B");
+    const b = resolveLastToolCallGroup(units, msgs, "B");
+    expect(a).toEqual(b);
+    expect(JSON.stringify(units)).toBe(JSON.stringify(partitionIntoUnits(msgs))); // units unchanged
+  });
+
+  it("returns the unit's indices reference (the exact indices array)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("A"), result("A")];
+    const units = partitionIntoUnits(msgs);
+    const toolGroup = units.find((u) => u.kind === "toolGroup")!;
+    expect(resolveLastToolCallGroup(units, msgs)).toBe(toolGroup.indices); // same array reference (read-only)
+  });
+
+  it("returns number[] | null", () => {
+    expectTypeOf(resolveLastToolCallGroup([], [])).toEqualTypeOf<number[] | null>();
+    expectTypeOf(resolveLastToolCallGroup([], [], "x")).toEqualTypeOf<number[] | null>();
   });
 });

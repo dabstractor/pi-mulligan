@@ -505,7 +505,7 @@ type ContentBlock = ToolCallContent | { type: string; [key: string]: unknown };
  *   - assistant `content[]` for toolCall blocks (reading each `.id`),
  *   - toolResult `toolCallId` (via the index signature, read via readOwn).
  * A real Pi AgentMessage[] assigns in with NO cast (structural typing — api_verification.md §6.1/§6.3). EXPORTED so
- * tests + the later sibling resolve*/apply* functions + filter.ts (P1.M4) share one input type.
+ * tests + the later sibling resolve/apply transform functions + filter.ts (P1.M4) share one input type.
  */
 export interface MessageLike {
   role?: string;
@@ -1171,12 +1171,19 @@ npx vitest run
 
 ---
 
-## Confidence Score: 9/10
+## Confidence Score: 10/10 — VERBATIM CODE VALIDATED END-TO-END
 
-One-pass success is highly likely: the algorithm is spec-pinned (spec/06 §2 steps a–e), the exact tests are
-spec-pinned (spec/10 §1.1), the message shapes are verified (api_verification.md §6.1/§6.2), and the implementation
-+ tests are given VERBATIM above. The only residual risk is a vitest snapshot write (the single
-`toMatchInlineSnapshot` auto-populates on first run — GOTCHA in tokens.ts/notes.ts; run `npx vitest run -u` once if
-needed, then `npx vitest run` to confirm green). The -1 accounts for that snapshot mechanic + the inherent chance of
-a subtle defensive-branch type-reachability warning under `strict` (which compiles cleanly per the sibling
-precedent in notes.ts/tokens.ts).
+The exact code blocks above were extracted programmatically from this PRP and validated in an ISOLATED copy of the
+repo (separate `node_modules` symlink; the real repo's source was never touched by the research agent):
+  - `npx tsc --noEmit -p tsconfig.json` → **exit 0** (clean under `strict`; no defensive-branch reachability warnings).
+  - `npx vitest run test/transforms.test.ts` → **30/30 tests pass** (spec/10 §1.1 pinned + corner + defensive + types).
+  - `npx vitest run` (full suite) → **7 files / 246 tests green** (baseline 6 files / 216 → +1 file / +30 transforms;
+    zero regressions).
+  - The single `toMatchInlineSnapshot` matched **without `-u`** (the pinned summary string is exact).
+  - `grep -c '^import' src/transforms.ts` → **0** (the zero-imports foundation-tier gate holds).
+
+This validation caught + fixed one real defect in the verbatim code before it could fail one-pass implementation:
+the JSDoc shorthand `resolve*/apply*` contains `*/`, which prematurely closes the JSDoc comment and breaks parsing
+(fixed → `resolve/apply transform functions`). The algorithm is spec-pinned (spec/06 §2 steps a–e), the tests are
+spec-pinned (spec/10 §1.1), and the message shapes are verified (api_verification.md §6.1/§6.2). One-pass success is
+essentially guaranteed.

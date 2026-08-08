@@ -183,3 +183,94 @@ function readOwn(obj: unknown, key: string): unknown {
     return undefined;
   }
 }
+
+/**
+ * resolveLastToolCallGroup — find the most recent toolGroup unit, EXCLUDING the unit whose
+ * assistant message issued the rewind's own toolCall (spec/06-context-filter.md §3).
+ *
+ * ALGORITHM (spec/06 §3, steps 1–5):
+ *   1. Iterate `units` from the END backward to index 0.
+ *   2. Skip any `plain` unit (and any malformed record) — they carry no tool calls.
+ *   3. For each `toolGroup`, if `excludeToolCallId` is a non-empty string AND that unit's assistant
+ *      message issued a toolCall with `id === excludeToolCallId` → SKIP it. That is the rewind's OWN
+ *      toolGroup (the assistant message carrying the `mulligan_rewind` toolCall + its result); without
+ *      exclusion "last tool-call group" would resolve to the rewind itself (spec/08 E2). The SAME rule
+ *      resolves the parallel-tool case conservatively (spec/06 §9, spec/08 E6): if `mulligan_rewind`
+ *      shares an assistant message with sibling calls, that whole shared toolGroup is skipped and the
+ *      PREVIOUS toolGroup becomes the target (pairing-safe, never an orphan).
+ *   4. The first non-skipped toolGroup from the end is the target → return its `indices`.
+ *   5. If the loop exhausts with no toolGroup → return `null` (nothing to rewind → applyRewind no-ops → spec/08 E8).
+ *
+ * WHY exclude: when the agent calls `mulligan_rewind`, that call is itself a toolGroup. The rewind marker
+ * carries `excludeToolCallId` (captured from the tool's `execute(toolCallId, params, …)` first argument —
+ * spec/05 §1 + api_verification.md "NOTE on execute signature") precisely so the filter can skip it.
+ *
+ * RETURNS `number[] | null` — the resolved toolGroup's `indices` (NOT a Unit object). The single consumer
+ * `filterPipeline` (P1.M3.T5.S1) uses `remove = resolveLastToolCallGroup(units, m, rw.excludeToolCallId) ?? []`
+ * (spec/06 §12 pseudocode `u ? u.indices : []` is reference-only and inconsistent with this signature).
+ * Returning a unit's indices is what lets `applyRewind` remove the assistant call AND all its results
+ * together → the model API never sees an orphaned toolCall/toolResult (api_verification.md §6.4).
+ *
+ * Pure + defensive: a non-array `units` → null; malformed messages, throwing-Proxy messages, and a
+ * non-string/empty `excludeToolCallId` (→ never skip) are all handled gracefully — NEVER throws (E13;
+ * context-handler hot path). Every field read goes through the module-private isRecord/readOwn.
+ *
+ * @param units the partitioned units (from partitionIntoUnits); walked end→start
+ * @param messages the message list (for reading assistant toolCall ids, via readOwn)
+ * @param excludeToolCallId the rewind's own toolCall id to skip; undefined/empty/non-string → never skip
+ * @returns the resolved toolGroup's indices, or null when nothing matches
+ */
+export function resolveLastToolCallGroup(
+  units: Unit[],
+  messages: MessageLike[],
+  excludeToolCallId?: string,
+): number[] | null {
+  // Defensive: a non-array units (shouldn't happen) → nothing resolvable.
+  if (!Array.isArray(units)) return null;
+
+  const hasExclude = typeof excludeToolCallId === "string" && excludeToolCallId.length > 0;
+
+  // 1) Walk units from the last to the first.
+  for (let k = units.length - 1; k >= 0; k--) {
+    const unit = units[k];
+    // 2) Skip plain units (+ malformed records). Only toolGroups are candidates.
+    if (!isRecord(unit) || unit.kind !== "toolGroup" || !Array.isArray(unit.indices)) continue;
+
+    // 3) If exclusion is active, skip this toolGroup when its assistant issued the rewind's own call
+    //    (the rewind's own toolGroup, or a parallel-shared message — spec/06 §9 / spec/08 E6).
+    if (hasExclude && assistantIssuedCall(messages, unit.indices, excludeToolCallId)) {
+      continue;
+    }
+
+    // 4) First non-skipped toolGroup from the end → return its indices (read-only reference; applyRewind copies).
+    return unit.indices;
+  }
+
+  // 5) No toolGroup found → nothing to rewind (applyRewind no-ops; spec/08 E8).
+  return null;
+}
+
+/**
+ * Module-private: did the assistant message within this toolGroup issue a toolCall whose id === callId?
+ * Defensive (isRecord/readOwn; never throws). `indices` is a toolGroup's member indices (assistant + results).
+ * Scans ALL assistant members and ALL their toolCall blocks so a parallel-tool assistant (one message, several
+ * calls) is handled (spec/06 §9). Returns false if `messages` is malformed, no assistant is present, or no match.
+ */
+function assistantIssuedCall(
+  messages: MessageLike[] | unknown,
+  indices: number[],
+  callId: string,
+): boolean {
+  if (!Array.isArray(messages)) return false;
+  for (const i of indices) {
+    const msg = messages[i];
+    if (!isRecord(msg) || readOwn(msg, "role") !== "assistant") continue;
+    const content = readOwn(msg, "content");
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isRecord(block) || readOwn(block, "type") !== "toolCall") continue;
+      if (readOwn(block, "id") === callId) return true; // this assistant issued the excluded call
+    }
+  }
+  return false;
+}
