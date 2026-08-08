@@ -437,14 +437,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Marker Persistence Wrappers (markers.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement thin wrappers that persist markers via pi.appendEntry (control state, NOT in context), notes via pi.sendMessage (context message, IN context), and checkpoints via pi.setLabel. Each wrapper captures the leaf id immediately after appendEntry (constraint C7) and increments seq.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Implement appendRewindMarker, appendShrinkMarker, appendTurnMetric with seq + leaf id capture",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M1.T4.S1",
@@ -461,7 +461,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Implement leaveNote and setCheckpoint wrappers",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1"
