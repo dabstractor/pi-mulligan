@@ -125,14 +125,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Implement resolvePinnedHide pure resolver",
-              "status": "Researching",
+              "status": "Complete",
               "description": "New pure function in transforms.ts that maps a set of stable entry IDs → current message indices using the branch walk (root→leaf, same as resolveCheckpoint but collecting ALL matching entries instead of stopping at one). Returns the removal set. Handles compaction by refusing (returning []).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Implement and test resolvePinnedHide",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -152,14 +152,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Capture hideEntryIds at rewind-creation time",
-              "status": "Planned",
+              "status": "Researching",
               "description": "In the rewind tool (rewind.ts), add a captureHideEntryIds helper that maps the resolved message indices (already computed by resolvePreview) back to session entry IDs via buildContextEntries. Include hideEntryIds in the persisted marker payload.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Implement captureHideEntryIds + integrate into resolvePreview",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1",

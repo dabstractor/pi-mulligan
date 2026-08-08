@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -1526,5 +1526,125 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
         expect(b).toEqual(a);
       }
     });
+  });
+});
+// ── resolvePinnedHide (fix_design.md §Change 3; permanent-hiding resolver; fixes BUG-001/BUG-002) ────────
+
+describe("resolvePinnedHide — fix_design.md §Change 3 PINNED contract (basic / growth / compaction / defensive / empty)", () => {
+  // NOTE (transforms.ts:416, 449; test comment line 748): getBranch() is ROOT→LEAF. We build branchEntries in that
+  // order. Each context-producing entry yields exactly 1 message → messages[k] ↔ k-th context-producing entry.
+
+  it("(a) basic — 3 message-entries, hide [e1,e3] → removes their 2 message indices", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")]; // idx0 user, idx1 asst, idx2 result
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("e2", "message"), entry("e3", "message"),
+    ];
+    expect(resolvePinnedHide(msgs, branch, ["e1", "e3"])).toEqual([0, 2]); // e1→idx0, e3→idx2; e2 skipped
+  });
+
+  it("(b) growth stability — same hideEntryIds against a branch with 2 MORE trailing entries → same 2 removed, the NEW 2 NOT removed (PERMANENCE — the BUG-001/002 fix)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1"), asst("c2")]; // 4 msgs (e3,e4 are NEW work)
+    const branchGrown: BranchEntry[] = [
+      entry("e1", "message"), entry("e2", "message"), entry("e3", "message"), entry("e4", "message"),
+    ];
+    // hide [e1,e2] → [0,1]; the NEW entries e3,e4 (idx 2,3) are NOT in the pinned set → VISIBLE (agent sees its own work)
+    expect(resolvePinnedHide(msgs, branchGrown, ["e1", "e2"])).toEqual([0, 1]);
+  });
+
+  it("(c) compaction refusal — a branch containing a compaction entry → [] (entryMessageYield returns -1 → refuse)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    // compaction PASSES isContextProducingType but entryMessageYield(compaction) === -1 → walk returns []
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("eC", "compaction"), entry("e2", "message"),
+    ];
+    expect(resolvePinnedHide(msgs, branch, ["e2"])).toEqual([]); // alignment INDETERMINATE → refuse safely
+  });
+
+  it("(d) defensive — non-array messages / branchEntries / hideEntryIds → [] each", () => {
+    const msgs: MessageLike[] = [user("u")];
+    const branch: BranchEntry[] = [entry("e1", "message")];
+    expect(resolvePinnedHide("garbage" as unknown as MessageLike[], branch, ["e1"])).toEqual([]);
+    expect(resolvePinnedHide(msgs, "garbage" as unknown as BranchEntry[], ["e1"])).toEqual([]);
+    expect(resolvePinnedHide(msgs, branch, "garbage" as unknown as string[])).toEqual([]);
+    expect(resolvePinnedHide(null as unknown as MessageLike[], branch, ["e1"])).toEqual([]);
+    expect(resolvePinnedHide(msgs, null as unknown as BranchEntry[], ["e1"])).toEqual([]);
+    expect(resolvePinnedHide(msgs, branch, null as unknown as string[])).toEqual([]);
+  });
+
+  it("(e) empty hideEntryIds → []", () => {
+    const msgs: MessageLike[] = [user("u")];
+    const branch: BranchEntry[] = [entry("e1", "message")];
+    expect(resolvePinnedHide(msgs, branch, [])).toEqual([]);
+  });
+
+  it("alignment loss — branch entries imply MORE messages than messages.length → [] (refuse)", () => {
+    // 1 message but 2 context-producing entries → at e2: msgCursor(1)+yield(1)=2 > 1 → return []
+    const msgs: MessageLike[] = [user("u")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")];
+    expect(resolvePinnedHide(msgs, branch, ["e2"])).toEqual([]);
+  });
+
+  it("whole-toolGroup pairing — hide [e_asst, e_result] → both removed → no orphaned toolCall (pairing-safe by construction)", () => {
+    // messages: user0, asst(c1)1, result(c1)2, asstText3. captureHideEntryIds pins the WHOLE toolGroup (e_asst+e_result).
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1"), asstText("tail")];
+    const branch: BranchEntry[] = [
+      entry("e_user", "message"), entry("e_asst", "message"), entry("e_result", "message"), entry("e_tail", "message"),
+    ];
+    // hiding e_asst AND e_result removes idx1 (call) AND idx2 (result) together → toolGroup fully gone → no orphan
+    expect(resolvePinnedHide(msgs, branch, ["e_asst", "e_result"])).toEqual([1, 2]);
+    expect(resolvePinnedHide(msgs, branch, ["e_asst", "e_result"])).not.toContain(0); // user kept
+    expect(resolvePinnedHide(msgs, branch, ["e_asst", "e_result"])).not.toContain(3); // tail kept
+  });
+
+  it("label id in hideEntryIds (caller error) → [] (label is filtered out by isContextProducingType → never walked)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("eL", "label"), entry("e2", "message"),
+    ];
+    // hideEntryIds names a LABEL entry id → label is not context-producing → filtered out → never walked → remove=[]
+    expect(resolvePinnedHide(msgs, branch, ["eL"])).toEqual([]);
+  });
+
+  it("hideEntryIds with non-string / empty / duplicate ids → those are ignored (defensive)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")];
+    // 123 (non-string), "" (empty), and the dup "e1" — only the valid "e1" hides idx0
+    const ids = [123, "", "e1", "e1"] as unknown as string[];
+    expect(resolvePinnedHide(msgs, branch, ids)).toEqual([0]);
+  });
+
+  it("entry id not present in the branch → not removed, no error (id simply never matches)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")];
+    expect(resolvePinnedHide(msgs, branch, ["nonexistent-id"])).toEqual([]); // no entry matches → remove=[]
+  });
+
+  it("malformed / non-record / throwing-Proxy entries → skipped defensively, never throws (E13)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    const branch = [null, 42, "raw", entry("e1", "message")] as unknown as BranchEntry[]; // garbage + one good entry
+    expect(() => resolvePinnedHide(msgs, branch, ["e1"])).not.toThrow();
+    // null/42/"raw" → isRecord false → isContextProducingType(undefined) false → filtered out; only e1 walks → idx0
+    expect(resolvePinnedHide(msgs, branch, ["e1"])).toEqual([0]);
+  });
+
+  it("is pure — calling twice returns the same result (no module state)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message"), entry("e3", "message")];
+    const a = resolvePinnedHide(msgs, branch, ["e1", "e3"]);
+    const b = resolvePinnedHide(msgs, branch, ["e1", "e3"]);
+    expect(a).toEqual(b);
+    expect(a).toEqual([0, 2]);
+  });
+});
+
+describe("resolvePinnedHide — types (fix_design.md §Change 3)", () => {
+  it("returns number[] for valid inputs; [] for non-array", () => {
+    expectTypeOf(resolvePinnedHide([], [], [])).toEqualTypeOf<number[]>();
+  });
+  it("accepts real-shaped MessageLike[] + BranchEntry[] + string[]", () => {
+    const msgs: MessageLike[] = [{ role: "user", content: "hi" }];
+    const branch: BranchEntry[] = [{ type: "message", id: "e1", parentId: null, timestamp: "t" }];
+    const hide: string[] = ["e1"];
+    expectTypeOf(resolvePinnedHide(msgs, branch, hide)).toEqualTypeOf<number[]>();
   });
 });

@@ -557,6 +557,110 @@ function isContextProducingType(type: unknown): boolean {
   return type === "message" || type === "custom_message" || type === "branch_summary" || type === "compaction";
 }
 
+// ── resolvePinnedHide (pinned stable-anchor hiding; fix_design.md §Change 3; fixes BUG-001/BUG-002) ────
+
+/**
+ * resolvePinnedHide — map a SET of PINNED stable entry IDs (captured at marker-creation time by captureHideEntryIds,
+ * P1.M2.T3) to the CURRENT message-index removal set, for PERMANENT soft-delete hiding (fix_design.md §Change 3;
+ * the core fix for BUG-001/BUG-002). GENERALIZES resolveCheckpoint's entry→message walk (above) from "one checkpoint
+ * target" to "a set of pinned entry ids", and from resolveCheckpoint's contiguous "remove everything after iTarget"
+ * sweep to a discrete "remove exactly the messages whose entry id is pinned" rule.
+ *
+ * WHY PINNED IDS (fix_design.md; BUG-001/BUG-002 root cause): the legacy resolvers store a RELATIVE spec
+ * ('last tool group' / 'last turn') that filterPipeline RE-RESOLVES against the constantly-growing message list on
+ * every context fire. The moment the agent resumes work (the documented, intended usage), new messages are appended
+ * and the relative spec re-targets onto the NEW (legitimate) work — un-hiding the originally-hidden mistake and
+ * hiding the new work (BUG-001), or hiding the agent's own redo on every fire → infinite loop (BUG-002). Pi session
+ * entries have PERMANENT, STABLE `id` fields; captureHideEntryIds pins the entry ids of the span to hide AT
+ * marker-creation time. This fn resolves those stable ids → current message indices every fire. New work produces
+ * NEW entries with NEW ids NOT in the pinned set → their messages are visible (correct permanence). Message INDICES
+ * are NOT a stable anchor (they shift on compaction: the message list is compaction-aware; getBranch() is not) —
+ * which is exactly why the anchor is entry IDs, not indices.
+ *
+ * ALGORITHM (fix_design.md §Change 3; mirrors resolveCheckpoint steps 3–4, generalized):
+ *   1. Defensive: non-array messages/branchEntries/hideEntryIds, OR empty hideEntryIds → return [] (safe no-op;
+ *      applyRewind(m, []) is the documented idempotent no-op — spec/10 §1.4).
+ *   2. Build a Set<string> from hideEntryIds (skip non-string/empty ids; dedupes).
+ *   3. ctxEntries = branchEntries filtered to context-producing types (isContextProducingType: message/
+ *      custom_message/branch_summary/compaction). branchEntries is ALREADY ROOT→LEAF (getBranch() order; P1.M1.T1.S1
+ *      established the no-reverse convention — see resolveCheckpoint's step-3 comment at its line ~416). Do NOT
+ *      reverse. (fix_design.md §Change 3's `[...].reverse()` is SUPERSEDED.)
+ *   4. Walk ctxEntries with msgCursor (messages consumed so far). For each entry:
+ *        yield = entryMessageYield(entry); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
+ *        if yield < 0 → return [] (compaction/unknown on the walk → entry→message alignment INDETERMINATE → refuse
+ *           safely, identical to resolveCheckpoint; the marker persists, content not hidden this fire, no crash).
+ *        if msgCursor + yield > messages.length → return [] (raw branch vs compaction-aware messages misalign → refuse).
+ *        if the entry's string id ∈ hideSet → push ALL indices [msgCursor, msgCursor+yield) into remove (yield is 1
+ *           in practice, so one index per hidden entry; the range is forward-compatible if a future entry type
+ *           yields >1 message).
+ *        msgCursor += yield. (Do NOT break — a SET of entries may be pinned, e.g. a whole toolGroup.)
+ *   5. Return remove (ascending — the root→leaf walk + monotonic msgCursor guarantee it; no sort needed).
+ *
+ * WHY NO UNIT-SNAP / NO REWIND-OWN / NO NOTE EXCLUSION (unlike resolveCheckpoint): resolveCheckpoint removes a
+ * contiguous SWEEP ("everything after iTarget") and so must (a) unit-snap iTarget to avoid orphaning the
+ * checkpointed assistant's own results, (b) keep the rewind's own unit, (c) keep mulligan:* notes. resolvePinnedHide
+ * removes EXACTLY the pinned entries — a DISCRETE set, not a sweep. Pairing safety comes from the PRODUCER
+ * (captureHideEntryIds, P1.M2.T3, resolves at the UNIT level → pins the WHOLE unit's entry ids: assistant + ALL its
+ * results), so this resolver removes whole units by construction. The mulligan:note and the rewind's own tool call
+ * are NOT in hideEntryIds (capture runs at marker-creation time, BEFORE the marker is persisted + the note sent, and
+ * resolves the TARGET span not the rewind's own call) → they are never walked as pinned → never removed.
+ *
+ * RETURNS `number[]` (NEVER null): the ascending message indices to hide. [] = determinable-but-empty OR refusal
+ * (nothing pinned / indeterminate compaction / alignment lost / non-array input). filterPipeline (P1.M2.T4) feeds
+ * this straight to applyRewind, where [] is the documented idempotent no-op. Returning [] (not null) is INTENTIONAL:
+ * a refused pinned hide must NOT fall back to legacy relative resolution (that re-introduces BUG-001/BUG-002). The
+ * P1.M2.T4 dispatch checks `Array.isArray(hideEntryIds) && hideEntryIds.length > 0` BEFORE calling this fn, so the
+ * legacy fallback only runs for markers that genuinely LACK hideEntryIds (old markers / capture failure).
+ *
+ * Pure + defensive: null/non-array messages/branchEntries/hideEntryIds → []; malformed/non-record entries,
+ * throwing-Proxy objects, and non-string ids are all handled gracefully — NEVER throws (E13; context-handler hot
+ * path via filterPipeline). Every field read goes through the module-private isRecord/readOwn. NEVER imports Pi
+ * (purity). REUSES entryMessageYield + isContextProducingType (module-private, hoisted above — do NOT redeclare).
+ *
+ * @param messages the LLM message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
+ * @param branchEntries getBranch() output, ROOT→LEAF (getBranch() order; NO internal reverse); non-array → []
+ * @param hideEntryIds stable ENTRY ids pinned at marker-creation time (captureHideEntryIds, P1.M2.T3); non-array/empty → []
+ * @returns ascending message indices to hide ([] = nothing pinned / refusal / non-array input — safe no-op)
+ */
+export function resolvePinnedHide(
+  messages: MessageLike[],
+  branchEntries: BranchEntry[],
+  hideEntryIds: string[],
+): number[] {
+  // 1) Defensive: all three must be arrays; hideEntryIds must be non-empty.
+  if (!Array.isArray(messages) || !Array.isArray(branchEntries) || !Array.isArray(hideEntryIds)) return [];
+  if (hideEntryIds.length === 0) return [];
+
+  // 2) O(1) membership lookup (skips non-string/empty ids; dedupes).
+  const hideSet = new Set<string>();
+  for (const id of hideEntryIds) {
+    if (typeof id === "string" && id.length > 0) hideSet.add(id);
+  }
+  if (hideSet.size === 0) return []; // hideEntryIds held no usable string ids → nothing to hide
+
+  // 3) ctxEntries = context-producing entries, ROOT→LEAF (getBranch() order — NO reverse; P1.M1.T1.S1 convention).
+  const ctxEntries = branchEntries.filter((e) =>
+    isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
+  );
+
+  // 4) Walk in parallel with messages; collect the message indices of every PINNED entry.
+  const remove: number[] = [];
+  let msgCursor = 0;
+  for (const e of ctxEntries) {
+    const y = entryMessageYield(e); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
+    if (y < 0) return []; // compaction (or unknown) on the walked range → alignment INDETERMINATE → refuse safely
+    if (msgCursor + y > messages.length) return []; // raw branch vs compaction-aware messages misalign → refuse
+    const id = isRecord(e) ? readOwn(e, "id") : undefined;
+    if (typeof id === "string" && hideSet.has(id)) {
+      for (let j = msgCursor; j < msgCursor + y; j++) remove.push(j); // yield is 1 in practice; range is forward-compatible
+    }
+    msgCursor += y;
+  }
+
+  // 5) remove is ascending by construction (root→leaf walk + monotonic msgCursor). Return it.
+  return remove;
+}
+
 /**
  * applyRewind — the PURE gap-closing index-removal helper for rewind application (spec/06-context-filter.md
  * §3, §4, §12). The DUMB half of rewind: the resolvers (resolveLastToolCallGroup / resolveLastTurn /
