@@ -220,7 +220,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Implement validateNote(note) — all 4 fields required non-empty",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -234,7 +234,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Implement renderNote(note, ledger, granularity) with conditional ledger blocks",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1",
