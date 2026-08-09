@@ -1,7 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { shouldNudge, injectNudge, suppressCheck, NUDGE_TURN_WINDOW_MS } from "../src/nudges.js";
+import {
+  shouldNudge,
+  injectNudge,
+  suppressCheck,
+  NUDGE_TURN_WINDOW_MS,
+  shouldHighWater,
+  renderHighWaterNudge,
+  injectHighWaterNudge,
+} from "../src/nudges.js";
 import type { TurnMetric, RewindMarker, ShrinkMarker } from "../src/markers.js";
 import type { MessageLike } from "../src/transforms.js";
+import type { SessionRuntime } from "../src/runtime.js";
 import type { MulliganConfig } from "../src/config.js";
 
 // ── pure-function unit tests for Nudge B Phase 2 (spec/07 §2). NO Pi fakes, NO clearAll, NO setConfig. ──
@@ -212,5 +221,158 @@ describe("suppressCheck — suppress heuristic window (spec/07 §2 Edge cases)",
 describe("NUDGE_TURN_WINDOW_MS — exported constant (10 minutes)", () => {
   it("equals 10 minutes in milliseconds", () => {
     expect(NUDGE_TURN_WINDOW_MS).toBe(10 * 60 * 1000);
+  });
+});
+
+// ── pure-function unit tests for the §5.2 edge-triggered high-water signal (spec/07 §5.2). ──
+// shouldHighWater / renderHighWaterNudge / injectHighWaterNudge are pure-ish helpers (spec/07 §3); these tests
+// exercise them directly with hand-built minimal literals. shouldHighWater MUTATES rt.aboveHighWater (the
+// intentional edge-trigger latch); the lifecycle its exercise that mutation in place on ONE rt.
+
+/**
+ * Build a minimal SessionRuntime literal for the high-water edge-trigger lifecycle tests. aboveHighWater starts
+ * false (the freshRuntime default); the lifecycle its mutate it in place to exercise the latch.
+ */
+function rt(above = false): SessionRuntime {
+  return {
+    sessionId: "s1",
+    seq: 0,
+    tokenBaseline: null,
+    lastTurnIndex: null,
+    lastFiltered: null,
+    lastFilterTs: null,
+    pendingBloatHits: [],
+    shrinkMissCounts: new Map(),
+    aboveHighWater: above,
+  } as SessionRuntime;
+}
+
+/**
+ * Build a minimal MulliganConfig literal for shouldHighWater (reads nudges.highWaterFraction). shouldHighWater
+ * only reads that one field, so a partial literal cast to MulliganConfig is sufficient (pure-test scaffolding).
+ */
+const hcfg = (fraction = 0.7): MulliganConfig =>
+  ({ nudges: { highWaterFraction: fraction } } as MulliganConfig);
+
+// ── shouldHighWater ─────────────────────────────────────────────────────────────────────────
+
+describe("shouldHighWater — edge-triggered latch (spec/07 §5.2)", () => {
+  it("fires on the first upward crossing and latches aboveHighWater true", () => {
+    const r = rt(false); // window 200000, total 140000 → fraction 0.7 → fire
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(true);
+    expect(r.aboveHighWater).toBe(true);
+  });
+
+  it("does NOT re-fire while already above (edge-triggered)", () => {
+    const r = rt(true); // already latched from a prior crossing
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(false);
+    expect(r.aboveHighWater).toBe(true); // unchanged
+  });
+
+  it("clears the latch when the total drops back below the fraction", () => {
+    const r = rt(true); // was above; total 100000 → fraction 0.5 < 0.7 → clear
+    expect(shouldHighWater(100000, 200000, r, hcfg(0.7))).toBe(false);
+    expect(r.aboveHighWater).toBe(false);
+  });
+
+  it("fires again after dropping below and re-crossing (re-armed)", () => {
+    const r = rt(false); // simulate: was cleared, now crosses up again
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(true);
+    expect(r.aboveHighWater).toBe(true);
+  });
+
+  it("full lifecycle on one rt: cross→latch→no-refire→drop→clear→re-cross→fire", () => {
+    const r = rt(false);
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(true);
+    expect(r.aboveHighWater).toBe(true);
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(false);
+    expect(r.aboveHighWater).toBe(true);
+    expect(shouldHighWater(100000, 200000, r, hcfg(0.7))).toBe(false);
+    expect(r.aboveHighWater).toBe(false);
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(true);
+    expect(r.aboveHighWater).toBe(true);
+  });
+
+  it("returns false at windowTokens <= 0 WITHOUT mutating aboveHighWater (fail-open, E12)", () => {
+    const r = rt(true); // latched above; window unknown → must not fire NOR clear the latch
+    expect(shouldHighWater(140000, 0, r, hcfg(0.7))).toBe(false);
+    expect(r.aboveHighWater).toBe(true); // UNCHANGED — fail-open does not touch the latch
+    const r2 = rt(false);
+    expect(shouldHighWater(140000, -5, r2, hcfg(0.7))).toBe(false);
+    expect(r2.aboveHighWater).toBe(false); // UNCHANGED
+  });
+
+  it("fires at exactly the fraction (>= comparison): total/window === highWaterFraction", () => {
+    const r = rt(false);
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.7))).toBe(true); // 0.7 >= 0.7 → fire
+  });
+
+  it("honors a custom fraction (0.9): 0.7 < 0.9 → no fire", () => {
+    const r = rt(false);
+    expect(shouldHighWater(140000, 200000, r, hcfg(0.9))).toBe(false); // 0.7 < 0.9
+    expect(r.aboveHighWater).toBe(false); // cleared (below)
+  });
+});
+
+// ── renderHighWaterNudge ───────────────────────────────────────────────────────────────────
+
+describe("renderHighWaterNudge — one-line annotation (spec/07 §5.2)", () => {
+  it("returns a non-empty string containing the rounded percentage", () => {
+    const s = renderHighWaterNudge(140000, 200000); // 0.7 → 70%
+    expect(typeof s).toBe("string");
+    expect(s.length).toBeGreaterThan(0);
+    expect(s).toContain("~70%");
+    expect(s).toContain("[mulligan]");
+    expect(s).toContain("mulligan_shrink");
+    expect(s).toContain("mulligan_rewind");
+  });
+
+  it("rounds the percentage (0.75 → 75%, 0.666 → 67%)", () => {
+    expect(renderHighWaterNudge(150000, 200000)).toContain("~75%"); // 0.75
+    expect(renderHighWaterNudge(133333, 200000)).toContain("~67%"); // 0.6666 → 67
+  });
+
+  it("never throws + returns a percentage-free fallback when windowTokens <= 0", () => {
+    expect(() => renderHighWaterNudge(140000, 0)).not.toThrow();
+    const s = renderHighWaterNudge(140000, 0);
+    expect(typeof s).toBe("string");
+    expect(s.length).toBeGreaterThan(0);
+    expect(s).not.toContain("%"); // no NaN/Infinity%
+    expect(s).toContain("mulligan_shrink"); // still recommends the tools
+  });
+});
+
+// ── injectHighWaterNudge ───────────────────────────────────────────────────────────────────
+
+describe("injectHighWaterNudge — pure injection (spec/07 §5.2, mirror injectNudge)", () => {
+  it("returns a NEW array of length input+1 with a mulligan:high-water custom message appended", () => {
+    const before: MessageLike[] = [{ role: "user", content: "hi" }];
+    const out = injectHighWaterNudge(before, 140000, 200000);
+    expect(out).not.toBe(before); // new array (PURE)
+    expect(out.length).toBe(2); // input untouched + 1
+    const nudge = out[1];
+    expect(nudge.role).toBe("custom");
+    expect(nudge.customType).toBe("mulligan:high-water");
+    expect(typeof nudge.content).toBe("string");
+    expect((nudge.content as string).length).toBeGreaterThan(0);
+    expect(nudge.display).toBe(false);
+    expect(nudge.details).toMatchObject({
+      ephemeral: true,
+      totalFilteredTokens: 140000,
+      windowTokens: 200000,
+    });
+    expect(typeof nudge.timestamp).toBe("number");
+  });
+
+  it("does NOT mutate the input array", () => {
+    const before: MessageLike[] = [{ role: "user", content: "hi" }];
+    injectHighWaterNudge(before, 140000, 200000);
+    expect(before.length).toBe(1); // untouched
+    expect(before[0]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("delegates the text to renderHighWaterNudge (content matches)", () => {
+    const out = injectHighWaterNudge([], 140000, 200000);
+    expect(out[0].content).toBe(renderHighWaterNudge(140000, 200000));
   });
 });

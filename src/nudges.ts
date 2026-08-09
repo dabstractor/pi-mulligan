@@ -37,6 +37,7 @@ import type {
 import { getConfig } from "./config.js";
 import type { MulliganConfig } from "./config.js";
 import { getRuntime } from "./runtime.js";
+import type { SessionRuntime } from "./runtime.js";
 import { log } from "./log.js";
 import { resultBytes, approxTokens, estimateTokens } from "./tokens.js";
 import type { ResultContentBlock } from "./tokens.js";
@@ -393,4 +394,130 @@ export function suppressCheck(
     if (Number.isFinite(ts) && ts > lo && ts <= metricTs) return true;
   }
   return false;
+}
+
+/**
+ * shouldHighWater — §5.2 edge-triggered high-water gate (spec/07-preventive-and-nudges.md §5.2, REQUIRED). Returns
+ * true iff the TOTAL filtered context just crossed above `config.nudges.highWaterFraction` of the window, EDGE-
+ * TRIGGERED (fires once on the upward crossing, not every turn while above).
+ *
+ * STATUS — PURE EXCEPT it MUTATES `rt.aboveHighWater` (the edge-trigger latch that lives in the session runtime).
+ * This is intentional (spec/07 §5.2: "tracked via rt.aboveHighWater — set true when the annotation fires, cleared
+ * only when the total drops back below the fraction"). The other two high-water helpers (renderHighWaterNudge,
+ * injectHighWaterNudge) ARE purely functional; only this gate carries the latch.
+ *
+ * ALGORITHM (architecture implementation_patterns.md Pattern 9):
+ *   1. windowTokens <= 0 → return false (fail-open — E12: ctx.getContextUsage() undefined / no model / pre-first-
+ *      inference → contextWindow 0). Do NOT mutate rt.aboveHighWater on this path (failing open must not clobber a
+ *      real "above" state nor falsely arm a re-fire).
+ *   2. fraction = totalFilteredTokens / windowTokens.
+ *   3. fraction >= highWaterFraction → if the latch was false, set it true and return true (first upward crossing
+ *      fires); else return false (already above → edge-triggered, no re-fire).
+ *   4. fraction < highWaterFraction → set the latch false (cleared on dropping below, re-arming for the next
+ *      crossing) and return false.
+ *
+ * The `>=` (not `>`) means a total at EXACTLY the fraction (e.g. 140000/200000 = 0.7) fires.
+ *
+ * INPUTS (computed by the CALLER — contextHandler, P3.M3.T6.S1):
+ *   - totalFilteredTokens = estimateTokens(filteredMessages).tokens — the FILTERED view (D5: NEVER
+ *     ctx.getContextUsage().tokens, which counts hidden/rewound tokens). This is the same filtered total
+ *     mulligan_audit reports.
+ *   - windowTokens = ctx.getContextUsage()?.contextWindow ?? 0 — the model's context window size.
+ * This function does NOT tokenize, does NOT call getContextUsage, does NOT call getRuntime — all inputs are passed
+ * in, keeping it a cheap, deterministic, unit-testable gate.
+ *
+ * @param totalFilteredTokens the filtered-view token total (estimateTokens(messages).tokens).
+ * @param windowTokens        the model's context window size (getContextUsage()?.contextWindow).
+ * @param rt                  the live per-session runtime (aboveHighWater is mutated in place as the latch).
+ * @param config              the MulliganConfig (reads nudges.highWaterFraction).
+ * @returns true iff the total just crossed above the fraction this turn (the annotation should fire once).
+ */
+export function shouldHighWater(
+  totalFilteredTokens: number,
+  windowTokens: number,
+  rt: SessionRuntime,
+  config: MulliganConfig,
+): boolean {
+  if (windowTokens <= 0) return false; // fail-open (E12); do NOT touch rt.aboveHighWater
+  const fraction = totalFilteredTokens / windowTokens;
+  if (fraction >= config.nudges.highWaterFraction) {
+    if (!rt.aboveHighWater) {
+      rt.aboveHighWater = true; // latch: first upward crossing fires
+      return true;
+    }
+    return false; // already above → edge-triggered, do NOT re-fire
+  }
+  rt.aboveHighWater = false; // dropped below → clear the latch (re-arm for next crossing)
+  return false;
+}
+
+/**
+ * renderHighWaterNudge — §5.2 high-water one-line annotation (spec/07-preventive-and-nudges.md §5.2, REQUIRED).
+ * PURE, never throws. Composes the single-line annotation in the renderDriftNudge style (notes.ts): leading
+ * "[mulligan] " prefix, recommends mulligan_shrink/mulligan_rewind, NO trailing newline, ~25–40 tokens. The text
+ * format is PINNED by the item contract:
+ *   `[mulligan] Context is at ~<pct>% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`
+ * where `<pct>` = `Math.round((totalFilteredTokens / windowTokens) * 100)` (round, not floor/trunc — the contract
+ * example "~70%" for 0.7 needs Math.round(0.7*100)=70).
+ *
+ * DEFENSIVE (mirrors renderDriftNudge/renderBloatReminder's never-throws discipline — spec/07 §2/§1, E13):
+ * `windowTokens <= 0` cannot compute a percentage, so it returns a FALLBACK line WITHOUT a percentage (never let
+ * NaN%/Infinity% leak). shouldHighWater short-circuits this case in prod, but this renderer is EXPORTED + directly
+ * callable/testable, so it must be TOTAL on its own.
+ *
+ * @param totalFilteredTokens the filtered-view token total (for the percentage numerator).
+ * @param windowTokens        the model's context window size (the percentage denominator).
+ * @returns the one-line annotation string (or a percentage-free fallback when windowTokens <= 0).
+ */
+export function renderHighWaterNudge(totalFilteredTokens: number, windowTokens: number): string {
+  if (!(windowTokens > 0)) {
+    // Defensive: can't compute a percentage. shouldHighWater short-circuits this in prod, but this renderer is
+    // exported + directly callable — never let NaN/Infinity% leak. Fail to a percentage-free line (mirrors
+    // renderDriftNudge/renderBloatReminder's never-throws discipline — spec/07 §2/§1, E13).
+    return "[mulligan] Context is filling up. Consider mulligan_shrink or mulligan_rewind to reclaim space.";
+  }
+  const pct = Math.round((totalFilteredTokens / windowTokens) * 100);
+  return `[mulligan] Context is at ~${pct}% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`;
+}
+
+/**
+ * injectHighWaterNudge — §5.2 high-water injection (spec/07-preventive-and-nudges.md §5.2, REQUIRED). Mirrors
+ * injectNudge: PURE — returns a NEW array `[...messages, nudge]` with an EPHEMERAL `mulligan:high-water`
+ * CustomMessage appended; the input is NOT mutated. NEVER calls pi.sendMessage — the nudge lives ONLY in the
+ * returned copy, which is what the model sees THIS inference; Pi persists the ORIGINAL branch untouched (zero
+ * persistence — each context fire gets a fresh deep copy from Pi so the annotation is recomputed/replaced, never
+ * stacked). Rides the context inference — D4 zero extra model requests.
+ *
+ * WHY MessageLike[] not AgentMessage[] (mirrors injectNudge GOTCHA #3): the filter.ts call site is
+ * `messages = injectHighWaterNudge(messages, totalFilteredTokens, windowTokens)` where `messages` is
+ * MessageLike[] (filterPipeline's return). MessageLike (transforms.ts) has an index signature → the nudge object
+ * literal assigns in with NO cast (same as injectNudge).
+ *
+ * WHY a DISTINCT customType "mulligan:high-water" (not "mulligan:nudge"): the drift nudge (§5.1, per-turn delta)
+ * and the high-water nudge (§5.2, absolute total level) serve different purposes and must be individually
+ * detectable by mulligan-aware code via the customType.startsWith("mulligan:") check (transforms.ts
+ * isMulliganCustom) for any future dedup/audit logic.
+ *
+ * Called by contextHandler (P3.M3.T6.S1) ONLY when shouldHighWater returned true.
+ *
+ * @param messages             the filtered message copy (MessageLike[] — the in-flight view the model will see).
+ * @param totalFilteredTokens  the filtered-view token total (rendered into the annotation + recorded in details).
+ * @param windowTokens         the model's context window size (rendered into the annotation + recorded in details).
+ * @returns a NEW array: [...messages, nudge]. The input is NOT mutated.
+ */
+export function injectHighWaterNudge(
+  messages: MessageLike[],
+  totalFilteredTokens: number,
+  windowTokens: number,
+): MessageLike[] {
+  const line = renderHighWaterNudge(totalFilteredTokens, windowTokens);
+  const nudge: MessageLike = {
+    role: "custom",
+    customType: "mulligan:high-water",
+    content: line,
+    display: false,
+    details: { ephemeral: true, totalFilteredTokens, windowTokens },
+    timestamp: Date.now(),
+  };
+  return [...messages, nudge];
 }
