@@ -156,14 +156,14 @@
               "type": "Task",
               "id": "P3.M2.T2",
               "title": "Runtime miss-count state (runtime.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add per-session state to track pinned-shrink consecutive miss counts.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M2.T2.S1",
                   "title": "Add shrinkMissCounts Map to SessionRuntime",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime has 7 fields. freshRuntime(sessionId) constructs defaults. resetRuntime(sessionId) deletes the entry from the map (so new fields are automatically reset on session_start — no extra wiring in index.ts needed). runtime.ts is Pi-free (0 imports).\n2. INPUT: The existing SessionRuntime interface + freshRuntime function in src/runtime.ts.\n3. LOGIC: (a) Add `shrinkMissCounts: Map<string, number>` to SessionRuntime interface (keyed by shrink marker id, value = consecutive misses). (b) In freshRuntime, add `shrinkMissCounts: new Map()`. Each fresh runtime gets its OWN Map (mirror the pendingBloatHits: [] pattern — GOTCHA #5, never a shared module-level Map). (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll needed — resetRuntime deletes the whole entry, clearAll wipes the map.\n4. OUTPUT: SessionRuntime.shrinkMissCounts available via getRuntime(sessionId). Consumed by the stale-retirement logic in filter.ts (P3.M2.T3.S1).\n5. MOCKING: In tests, getRuntime('s1').shrinkMissCounts is a fresh empty Map. Set/get values. clearAll() wipes it. After resetRuntime('s1'), a new getRuntime('s1') has a fresh empty Map.\n6. DOCS: none — runtime.ts is internal in-memory state (spec/04 §8); no user-facing surface change.",

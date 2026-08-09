@@ -30,6 +30,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       lastFiltered: null,
       lastFilterTs: null,
       pendingBloatHits: [],
+      shrinkMissCounts: new Map(),
     });
   });
 
@@ -45,6 +46,14 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
     expect(a.pendingBloatHits).not.toBe(b.pendingBloatHits);
     a.pendingBloatHits.push({ toolName: "read", approxTokens: 9000 });
     expect(b.pendingBloatHits).toHaveLength(0); // b unaffected
+  });
+
+  it("each fresh runtime gets its OWN shrinkMissCounts Map — no cross-session sharing (GOTCHA #5)", () => {
+    const a = getRuntime("s1");
+    const b = getRuntime("s2");
+    expect(a.shrinkMissCounts).not.toBe(b.shrinkMissCounts);
+    a.shrinkMissCounts.set("shrink-1", 1);
+    expect(b.shrinkMissCounts.get("shrink-1")).toBeUndefined(); // b unaffected
   });
 });
 
@@ -110,6 +119,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       lastFiltered: null,
       lastFilterTs: null,
       pendingBloatHits: [],
+      shrinkMissCounts: new Map(),
     });
   });
 
@@ -138,6 +148,15 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
     resetRuntime("s1");
     expect(nextSeq("s1")).toBe(1);
   });
+
+  it("shrinkMissCounts is a fresh empty Map after resetRuntime", () => {
+    const a = getRuntime("s1");
+    a.shrinkMissCounts.set("shrink-1", 2);
+    resetRuntime("s1");
+    const fresh = getRuntime("s1");
+    expect(fresh.shrinkMissCounts).not.toBe(a.shrinkMissCounts); // new Map instance (C12: stale ref abandoned)
+    expect(fresh.shrinkMissCounts.size).toBe(0);
+  });
 });
 
 describe("clearAll — shutdown cleanup", () => {
@@ -154,6 +173,12 @@ describe("clearAll — shutdown cleanup", () => {
 
   it("is a no-op (never throws) when the map is already empty", () => {
     expect(() => clearAll()).not.toThrow();
+  });
+
+  it("clearAll wipes shrinkMissCounts for all sessions", () => {
+    getRuntime("A").shrinkMissCounts.set("s", 3);
+    clearAll();
+    expect(getRuntime("A").shrinkMissCounts.size).toBe(0);
   });
 });
 
@@ -185,6 +210,16 @@ describe("in-place mutation contract (consumers mutate the live object)", () => 
     expect(getRuntime("s1").tokenBaseline).toBe(2048);
     expect(getRuntime("s1").lastTurnIndex).toBe(3);
   });
+
+  it("filter.ts-style set/get/delete on shrinkMissCounts persists and is read back via getRuntime", () => {
+    // Documents the P3.M2.T3 consumption contract: increment on miss, delete on hit/retire.
+    getRuntime("s1").shrinkMissCounts.set("shrink-7", 1);
+    expect(getRuntime("s1").shrinkMissCounts.get("shrink-7")).toBe(1);
+    getRuntime("s1").shrinkMissCounts.set("shrink-7", 2); // consecutive miss increment
+    expect(getRuntime("s1").shrinkMissCounts.get("shrink-7")).toBe(2);
+    getRuntime("s1").shrinkMissCounts.delete("shrink-7"); // hit/retire resets
+    expect(getRuntime("s1").shrinkMissCounts.has("shrink-7")).toBe(false);
+  });
 });
 
 describe("types", () => {
@@ -197,6 +232,7 @@ describe("types", () => {
     expectTypeOf(rt.lastFiltered).toEqualTypeOf<AgentMessage[] | null>();
     expectTypeOf(rt.lastFilterTs).toEqualTypeOf<number | null>();
     expectTypeOf(rt.pendingBloatHits).toEqualTypeOf<BloatHit[]>();
+    expectTypeOf(rt.shrinkMissCounts).toEqualTypeOf<Map<string, number>>();
     expectTypeOf<BloatHit>().toEqualTypeOf<{ toolName: string; approxTokens: number }>();
   });
 });

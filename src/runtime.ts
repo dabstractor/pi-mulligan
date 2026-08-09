@@ -76,6 +76,11 @@ export interface SessionRuntime {
   /** Bloated tool results observed THIS turn (since last turn_end), snapshotted into the TurnMetric at
    *  turn_end and cleared. Each fresh runtime gets its OWN new empty array (GOTCHA #5). */
   pendingBloatHits: BloatHit[];
+  /** Consecutive-fire miss count per active pinned shrink (keyed by shrink marker id), for stale-marker
+   *  retirement (spec E15). Incremented by filter.ts contextHandler when a pinned shrink's target is
+   *  absent on a given fire; reset/deleted on a hit or retirement. Each fresh runtime gets its OWN Map
+   *  (GOTCHA #5 — never a module-level shared Map). Consumed by P3.M2.T3.S1. */
+  shrinkMissCounts: Map<string, number>;
 }
 
 /**
@@ -99,6 +104,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     lastFiltered: null,
     lastFilterTs: null,
     pendingBloatHits: [],
+    shrinkMissCounts: new Map(),
   };
 }
 
