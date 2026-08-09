@@ -46,6 +46,14 @@ export interface MulliganConfig {
   shrink: {
     /** Enable the shrink tool/feature. Default: true. */
     enabled: boolean;
+    /** Cap on simultaneous active shrink markers; when exceeded the oldest is retired.
+     *  Mirrors rewind.maxDepth as a bound on marker accumulation. Must be > 0.
+     *  Default: 32. Source: spec/09-configuration.md §2/§3. Consumed by P3.M2.T3. */
+    maxActive: number;
+    /** Auto-retire a pinned shrink whose target is absent for this many consecutive
+     *  fires. Must be > 0. Default: 3. Source: spec/09-configuration.md §2/§3.
+     *  Consumed by P3.M2.T3. */
+    staleAfterFires: number;
     // NOTE: "autoOnBloat" is reserved for a FUTURE opt-in mode and is NOT in v1
     //       (spec/07 §nudges: "Auto-shrink would risk data loss"). Do not add it.
   };
@@ -102,6 +110,8 @@ export const DEFAULT_CONFIG: MulliganConfig = {
   },
   shrink: {
     enabled: true,
+    maxActive: 32,
+    staleAfterFires: 3,
   },
   nudges: {
     bloatReminder: true,
@@ -209,6 +219,10 @@ export function validateConfig(raw: unknown): MulliganConfig {
     if (isRecord(shrinkRaw)) {
       v = safeGet(shrinkRaw, "enabled");
       if (v !== undefined) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
+      v = safeGet(shrinkRaw, "maxActive");
+      if (v !== undefined) cfg.shrink.maxActive = coerceNumber("shrink.maxActive", v, cfg.shrink.maxActive, true);
+      v = safeGet(shrinkRaw, "staleAfterFires");
+      if (v !== undefined) cfg.shrink.staleAfterFires = coerceNumber("shrink.staleAfterFires", v, cfg.shrink.staleAfterFires, true);
     }
 
     // nudges.*

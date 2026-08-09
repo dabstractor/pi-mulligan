@@ -19,7 +19,7 @@ describe("DEFAULT_CONFIG", () => {
         maxDepth: 5,
         requireMutationWarning: true,
       },
-      shrink: { enabled: true },           // no autoOnBloat (not v1)
+      shrink: { enabled: true, maxActive: 32, staleAfterFires: 3 },           // no autoOnBloat (not v1)
       nudges: {
         bloatReminder: true,
         perTurnDrift: true,
@@ -64,7 +64,7 @@ describe("validateConfig", () => {
     const cfg = validateConfig({
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, requireMutationWarning: false },
-      shrink: { enabled: false },
+      shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1 },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
@@ -72,7 +72,7 @@ describe("validateConfig", () => {
     expect(cfg).toEqual({
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, requireMutationWarning: false },
-      shrink: { enabled: false },
+      shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 } },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
@@ -185,7 +185,7 @@ describe("validateConfig", () => {
   it("ignores unknown keys (forward-compat), incl. shrink.autoOnBloat", () => {
     const cfg = validateConfig({ foo: "bar", rewind: { baz: 1, enabled: false }, shrink: { autoOnBloat: true } });
     expect(cfg.rewind.enabled).toBe(false);
-    expect(cfg.shrink).toEqual({ enabled: true }); // autoOnBloat dropped; default shrink.enabled retained
+    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3 }); // autoOnBloat dropped; defaults retained
     expect(cfg).toEqual(validateConfig({ rewind: { enabled: false } }));
   });
 
@@ -223,6 +223,88 @@ describe("validateConfig", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 §2-§4)", () => {
+  it("(a) passes through valid maxActive / staleAfterFires", () => {
+    const cfg = validateConfig({ shrink: { maxActive: 10, staleAfterFires: 5 } });
+    expect(cfg.shrink.maxActive).toBe(10);
+    expect(cfg.shrink.staleAfterFires).toBe(5);
+  });
+
+  it("(b) defaults to 32 / 3 with NO warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({});
+      expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3 });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) boundary: 1 / 1 is valid (>0)", () => {
+    const cfg = validateConfig({ shrink: { maxActive: 1, staleAfterFires: 1 } });
+    expect(cfg.shrink.maxActive).toBe(1);
+    expect(cfg.shrink.staleAfterFires).toBe(1);
+  });
+
+  it("(d) leaves shrink.enabled unchanged when only knobs set", () => {
+    const cfg = validateConfig({ shrink: { enabled: false } });
+    expect(cfg.shrink).toEqual({ enabled: false, maxActive: 32, staleAfterFires: 3 });
+  });
+
+  it("(e) invalid maxActive ∈ {0,-1,NaN,'abc',Infinity} → 32 + exactly 1 warn naming shrink.maxActive", () => {
+    for (const bad of [0, -1, NaN, "abc", Infinity]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cfg = validateConfig({ shrink: { maxActive: bad } });
+        expect(cfg.shrink.maxActive).toBe(32);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("shrink.maxActive");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(f) invalid staleAfterFires ∈ {0,-1,NaN,'abc',Infinity} → 3 + exactly 1 warn naming shrink.staleAfterFires", () => {
+    for (const bad of [0, -1, NaN, "abc", Infinity]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cfg = validateConfig({ shrink: { staleAfterFires: bad } });
+        expect(cfg.shrink.staleAfterFires).toBe(3);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("shrink.staleAfterFires");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(g) both invalid → 2 warns, both default", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ shrink: { maxActive: 0, staleAfterFires: -1 } });
+      expect(cfg.shrink.maxActive).toBe(32);
+      expect(cfg.shrink.staleAfterFires).toBe(3);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(h) forward-compat: unknown shrink.autoOnBloat dropped, knobs honored", () => {
+    const cfg = validateConfig({ shrink: { maxActive: 10, staleAfterFires: 5, autoOnBloat: true } });
+    expect(cfg.shrink.maxActive).toBe(10);
+    expect(cfg.shrink.staleAfterFires).toBe(5);
+    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 10, staleAfterFires: 5 }); // autoOnBloat dropped
+  });
+
+  it("(type) shrink.maxActive / shrink.staleAfterFires are required numbers (type-level)", () => {
+    expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("maxActive").toEqualTypeOf<number>();
+    expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("staleAfterFires").toEqualTypeOf<number>();
   });
 });
 

@@ -131,14 +131,14 @@
               "type": "Task",
               "id": "P3.M2.T1",
               "title": "Config knobs: shrink.maxActive + shrink.staleAfterFires (config.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add two numeric knobs to the shrink config block using the established coerceNumber pattern.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M2.T1.S1",
                   "title": "Add shrink.maxActive (32) and shrink.staleAfterFires (3) to MulliganConfig, DEFAULT_CONFIG, validateConfig",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/external_deps.md (config validation pattern) and system_context.md §config.ts. The MulliganConfig.shrink block currently has only { enabled: boolean }. The established pattern for numeric knobs: coerceNumber(field, value, fallback, mustBePositive) — finite number >0, else warn + fallback. validateConfig's shrink block reads via safeGet(shrinkRaw, key) and coerces. DEFAULT_CONFIG.shrink = { enabled: true }.\n2. INPUT: No runtime input — config is Pi-free. The existing MulliganConfig interface, DEFAULT_CONFIG, validateConfig, coerceNumber helper in src/config.ts.\n3. LOGIC: (a) Add to MulliganConfig.shrink: maxActive: number (cap on simultaneous active mulligan:shrink markers; oldest retired when exceeded) and staleAfterFires: number (auto-retire a pinned shrink whose target has been absent this many consecutive fires). (b) Add to DEFAULT_CONFIG.shrink: maxActive: 32, staleAfterFires: 3. (c) In validateConfig's shrink block (after the existing shrink.enabled check), add: v = safeGet(shrinkRaw, 'maxActive'); if (v !== undefined) cfg.shrink.maxActive = coerceNumber('shrink.maxActive', v, cfg.shrink.maxActive, true); — same pattern for staleAfterFires. Both mustBePositive=true (>0). (d) NOTE: the reserved autoOnBloat stays OUT (spec/07 D3 — not v1).\n4. OUTPUT: MulliganConfig.shrink now has { enabled, maxActive, staleAfterFires }. Consumed by the stale-retirement logic in filter.ts (P3.M2.T3.S1).\n5. MOCKING: In tests, call validateConfig({ shrink: { maxActive: 10, staleAfterFires: 5 } }) and assert cfg.shrink.maxActive===10, staleAfterFires===5. Assert defaults (32, 3) when absent. Assert invalid values (0, -1, NaN, 'abc') fall back to defaults. Assert the existing shrink.enabled behavior is unchanged.\n6. DOCS: none — spec/09 already specifies these knobs (they are the source of this delta, already written). No additional Mode A docs needed.",
@@ -156,14 +156,14 @@
               "type": "Task",
               "id": "P3.M2.T2",
               "title": "Runtime miss-count state (runtime.ts)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Add per-session state to track pinned-shrink consecutive miss counts.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M2.T2.S1",
                   "title": "Add shrinkMissCounts Map to SessionRuntime",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime has 7 fields. freshRuntime(sessionId) constructs defaults. resetRuntime(sessionId) deletes the entry from the map (so new fields are automatically reset on session_start — no extra wiring in index.ts needed). runtime.ts is Pi-free (0 imports).\n2. INPUT: The existing SessionRuntime interface + freshRuntime function in src/runtime.ts.\n3. LOGIC: (a) Add `shrinkMissCounts: Map<string, number>` to SessionRuntime interface (keyed by shrink marker id, value = consecutive misses). (b) In freshRuntime, add `shrinkMissCounts: new Map()`. Each fresh runtime gets its OWN Map (mirror the pendingBloatHits: [] pattern — GOTCHA #5, never a shared module-level Map). (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll needed — resetRuntime deletes the whole entry, clearAll wipes the map.\n4. OUTPUT: SessionRuntime.shrinkMissCounts available via getRuntime(sessionId). Consumed by the stale-retirement logic in filter.ts (P3.M2.T3.S1).\n5. MOCKING: In tests, getRuntime('s1').shrinkMissCounts is a fresh empty Map. Set/get values. clearAll() wipes it. After resetRuntime('s1'), a new getRuntime('s1') has a fresh empty Map.\n6. DOCS: none — runtime.ts is internal in-memory state (spec/04 §8); no user-facing surface change.",
@@ -185,7 +185,7 @@
                   "type": "Subtask",
                   "id": "P3.M2.T3.S1",
                   "title": "Thread pi into contextHandler + stale-marker retirement logic",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M1.T1.S1",
