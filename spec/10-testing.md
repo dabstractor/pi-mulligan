@@ -64,7 +64,7 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 |---|---|---|
 | **F-rewind-core** | inject a canary `CustomMessage` at `session_start`; prompt the agent to call `mulligan_rewind(granularity:"last_tool_call_group")` after a bloated tool call | `context.fire` log shows canary present then dropped on the next inference (`context.filter before:N after:N-1`); a second assistant message is produced (auto-prompt); session JSONL has `mulligan:rewind` + `mulligan:note` entries |
 | **F-shrink-persist** | prompt agent to call a tool returning a large canary result, then `mulligan_shrink` it | next inference's filtered view shows the replacement; session JSONL toolResult is the original (shrink is a view-substitution, not a JSONL rewrite — **assert the original is still on disk and the substitution appears in the filtered cache**) |
-| **F-shrink-preventive** | `tool_result` hook annotates a >8KB result | result content has the appended `[mulligan]` reminder; `turn-metric` records `bloatHit:true` |
+| **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended `[mulligan]` reminder; `turn-metric` records `bloatHit:true` |
 | **F-nudge-drift** | a turn that grows >3k tokens | next inference's filtered view ends with a `mulligan:nudge` custom message (ephemeral; NOT in session JSONL) |
 | **F-protected** | attempt `mulligan_rewind(granularity:"last_turn", to_previous_prompt:true)` when it's the first user message | tool returns refusal text; no marker created |
 | **F-maxdepth** | create 5 rewinds, attempt a 6th | 6th refuses with depth message |
