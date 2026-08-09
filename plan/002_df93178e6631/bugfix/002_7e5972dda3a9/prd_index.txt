@@ -1,0 +1,12 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.0 Issue 1: bloatThresholdFor leaks Object.prototype members for tools named 'constructor'/'toString'/etc. (NaN threshold, always-fires reminder)
+  h3.1 Issue 2: Stale data-model config schema in spec/04-data-model.md still shows bloatThresholdBytes default 8192 and the old nudges shape (no per-tool map)
+  h3.2 Issue 3: Stale '8 KB' bloat-threshold prose in spec/10-testing.md and spec/01-pi-context-internals.md after the per-tool raise
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:15 list:3
