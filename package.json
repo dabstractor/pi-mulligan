@@ -15,6 +15,7 @@
   },
   "scripts": {
     "test": "vitest run",
-    "smoke": "node test/integration/run-smoke.mjs"
+    "smoke": "node test/integration/run-smoke.mjs",
+    "typecheck": "tsc --noEmit"
   }
 }

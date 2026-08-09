@@ -105,14 +105,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "BUG-002: Fix tsc --noEmit + add CI typecheck gate",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the single TS2352 error caused by a stale SessionRuntime test fixture in test/drift_nudge.test.ts (missing rewindRefusedTurnIndex field), and add a typecheck script to package.json so the project can be CI-gated on tsc --noEmit.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Fix stale test fixture and add typecheck CI script",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Two atomic fixes: (1) add the missing rewindRefusedTurnIndex: null field to the rt() helper in test/drift_nudge.test.ts so the SessionRuntime fixture matches the current type, and (2) add a 'typecheck' script to package.json so CI can enforce tsc --noEmit.",
               "subtasks": [
                 {
@@ -133,7 +133,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Add typecheck script to package.json",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §5. package.json currently has scripts: { test: 'vitest run', smoke: 'node test/integration/run-smoke.mjs' }. There is no typecheck/tsc script. The tsconfig.json includes both src and test, so tsc --noEmit checks the full project. typescript ^5 is a devDependency (already installed). vitest transpiles without type-checking, which is why the stale fixture (BUG-002) went unnoticed.\n2. INPUT: The existing package.json scripts object.\n3. LOGIC:\n   a) Add a new script entry: `\"typecheck\": \"tsc --noEmit\"` to the scripts object in package.json.\n   b) Place it alphabetically or logically alongside the existing test and smoke scripts.\n4. OUTPUT: `npm run typecheck` (or `npx tsc --noEmit`) now type-checks the entire project. CI can add this as a gate.\n5. MOCKING: None. Verify: `npm run typecheck` exits 0 after S1 is applied.\n6. DOCS: [Mode A] The package.json scripts section is developer-facing documentation. The new script name 'typecheck' is self-documenting. No additional doc change needed.",
@@ -165,7 +165,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Verify README Configuration + Disabling sections are accurate post-fix",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2",
