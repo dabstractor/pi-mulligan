@@ -76,6 +76,7 @@
 - **Situation:** a long session accumulates many markers, notes, and turn-metrics on disk.
 - **Risk:** disk growth (not context growth — markers/metrics are not in context). Filter does O(markers × messages) work per inference.
 - **Behavior:** the filter is cheap in practice (few markers; messages bounded by compaction). v1 does no marker GC. Document that markers persist (intentional — audit trail). A future "squash adjacent rewinds" optimization is a non-goal for v1.
+  - **Stale-marker retirement + soft cap (REQUIRED):** a pinned shrink whose target entry has been absent for `config.shrink.staleAfterFires` (default 3) consecutive fires MUST be auto-retired (treated as cancelled per E21) so it stops being resolved every fire. Active shrink markers are additionally capped at `config.shrink.maxActive` (default 32, mirroring `rewind.maxDepth`); when exceeded, the oldest is retired. Both bound long-session filter cost.
 
 ## E16. `mulligan_audit` called before any inference
 - **Situation:** the agent calls `mulligan_audit` as its very first action (no `context` has fired; `rt.lastFiltered` is null).
@@ -96,6 +97,13 @@
 ## E20. `pi.appendEntry` / `pi.sendMessage` ordering race
 - **Situation:** the tool calls `appendEntry` then `sendMessage`; could the note land before the marker in the entry order?
 - **Behavior:** both are synchronous appends on the same session; they land in call order (marker first, note second). The filter reads markers from `getEntries()` independently of the note's position, so ordering between them doesn't affect correctness. The note appears after the rewind tool's result in context, which is the desired "most-recent" placement.
+
+## E21. Marker retraction — cancel an erroneous/stale marker (REQUIRED; softens D6)
+
+- **Situation:** the agent issues a `mulligan:rewind` or `mulligan:shrink` it needs to undo — a mis-targeted shrink, a rewind that hid something still needed, or any marker issued against the wrong target. Without retraction the unwanted transform applies on every subsequent `context` fire for the rest of the session, and `mulligan_rewind` of the issuing call does **not** retire it: markers are `custom` control entries outside the rewind's `hideEntryIds` span (verified in live use — an erroneous shrink had to be worked around for an entire session because every `read` result kept being re-substituted).
+- **Required behavior — retraction:** Mulligan MUST provide an agent-callable way to retire a marker so it stops applying going forward. Implementation: append a *retirement* marker — `mulligan:cancel` carrying the target marker's `id` (equivalently a `cancel: markerId` mode on `mulligan_rewind`/`mulligan_shrink`). `readMarkers` MUST drop any marker whose `id` is listed by a later `mulligan:cancel` before the filter sees it. The `mulligan_cancel` tool (or cancel mode) takes the target `markerId` (the value returned in `details.markerId` by rewind/shrink), validates it exists on the branch, appends the retirement entry, and returns confirmation.
+- **Scope — what retraction is NOT:** it only suppresses a control marker in the view going forward. It is **not** a general "undo the rewind's effects": on-disk side effects of the original span persist (D1/E5), and originally-hidden messages do **not** reappear (the retirement removes the marker; it does not replay it). Hidden content stays recoverable by the human via `/tree`.
+- **Acceptance:** (a) an agent can cancel any `mulligan:rewind`/`mulligan:shrink` by id; (b) on the `context` fire after cancellation the transform no longer applies — unit test: cancel a shrink, assert the original message reappears verbatim in the filtered view; cancel a rewind, assert the hidden messages reappear; (c) `mulligan_audit` lists cancelled markers as retired; (d) cancelling a non-existent/already-cancelled id is a safe no-op that returns a reason and never throws (E13). This amends **D6**: agent markers are no longer irrevocably permanent — a mistaken marker is retractable.
 
 ---
 

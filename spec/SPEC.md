@@ -179,6 +179,8 @@ The full reasoning lives in `@reference/HANDOFF.md`. The locked decisions:
 | D7 | Relative targeting for the two granularities | Robust across compaction (which renumbers entries) |
 | D8 | No human command; no session-tree mutation | Redundant with Pi's built-in `/tree`/`/compact`/`/fork` |
 
+> **D6 — amended (marker retraction):** agent `mulligan:rewind`/`mulligan:shrink` markers are **retractable**. Per `@08-edge-cases.md` E21, an agent MAY cancel any marker by id (`mulligan_cancel` / a cancel mode) and the filter then skips it. This softens D6's "permanent" contract — a mistaken marker is no longer irrevocable. Retraction suppresses the marker going forward only; it does NOT undo on-disk side effects (D1/E5) or replay hidden content.
+
 ---
 
 ## 10. Glossary (summary)

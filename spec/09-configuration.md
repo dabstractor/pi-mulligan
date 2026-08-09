@@ -25,7 +25,9 @@
     },
 
     "shrink": {
-      "enabled": true
+      "enabled": true,
+      "maxActive": 32,              // cap on simultaneous active mulligan:shrink markers; oldest retired when exceeded
+      "staleAfterFires": 3          // auto-retire a pinned shrink whose target has been absent this many consecutive fires
       // "autoOnBloat": false         // NOT in v1; reserved. Auto-shrink would risk data loss.
     },
 
@@ -37,7 +39,9 @@
         "bash": 32768,                // 32 KB — builds/tests/git logs legitimately produce tens of KB
         "read": 20480                 // 20 KB — large source-file reads are routine and legitimate
       },
-      "driftThresholdTokens": 3000    // turn token delta → drift nudge
+      "driftThresholdTokens": 6000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
+      "driftWindowTurns": 3,          // rolling window for §5.1 windowed drift signaling
+      "highWaterFraction": 0.7        // §5.2 edge-triggered high-water signal (fraction of context window)
     },
 
     "audit": {
@@ -61,11 +65,15 @@
 | `rewind.maxDepth` | `5` | Generous enough for legitimate retry cascades; tight enough to surface a stuck agent (the refusal text tells the agent/human something is wrong). Markers are permanent, so the cap bounds accumulation. |
 | `rewind.requireMutationWarning` | `true` | Side-effect safety: the agent must be told hidden writes persist. Cheap, high value. |
 | `shrink.enabled` | `true` | Core feature. |
+| `shrink.maxActive` | `32` | Bounds long-session filter cost and marker accumulation; the oldest shrink is retired when exceeded. Mirrors `rewind.maxDepth`. |
+| `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent this many consecutive fires (`@08-edge-cases.md` E15/E21). Stops dead markers from being walked every fire. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
 | `nudges.bloatThresholdBytesByTool` | `{ "bash": 32768, "read": 20480 }` | Legitimate output size differs sharply by tool: `bash` (builds, test runs, `git log`) routinely and legitimately produces tens of KB, while `read` of a large source file is normal. A single global threshold either over-nags the noisy tools or under-catches the quiet ones. Resolution: look up `event.toolName` in the map; on miss, use `bloatThresholdBytes`. |
-| `nudges.driftThresholdTokens` | `3000` | A turn that adds ~3k+ tokens is worth a glance. Tunable. |
+| `nudges.driftThresholdTokens` | `6000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
+| `nudges.driftWindowTurns` | `3` | Rolling window over which the drift delta is smoothed before thresholding (`@07` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
+| `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered). Catches slow steady accumulation the delta nudge misses. |
 | `audit.estimateConfidence` | `"medium"` | Honest default; token estimates are approximate. |
 | `log.file` | `null` | Off by default (no disk chatter). Enable for debugging/testing. |
 

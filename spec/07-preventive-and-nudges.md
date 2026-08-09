@@ -161,3 +161,15 @@ Both nudges are driven by pure helpers (`renderBloatReminder`, `renderDriftNudge
 - Turn-metric schema → `@04-data-model.md` §5
 - Filter pipeline that calls `injectNudge` → `@06-context-filter.md` §1, §12
 - Config defaults → `@09-configuration.md`
+
+---
+
+## 5. Drift-nudge refinements (REQUIRED)
+
+These refine Nudge B (§2) to cut false positives and catch slow accumulation. Both ride the existing `context` event (D4 — zero extra requests).
+
+### 5.1 Windowed drift signaling (REQUIRED)
+`shouldNudge` MUST smooth the per-turn delta over a rolling window of the last `config.nudges.driftWindowTurns` turns (default 3) before comparing to `driftThresholdTokens` — fire when the *windowed* (moving-average, or M-of-N) delta crosses the threshold, NOT on a single turn's raw delta. Rationale (live use): a single heavy turn is routinely legitimate (reading several source files; the user pasting reference docs to read) — *sustained* growth over a window is the actionable signal. The turn metric (`@04-data-model.md` §5) carries the raw per-turn delta; the window is computed in the filter from the last N `mulligan:turn-metric` entries on the branch. Acceptance: a single 8k-token turn amid small turns does NOT fire; three ~4k turns in a row DO.
+
+### 5.2 Edge-triggered high-water signal (REQUIRED)
+In addition to the delta nudge, the filter MUST inject a one-line annotation the first time the **total filtered** context crosses a high-water fraction of the window (`config.nudges.highWaterFraction`, default 0.7), using the same filtered-total `mulligan_audit` computes (`@05-tools.md` §4). It MUST be **edge-triggered** — fire once on crossing, not every turn while above — by tracking `rt.aboveHighWater` (set true when the annotation fires, cleared only when the total drops back below the fraction) in the session runtime. This catches slow, steady accumulation that no single-turn delta nudge sees, without nagging.
