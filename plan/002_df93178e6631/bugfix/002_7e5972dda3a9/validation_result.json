@@ -1,0 +1,1 @@
+{ "hasIssues": false, "issueCount": 0, "summary": "PASS — all 3 PRD bugs (BUG-001 prototype-key leak, BUG-002 stale spec/04, BUG-003 stale spec/10+spec/01) are fixed and verified; tsc clean, 743/743 unit tests pass, 14/14 smoke scenarios pass (idempotent), and a sweep for new issues found none." }
