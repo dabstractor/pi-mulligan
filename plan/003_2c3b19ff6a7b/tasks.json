@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P3.M1",
           "title": "Marker retraction (G3; amends D6)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "An agent can cancel any mulligan:rewind/mulligan:shrink marker by id; on the next context fire the cancelled transform no longer applies; mulligan_audit lists cancelled markers as retired; cancelling a non-existent/already-cancelled id is a safe no-op that never throws. Acceptance criteria a–d in spec/08 E21.",
           "tasks": [
             {
@@ -97,14 +97,14 @@
               "type": "Task",
               "id": "P3.M1.T4",
               "title": "Audit retired-marker listing (audit.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Extend renderAuditReport to list cancelled markers as retired (E21 acceptance c), and update AuditDetails with the cancelled count.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T4.S1",
                   "title": "Extend renderAuditReport + AuditDetails to list cancelled markers as retired",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T2.S1"

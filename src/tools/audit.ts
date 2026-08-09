@@ -116,6 +116,8 @@ export interface AuditDetails {
   nShrinks: number;
   /** Count of mulligan:checkpoint:* labels scanned from getEntries(). */
   nCheckpoints: number;
+  /** Count of cancelled (retired) rewind/shrink markers = markers.cancelledIds.size (P3.M1.T4.S1 / E21 (c)). */
+  nCancelled: number;
   /** The top-N rows rendered in the "Top messages by size" block. */
   top: AuditRow[];
   /** Present ONLY on the catch path — the failure reason (the execute never throws; GOTCHA #10). */
@@ -390,6 +392,8 @@ export function renderAuditReport(args: {
   protectedRoles: string[];
   rows: AuditRow[];
   filtered: unknown[];
+  /** Count of cancelled (retired) markers — appended as ", N cancelled (retired)" when > 0 (P3.M1.T4.S1 / E21 (c)). */
+  cancelledCount: number;
 }): string {
   const L: string[] = [];
   L.push("## Mulligan audit — context you are currently carrying");
@@ -399,9 +403,12 @@ export function renderAuditReport(args: {
   const granularities = [...new Set(args.rewinds.map((r) => readStr(r, "granularity")).filter((g): g is string => !!g))];
   const gran = granularities.join(", ");
   const ckptNames = args.checkpointNames.length ? ` [${args.checkpointNames.join(", ")}]` : " []";
+  // P3.M1.T4.S1 / E21 (c): append ", N cancelled (retired)" ONLY when there are retired markers. Omitted when 0
+  // so the line stays clean AND the pre-existing exact-string active-markers assertions stay byte-identical.
+  const cancelledClause = args.cancelledCount > 0 ? `, ${args.cancelledCount} cancelled (retired)` : "";
   L.push(
     `Active markers: ${args.rewinds.length} rewind${gran ? ` (${gran})` : ""}, ` +
-      `${args.shrinks.length} shrink, ${args.checkpointNames.length} checkpoints${ckptNames}`,
+      `${args.shrinks.length} shrink, ${args.checkpointNames.length} checkpoints${ckptNames}${cancelledClause}`,
   );
 
   L.push(`Protected: will not rewind past ${describeProtected(args.protectedRoles)}.`);
@@ -550,6 +557,7 @@ async function auditExecute(
       protectedRoles: config.rewind.protectedRoles,
       rows,
       filtered,
+      cancelledCount: markers.cancelledIds.size, // P3.M1.T4.S1 — retired-marker count (E21 (c))
     });
 
     // (5) Return. `details` is REQUIRED (CRITICAL GOTCHA #1). Persist NOTHING (no pi.* calls — CRITICAL INSIGHT #1).
@@ -562,6 +570,7 @@ async function auditExecute(
         nRewinds: markers.rewinds.length,
         nShrinks: markers.shrinks.length,
         nCheckpoints: checkpointNames.length,
+        nCancelled: markers.cancelledIds.size, // P3.M1.T4.S1 — retired-marker count (E21 (c))
         top: rows,
       },
     };
@@ -577,6 +586,7 @@ async function auditExecute(
         nRewinds: 0,
         nShrinks: 0,
         nCheckpoints: 0,
+        nCancelled: 0, // P3.M1.T4.S1 — REQUIRED field present on the catch path too (CRITICAL GOTCHA #1)
         top: [],
         error: reason,
       },

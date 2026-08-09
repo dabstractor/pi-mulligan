@@ -252,6 +252,31 @@ function shrinkMarkerEntry(seq: number): SessionEntry {
   } as unknown as SessionEntry;
 }
 
+/**
+ * A mulligan:cancel custom entry (P3.M1.T2.S1 readMarkers contract): records the uuid id of a rewind/shrink
+ * being retired. readMarkers collects every data.targetId into cancelledIds (a ghost id with no matching
+ * marker still inflates the set), so seeding this builder is how the audit tests exercise nCancelled.
+ * Mirrors rewindMarkerEntry/shrinkMarkerEntry (same module-level entrySeq, `as unknown as SessionEntry`).
+ */
+function cancelMarkerEntry(targetId: string): SessionEntry {
+  entrySeq += 1;
+  return {
+    type: "custom",
+    id: `e-${entrySeq}`,
+    parentId: null,
+    timestamp: "",
+    customType: "mulligan:cancel",
+    data: {
+      schema: "mulligan.dev/v1",
+      v: 1,
+      kind: "cancel",
+      targetId,
+      seq: 0,
+      ts: 1,
+    },
+  } as unknown as SessionEntry;
+}
+
 /** A string of ~`kb` KB of ASCII text (1 char = 1 byte), so messageBytes > 16 KB trips the bloat flag (shipped default). */
 function kbText(kb: number): string {
   return "x".repeat(kb * 1024);
@@ -531,6 +556,123 @@ describe("mulligan_audit — Active markers + checkpoints (GOTCHA #7)", () => {
   });
 });
 
+// ── (f2) lists cancelled markers as retired (P3.M1.T4.S1 / E21 (c)) ────────────
+
+describe("mulligan_audit — lists cancelled markers as retired (P3.M1.T4.S1 / E21 (c))", () => {
+  beforeEach(() => setConfig({})); // deterministic thresholds
+
+  // Pure-renderer cases — call renderAuditReport directly with plain data (no ctx).
+  it("pure: cancelledCount>0 appends ', N cancelled (retired)' to the Active-markers line", () => {
+    const report = renderAuditReport({
+      totalTokens: 5,
+      confidence: "medium",
+      rewinds: [],
+      shrinks: [],
+      checkpointNames: [],
+      protectedRoles: ["first:user", "latest:user"],
+      rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false, thresholdBytes: 8192 }],
+      filtered: [{}],
+      cancelledCount: 1,
+    });
+    const activeLine = report.split("\n").find((l) => l.startsWith("Active markers:"));
+    expect(activeLine).toBeDefined();
+    expect(activeLine!).toContain(", 1 cancelled (retired)");
+    // British double-l + the literal parenthetical (acceptance contract spelling).
+    expect(activeLine!).toContain("cancelled (retired)");
+  });
+
+  it("pure: cancelledCount:3 → ', 3 cancelled (retired)'", () => {
+    const report = renderAuditReport({
+      totalTokens: 5,
+      confidence: "medium",
+      rewinds: [],
+      shrinks: [],
+      checkpointNames: [],
+      protectedRoles: ["first:user", "latest:user"],
+      rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false, thresholdBytes: 8192 }],
+      filtered: [{}],
+      cancelledCount: 3,
+    });
+    const activeLine = report.split("\n").find((l) => l.startsWith("Active markers:"));
+    expect(activeLine!).toContain(", 3 cancelled (retired)");
+  });
+
+  it("pure: cancelledCount:0 → NO 'cancelled' substring in the report (omit-when-0 rule)", () => {
+    const report = renderAuditReport({
+      totalTokens: 5,
+      confidence: "medium",
+      rewinds: [],
+      shrinks: [],
+      checkpointNames: [],
+      protectedRoles: ["first:user", "latest:user"],
+      rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false, thresholdBytes: 8192 }],
+      filtered: [{}],
+      cancelledCount: 0,
+    });
+    // Guard against ", 0 cancelled" ever leaking — the clause is omitted entirely when 0.
+    expect(report).not.toContain("cancelled");
+    expect(report).not.toContain("0 cancelled");
+  });
+
+  // Integration cases via auditTool.execute + makeCtx seeding getEntries (the cached path isolates
+  // the audit from filterPipeline — set rt.lastFiltered so the PRIMARY path runs).
+  it("integration: ONE ghost-id cancel → details.nCancelled===1; report shows '1 cancelled (retired)'", async () => {
+    // Ghost id ("ghost-1") with no matching marker isolates the clause: rewinds/shrinks stay 0.
+    const { ctx } = makeCtx({ entries: [cancelMarkerEntry("ghost-1")] });
+    getRuntime("s1").lastFiltered = [userMsg("hi")]; // cached path → no filterPipeline re-run
+    const res = await run(ctx, {});
+    expect(res.details.nCancelled).toBe(1);
+    expect(firstText(res)).toContain("1 cancelled (retired)");
+  });
+
+  it("integration: TWO ghost-id cancels → details.nCancelled===2; report shows '2 cancelled (retired)'", async () => {
+    const { ctx } = makeCtx({ entries: [cancelMarkerEntry("g1"), cancelMarkerEntry("g2")] });
+    getRuntime("s1").lastFiltered = [userMsg("hi")];
+    const res = await run(ctx, {});
+    expect(res.details.nCancelled).toBe(2);
+    expect(firstText(res)).toContain("2 cancelled (retired)");
+  });
+
+  it("integration: NO cancel entries → details.nCancelled===0 and the clause is omitted (existing behavior)", async () => {
+    const { ctx } = makeCtx({ entries: [] });
+    getRuntime("s1").lastFiltered = [userMsg("hi")];
+    const res = await run(ctx, {});
+    expect(res.details.nCancelled).toBe(0);
+    expect(firstText(res)).not.toContain("cancelled");
+  });
+
+  it("integration: cancelling a REAL rewind drops it from its bucket AND raises nCancelled (no double-count)", async () => {
+    // A rewind marker (id rw-1) + a cancel targeting it. readMarkers drops the rewind from rewinds[] AND
+    // records the id, so nRewinds:0 and nCancelled:1 — the numbers stay self-consistent.
+    const { ctx } = makeCtx({
+      entries: [rewindMarkerEntry("last_tool_call_group", 1), cancelMarkerEntry("rw-1")],
+    });
+    getRuntime("s1").lastFiltered = [userMsg("hi")];
+    const res = await run(ctx, {});
+    expect(res.details.nRewinds).toBe(0); // dropped by readMarkers
+    expect(res.details.nCancelled).toBe(1);
+    expect(firstText(res)).toContain("1 cancelled (retired)");
+    // The cancelled rewind must NOT also be counted in the rewind tally.
+    expect(firstText(res)).toContain("0 rewind");
+  });
+
+  // Resilience: the catch path carries the REQUIRED nCancelled field (CRITICAL GOTCHA #1).
+  it("catch path: details.nCancelled===0 on a throwing getEntries (REQUIRED field present)", async () => {
+    const { ctx } = makeCtx({ throwOnGetEntries: true });
+    getRuntime("s1").lastFiltered = [userMsg("hi")];
+    const res = await run(ctx, {});
+    // Failure text result — the execute never throws (GOTCHA #10).
+    expect(firstText(res)).toContain("Mulligan: audit failed —");
+    expect(res.details.error).toBeTruthy();
+    expect(res.details.nCancelled).toBe(0); // the new REQUIRED field is present on the catch path
+  });
+
+  // Type-surface check: nCancelled is part of the public AuditDetails type.
+  it("AuditDetails exposes a REQUIRED nCancelled:number field (P3.M1.T4.S1)", () => {
+    expectTypeOf<AuditDetails>().toMatchTypeOf<{ nCancelled: number }>();
+  });
+});
+
 // ── (g) suggestion names rows[0].label; empty filtered → no suggestion ───────
 
 describe("mulligan_audit — suggestion (spec/05 §4)", () => {
@@ -746,6 +888,7 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       protectedRoles: ["first:user", "latest:user"],
       rows,
       filtered: [1, 2, 3], // non-empty → suggestion present
+      cancelledCount: 0, // P3.M1.T4.S1 — no cancels → clause omitted (line byte-identical to today)
     });
     const lines = report.split("\n");
     expect(lines[0]).toBe("## Mulligan audit — context you are currently carrying");
@@ -775,6 +918,7 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       protectedRoles: ["first:user", "latest:user"],
       rows: [],
       filtered: [],
+      cancelledCount: 0, // P3.M1.T4.S1 — no cancels → clause omitted
     });
     const lines = report.split("\n");
     expect(report).toContain("No messages in filtered view.");
@@ -794,6 +938,7 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       protectedRoles: ["first:user", "latest:user"],
       rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false, thresholdBytes: 8192 }],
       filtered: [{}],
+      cancelledCount: 0, // P3.M1.T4.S1 — no cancels → clause omitted
     });
     expect(report).toContain("0 rewind, 0 shrink, 0 checkpoints []");
   });
