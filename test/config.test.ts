@@ -476,3 +476,53 @@ describe("getConfig lazy init (cache starts null)", () => {
     expect(again).not.toBe(mod.getConfig()); // still defensive copies
   });
 });
+
+// (g) CONFIG-KNOB VALIDATION for the two E22 backstops (spec/09 §4; spec/08 E22).
+// rewind.maxRetriesPerPrompt: integer ≥ 1 (Math.floor on the coerced number); non-integer-after-floor or <1 → default 5.
+// rewind.abortContextFraction: number in (0,1]; out of range or non-number → default 0.9.
+describe("rewind.maxRetriesPerPrompt & rewind.abortContextFraction (P4.M1.T3.S1 / spec/09 §4, spec/08 E22)", () => {
+  it("(a) sets both valid overrides", () => {
+    const cfg = validateConfig({ rewind: { maxRetriesPerPrompt: 3, abortContextFraction: 0.8 } });
+    expect(cfg.rewind.maxRetriesPerPrompt).toBe(3);
+    expect(cfg.rewind.abortContextFraction).toBe(0.8);
+  });
+
+  it("(b) defaults to 5 / 0.9 when absent (no warn)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({});
+      expect(cfg.rewind.maxRetriesPerPrompt).toBe(5);
+      expect(cfg.rewind.abortContextFraction).toBe(0.9);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) abortContextFraction ∈ {0, 1.5, -0.5, NaN} → 0.9 (+warn naming the field)", () => {
+    for (const bad of [0, 1.5, -0.5, NaN]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        expect(validateConfig({ rewind: { abortContextFraction: bad } }).rewind.abortContextFraction).toBe(0.9);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toContain("abortContextFraction");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(d) maxRetriesPerPrompt: 0 → 5; 2.7 → 2 (Math.floor); 'x' → 5", () => {
+    expect(validateConfig({ rewind: { maxRetriesPerPrompt: 0 } }).rewind.maxRetriesPerPrompt).toBe(5);
+    expect(validateConfig({ rewind: { maxRetriesPerPrompt: 2.7 } }).rewind.maxRetriesPerPrompt).toBe(2);
+    expect(validateConfig({ rewind: { maxRetriesPerPrompt: "x" } }).rewind.maxRetriesPerPrompt).toBe(5);
+  });
+
+  it("(e) existing rewind knobs unchanged when the new knobs are set", () => {
+    const cfg = validateConfig({ rewind: { maxRetriesPerPrompt: 3, abortContextFraction: 0.8 } });
+    expect(cfg.rewind.enabled).toBe(true);
+    expect(cfg.rewind.protectedRoles).toEqual(["first:user", "latest:user"]);
+    expect(cfg.rewind.maxDepth).toBe(5);
+    expect(cfg.rewind.requireMutationWarning).toBe(true);
+  });
+});

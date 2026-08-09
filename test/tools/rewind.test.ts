@@ -25,6 +25,7 @@ import {
 import { NOTE_INVALID_REASON, renderNote } from "../../src/notes.js";
 import { clearAll, getRuntime } from "../../src/runtime.js";
 import { setConfig } from "../../src/config.js";
+import { makeShrinkTool } from "../../src/tools/shrink.js"; // P4.M1.T3.S1 test (d)/(e): shrink stays callable after the rewind budget/context-fraction refuse
 import type { RewindMarker, RewindMarkerInput } from "../../src/markers.js";
 import type {
   AgentToolResult,
@@ -107,6 +108,9 @@ function makeCtx(opts: {
   entries?: unknown[];
   branch?: unknown[];
   contextEntries?: unknown[];
+  /** Script ctx.getContextUsage() so the (4c) context-fraction guard can read `.contextWindow`. ABSENT → the
+   *  method is NOT attached → computeFilteredTotal returns windowTokens:0 → (4c) SKIPPED (no regression). */
+  contextUsage?: { contextWindow: number };
   throwOnGetEntries?: boolean;
   throwOnGetBranch?: boolean;
   throwOnBuildContext?: boolean;
@@ -138,7 +142,11 @@ function makeCtx(opts: {
       return contextEntries;
     },
   };
-  return { ctx: { sessionManager } as unknown as ExtensionContext };
+  // Attach getContextUsage ONLY when explicitly opted in. computeFilteredTotal reads `ctx.getContextUsage?.()`
+  // (NOT sessionManager's) → undefined when absent → windowTokens:0 → the (4c) guard is skipped (no regression).
+  const ctx: { sessionManager: typeof sessionManager; getContextUsage?: () => unknown } = { sessionManager };
+  if (opts.contextUsage !== undefined) ctx.getContextUsage = () => opts.contextUsage!;
+  return { ctx: ctx as unknown as ExtensionContext };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -929,5 +937,165 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
 describe("mulligan_rewind — RewindDetails.hideEntryIds type (fix_design.md §Change 2 audit surface)", () => {
   it("RewindDetails has hideEntryIds?: string[]", () => {
     expectTypeOf<RewindDetails>().toMatchTypeOf<{ hideEntryIds?: string[] }>();
+  });
+});
+
+// ── P4.M1.T3.S1: retry budget + context-fraction + never-throw (spec/08 E22 a–f, spec/10 §1.10) ───────
+// These blocks assert the two E22 hard backstops landed in P4.M1.T2.S1 (per-prompt retry budget) +
+// P4.M1.T2.S2 (context-fraction stop). They drive makeRewindTool against the existing makePi/makeCtx fakes
+// and PRE-SEED the rewind markers (the fakes' entries array is static; we do NOT simulate the loop by calling
+// rewind 4×). countRetriesAtLatestPrompt scans getEntries() — see spec/08 E22 (g) for the loop-contract framing.
+
+/** A valid mulligan_shrink call (mirrors test/tools/shrink.test.ts). Shrink is never retry-budget-gated, so a
+ *  non-empty discriminator + non-empty replacement returns a NON-refusal (matched:yes or matched:no, but never
+ *  "Mulligan: refused"). Used by tests (d)/(e) to prove the non-rewind tools stay callable. */
+async function shrinkCall(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+): Promise<AgentToolResult<unknown>> {
+  const tool = makeShrinkTool(pi);
+  return tool.execute(
+    "call-shrink",
+    { target: { by_tool_call_id: "call-A" }, replacement: "(shrink) summary" },
+    undefined,
+    undefined,
+    ctx,
+  );
+}
+
+// (a) RETRY BUDGET — refuses at exactly the budget with the named text and persists nothing (spec/08 E22 a).
+describe("mulligan_rewind — retry budget: per-prompt cap (P4.M1.T3.S1 / spec/08 E22 a, spec/10 §1.10)", () => {
+  it("refuses at exactly the budget (maxRetriesPerPrompt:3) with the named text and persists nothing", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { appended, pi } = makePi();
+    // countRetriesAtLatestPrompt: latest user at idx 0 → 3 rewind markers AFTER it → 3 >= 3 → refuse (3/3).
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("update the spec")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).toContain("per-prompt retry budget");
+    expect(firstText(res)).toContain("3/3"); // ${retries}/${maxRetriesPerPrompt}
+    expect(appended.length).toBe(0); // refused BEFORE persisting
+  });
+});
+
+// (b) ZERO-HIDE STILL COUNTS — countRetriesAtLatestPrompt counts markers, not what they hid (spec/08 E22 c).
+describe("mulligan_rewind — retry budget: zero-hide markers still count (P4.M1.T3.S1 / spec/08 E22 c)", () => {
+  it("a rewind marker that hid nothing still counts toward the budget", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { appended, pi } = makePi();
+    // countRetriesAtLatestPrompt does NOT inspect hideEntryIds — it counts customType:"mulligan:rewind"
+    // unconditionally. These 3 markers represent zero-hide rewinds; if they did NOT count, the next rewind
+    // would succeed. Assert it is refused → proves zero-hide markers count.
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("loop again")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).toContain("per-prompt retry budget");
+    expect(appended.length).toBe(0);
+  });
+});
+
+// (c) NEW PROMPT RESETS BUDGET — a later user message makes countRetries find 0 rewinds after it (spec/08 E22 b/g).
+describe("mulligan_rewind — retry budget: a new prompt resets it (P4.M1.T3.S1 / spec/08 E22 b, spec/10 §1.10)", () => {
+  it("a LATER user message resets the budget → the next rewind succeeds", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { appended, pi } = makePi();
+    // The NEW user message is AFTER the rewind markers → countRetriesAtLatestPrompt finds the NEW user and
+    // counts 0 rewinds after it → budget NOT hit → rewind succeeds (persists a marker, possibly K=0).
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("old prompt")),
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+        msgEntry(user("NEW prompt")), // <-- latest user is now AFTER the rewind markers
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(appended.length).toBeGreaterThan(0); // marker persisted = success (K may be 0; appended>0 is the signal)
+    expect(firstText(res)).not.toContain("per-prompt retry budget");
+  });
+});
+
+// (d) NON-REWIND TOOLS UNAFFECTED — after the budget is hit, mulligan_shrink returns a non-refusal (spec/08 E22 d).
+describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T3.S1 / spec/08 E22 d)", () => {
+  it("after the retry budget is hit, mulligan_shrink still returns a non-refusal", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("budget hit")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+    });
+    // 1) rewind IS refused (budget exhausted)
+    const rew = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(rew)).toContain("per-prompt retry budget");
+    // 2) mulligan_shrink is NOT gated by the retry budget → returns a non-refusal (matched:yes/no, never "refused")
+    const shrinkRes = await shrinkCall(pi, ctx);
+    expect((shrinkRes.content[0] as { type?: string }).type).toBe("text");
+    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain("Mulligan: refused");
+  });
+});
+
+// (e) CONTEXT-FRACTION STOP — refuses when filtered context ≥ abortContextFraction even though the budget
+// remains; shrink still callable (spec/08 E22 e). maxRetriesPerPrompt is set HIGH so ONLY (4c) refuses here.
+describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e, spec/10 §1.10)", () => {
+  it("refuses when filtered context ≥ abortContextFraction of the window even though budget remains; shrink still callable", async () => {
+    // HIGH budget → (4b) won't fire first; ONLY the context-fraction (4c) refuses here.
+    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextUsage: { contextWindow: 10000 }, // windowTokens=10000 → (4c) is armed (not skipped)
+      entries: [msgEntry(user("bloated loop"))],
+    });
+    // Drive totalTokens via rt.lastFiltered — the PRIMARY path computeFilteredTotal reads.
+    // estimateTokens ≈ chars/4 → 50000 chars ≈ 12500 tokens ≥ 0.9*10000 = 9000. Oversized to be ratio-safe.
+    getRuntime("s1").lastFiltered = [
+      { role: "user", content: [{ type: "text", text: "x".repeat(50000) }] },
+    ] as unknown as { role: string; content: { type: string; text: string }[] }[];
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).toContain("context is at");
+    expect(firstText(res)).toContain("% of the window");
+    expect(appended.length).toBe(0);
+    // shrink still callable (budget was NOT the reason; only prompt-re-landing rewinds are gated):
+    const shrinkRes = await shrinkCall(pi, ctx);
+    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain("Mulligan: refused");
+  });
+});
+
+// (f) NEVER THROW / NEVER BLOCK TEXT — the guards are defensive; every result is a text block (E13; spec/08 E22 f).
+describe("mulligan_rewind — guards never throw; refusals are always text blocks (P4.M1.T3.S1 / spec/08 E22 f, E13)", () => {
+  it("a throwing getEntries → countRetriesAtLatestPrompt returns 0 (no crash); execute resolves to a text result", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { pi } = makePi();
+    // throwOnGetEntries makes BOTH countRewindMarkers AND countRetriesAtLatestPrompt return 0 (both defensive)
+    // → the rewind passes (4b) and proceeds (may succeed). The assertion is ONLY "no throw + text block".
+    const { ctx } = makeCtx({ entries: [msgEntry(user("x"))], throwOnGetEntries: true });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect((res.content[0] as { type?: string }).type).toBe("text"); // never throws; always a text block (E13)
+  });
+
+  it("a throwing getContextUsage → context-fraction guard skipped (no crash)", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    const { pi } = makePi();
+    // computeFilteredTotal's try/catch → {0,0} → windowTokens:0 → (4c) skipped. No throw either way.
+    const { ctx } = makeCtx({ entries: [msgEntry(user("x"))] });
+    (ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => {
+      throw new Error("getContextUsage boom");
+    };
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect((res.content[0] as { type?: string }).type).toBe("text"); // no throw
+  });
+
+  it("every refusal result is content:[{type:'text'}] (E13 — never blocks a normal text reply)", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("x")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(Array.isArray(res.content)).toBe(true);
+    expect(res.content.length).toBeGreaterThan(0);
+    expect((res.content[0] as { type?: string }).type).toBe("text");
+    expect(typeof (res.content[0] as { text?: string }).text).toBe("string");
   });
 });

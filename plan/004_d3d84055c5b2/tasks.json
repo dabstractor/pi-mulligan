@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P4.M1",
           "title": "E22 retry budget + context-fraction stop (the main feature)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The rewind tool refuses before persisting when (a) >= maxRetriesPerPrompt rewinds have re-landed at the latest user message, or (b) the filtered-context estimate is >= abortContextFraction of the window. Both guards run independently of the existing maxDepth guard and never throw (E13). Acceptance = spec/10 §1.10 (a)-(g) and spec/08 E22.",
           "tasks": [
             {
@@ -108,14 +108,14 @@
               "type": "Task",
               "id": "P4.M1.T3",
               "title": "Tests (test/tools/rewind.test.ts, test/config.test.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Mirror spec/10 §1.10 (a)-(g) and spec/08 E22 acceptance. Extend the existing rewind-test fakes (makePi/makeCtx) and add config-knob validation cases. Integration scenarios F-retrycap / F-abortfraction are documented-only (test/integration/scenarios.md).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M1.T3.S1",
                   "title": "Retry-cap + context-fraction + config-knob unit tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1",
@@ -139,21 +139,21 @@
           "type": "Milestone",
           "id": "P4.M2",
           "title": "bloatHit demotion in shouldNudge (independent, tiny)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "shouldNudge fires on delta ALONE when delta data exists; bloatHit fires only in the no-delta fallback. One production line changes; two tests flip. INDEPENDENT of M1 (different file src/nudges.ts, different concern) — may be done in parallel with M1.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M2.T1",
               "title": "Demote bloatHit (src/nudges.ts + test/drift_nudge.test.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove the `|| window.some(bloatHit)` arm from shouldNudge's delta-available return (line 323). Keep the deltas.length===0 fallback (line 321) unchanged. Update the JSDoc. Flip the 2 stale test assertions; keep the no-delta fallback assertion green.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M2.T1.S1",
                   "title": "Remove the || bloatHit arm from shouldNudge's delta-available return",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/004_d3d84055c5b2/architecture/codebase_patterns.md §4. shouldNudge is at src/nudges.ts lines 316-323. Line 321 `if (deltas.length === 0) return window.some((m) => m.bloatHit === true);` is the NO-DELTA FALLBACK and stays UNCHANGED. Line 323 `return avg > config.nudges.driftThresholdTokens || window.some((m) => m.bloatHit === true);` is the delta-available return — REMOVE the `|| window.some((m) => m.bloatHit === true)` arm. The function JSDoc (lines 271-315) currently states bloat is INDEPENDENT and fires regardless — that is now FALSE for the delta-available path; rewrite per spec/07 §5.1 (delta-only when delta data exists; bloatHit is a no-delta fallback only).\n2. INPUT: None (root of M2; independent of M1). The spec target is spec/07 §2/§5.1 (committed 0bcaa814): \"The firing condition is delta-only when delta data is available... The earlier || bloatHit arm is dropped.\"\n3. LOGIC: (a) Change line 323 to `return avg > config.nudges.driftThresholdTokens;`. (b) Update the function JSDoc: the @returns line (lines 313-315) from \"true iff the windowed moving-average delta > driftThresholdTokens OR any window metric has bloatHit === true\" to \"true iff the windowed moving-average delta > driftThresholdTokens (delta-only when delta data exists); bloatHit is a fallback ONLY when no window metric has a usable delta\". (c) Rewrite the algorithm block (lines 280-290) paragraph that claims bloat fires regardless — state bloatHit fires ONLY in the no-delta fallback (first turn / post-reload). Do NOT touch line 321 (the fallback).\n4. OUTPUT: shouldNudge returns delta-only when delta data exists. The no-delta fallback still fires on bloatHit. Consumed by P4.M2.T1.S2 (test flips) and by filter.ts contextHandler (unchanged caller — already passes markers.recentMetrics).\n5. DOCS: [Mode A] Update the JSDoc on shouldNudge (src/nudges.ts) to state the delta-only-when-delta-exists semantics — this is the inline doc that rides with the work. No separate docs subtask.",
@@ -168,7 +168,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "Flip the 2 stale bloat-armed test assertions",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M2.T1.S1"

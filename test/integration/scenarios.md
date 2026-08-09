@@ -244,6 +244,51 @@ pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-maxdept
 
 ---
 
+### F-retrycap
+
+**Tests:** the per-prompt retry budget (E22 a–d). With `rewind.maxRetriesPerPrompt:2`, repeated `last_turn`
+rewinds that re-land at the SAME prompt are refused at the 3rd attempt with the "per-prompt retry budget"
+message; a fresh user prompt restores the budget.
+
+**Run (deterministic):** set `rewind.maxRetriesPerPrompt:2` (via config), then drive repeated same-prompt rewinds.
+
+**Expect in log:** 2 `tool.rewind` lines (succeeded) + a 3rd containing "per-prompt retry budget" / "refused";
+a subsequent rewind after a NEW user message succeeds again.
+
+**Expect in JSONL:** exactly 2 `mulligan:rewind` markers persisted for the first prompt (the 3rd refused
+persists nothing); the post-new-prompt rewind adds a 3rd marker.
+
+**Pass:** 3rd same-prompt rewind refused with the budget text and persists nothing; fresh prompt restores the
+budget; `mulligan_shrink`/`mulligan_audit` remain callable throughout. §2.3 invariants hold.
+
+> Deterministic unit coverage lives in `test/tools/rewind.test.ts` (P4.M1.T3.S1 / spec/10 §1.10); this is the
+> Tier-2 live-reproduction path, documented, not auto-run.
+
+---
+
+### F-abortfraction
+
+**Tests:** the context-fraction stop (E22 e). When the filtered context is ≥ `rewind.abortContextFraction`
+of the window, a rewind is refused with the "context is at …% of the window" message even though the retry
+budget remains; `mulligan_shrink` / `mulligan_audit` stay callable.
+
+**Run (deterministic):** force the filtered view to ≥ `abortContextFraction` (default 0.9) of the window —
+e.g. seed a large `mulligan_shrink`-able result so `rt.lastFiltered` ≈ the window — then attempt a rewind.
+
+**Expect in log:** `tool.rewind` refused with "context is at" / "% of the window"; a `mulligan_shrink` call in
+the same turn still succeeds (non-refusal).
+
+**Expect in JSONL:** NO new `mulligan:rewind` marker (the rewind was refused before persisting); the
+`mulligan:shrink` marker from the still-callable shrink persists.
+
+**Pass:** rewind refused with the context-fraction text and persists nothing; shrink/audit callable; §2.3
+invariants hold.
+
+> Deterministic unit coverage lives in `test/tools/rewind.test.ts` (P4.M1.T3.S1 / spec/10 §1.10); this is the
+> Tier-2 live-reproduction path, documented, not auto-run.
+
+---
+
 ### F-checkpoint
 
 **Tests:** a checkpoint label is set; a rewind to it persists; the label + rewind marker are on disk.
