@@ -103,6 +103,16 @@ filter ran, F-failopen exits 0) are what gate DoD #2/#3/#5. All 14 scenarios PAS
 assertions on a single clean run.
 
 ### DoD #2 — smoke session reuse across `npm run smoke` invocations (harness characteristic)
+
+> **RESOLVED (post-S2).** The harness characteristic described below — repeated `npm run smoke` runs
+> accumulating state in shared `--session-id smoke-<scenario>` JSONLs — has since been **fixed** by giving each
+> scenario a **run-scoped unique** `--session-id smoke-<scenario>-<RUN_ID>` in `run-smoke.mjs` (one `RUN_ID` per
+> `npm run smoke` invocation; F-reload/E11 still share it across their two in-run spawns). An independent
+> validation pass found this flaked **F-rewind-core** and **F-checkpoint** too (the BUG-001/002/003 regression
+> guards — false "LEAKED BACK" / "seed LEAKED" failures from unpinned leftover seed replies), not just F-protected
+> as noted below. With the run-scoped id, `npm run smoke` is now **genuinely idempotent**: 14/14 on back-to-back
+> runs (verified). The notes below are retained as the original S2 narrative.
+
 `run-smoke.mjs` spawns each scenario with `--session-id smoke-<scenario>`, and Pi **appends**
 to that same JSONL file on every run. F-reload *relies* on this (two runs share one session
 within a single `npm run smoke`). The side effect: **running `npm run smoke` repeatedly

@@ -799,6 +799,59 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
 }
 
 /**
+ * resolvePinnedShrink — the single-id identity resolver for PINNED shrinks (FINDING 3 fix; mirrors resolvePinnedHide
+ * for ONE id → ONE message index). When a ShrinkMarker carries a `pinnedEntryId` (the stable ENTRY id the target
+ * matched at marker-creation time), applyShrink calls THIS instead of re-resolving the live selector, so the
+ * substitution locks to ONE message by identity forever — `by_tool_name`+`last` and `by_content_includes` can no
+ * longer drift onto later, unrelated messages as the session grows (the moving-target footgun that motivated the
+ * rewind hideEntryIds fix).
+ *
+ * ALGORITHM (identical alignment walk to resolvePinnedHide §4): filter branchEntries to context-producing types,
+ * walk in parallel with `messages` via msgCursor + entryMessageYield, and return the FIRST message index (msgCursor)
+ * of the entry whose `id === pinnedEntryId`. Like resolvePinnedHide it returns null (no-op) when alignment is
+ * INDETERMINATE: a compaction/unknown entry type (entryMessageYield === -1), a raw-branch vs compaction-aware
+ * messages misalignment, or the pinned entry simply not being present (compacted away). Returning null (NOT
+ * falling back to live resolution) is deliberate: once a target is pinned we want identity-or-nothing, matching the
+ * rewind precedent — substituting a DIFFERENT message that happens to currently match the selector would re-introduce
+ * the very moving-target bug pinning exists to prevent.
+ *
+ * Pure + defensive + TOTAL: non-array messages/branchEntries, or a non-string/empty pinnedEntryId → null; every
+ * field read via isRecord/readOwn. NEVER throws (sits on the context-handler hot path via filterPipeline T5.S1).
+ * NO new imports (reuses MessageLike + BranchEntry + isContextProducingType + entryMessageYield + isRecord/readOwn).
+ * EXPORTED so applyShrink, filterPipeline, and tests share one shape at the pure tier.
+ *
+ * @param messages      the CURRENT message list (a real Pi AgentMessage[] assigns in); non-array → null
+ * @param branchEntries root→leaf branch entries (getBranch() DATA — carries stable ENTRY ids); non-array → null
+ * @param pinnedEntryId the stable ENTRY id to resolve by identity; non-string/empty → null
+ * @returns the FIRST message index of the pinned entry, or null when absent / alignment indeterminate (no-op)
+ */
+export function resolvePinnedShrink(
+  messages: MessageLike[],
+  branchEntries: BranchEntry[],
+  pinnedEntryId: string,
+): number | null {
+  if (!Array.isArray(messages) || !Array.isArray(branchEntries)) return null;
+  if (typeof pinnedEntryId !== "string" || pinnedEntryId.length === 0) return null;
+
+  const ctxEntries = branchEntries.filter((e) =>
+    isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
+  );
+
+  let msgCursor = 0;
+  for (const e of ctxEntries) {
+    const y = entryMessageYield(e); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
+    if (y < 0) return null; // compaction (or unknown) on the walked range → alignment INDETERMINATE → no-op safely
+    if (msgCursor + y > messages.length) return null; // raw branch vs compaction-aware messages misalign → no-op
+    const id = isRecord(e) ? readOwn(e, "id") : undefined;
+    if (typeof id === "string" && id === pinnedEntryId) {
+      return msgCursor; // yield is 1 in practice → the entry's single message index
+    }
+    msgCursor += y;
+  }
+  return null; // pinned entry not present (compacted away / wrong branch) → no-op this fire
+}
+
+/**
  * applyShrink — substitute the matched message's content with a compact replacement (spec/06-context-filter.md §5).
  * The replacement PERSISTS for as long as the marker exists (permanent soft substitution). SHRINKS DO NOT REMOVE
  * MESSAGES — they replace content, preserving role/toolCallId/toolName/isError (and every other field via the
@@ -806,9 +859,12 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
  * (spec/06 §5:145 "pairing untouched"); a non-toolResult keeps its role (spec/08 E19).
  *
  * ALGORITHM (spec/06 §5 L131-140):
- *   1. i = resolveShrinkTarget(messages, marker.target). null (or out of range) → return messages UNCHANGED (SAME
- *      reference) — the documented no-op (spec/06 §5:133). This is ALSO the "shrink-after-rewind-removed-target"
- *      no-op (spec/06 §5:143) and the compaction-removed-target no-op (spec/04 §4 — retried next fire).
+ *   1. Resolve the target to a message index. PINNED-FIRST (FINDING 3): if marker.pinnedEntryId is a non-empty
+ *      string, i = resolvePinnedShrink(messages, branchEntries, pinnedEntryId) (identity-by-stable-entry-id); else
+ *      i = resolveShrinkTarget(messages, marker.target) (live re-resolution). null/out-of-range → return messages
+ *      UNCHANGED (SAME reference) — the documented no-op (spec/06 §5:133). This is ALSO the "shrink-after-rewind-
+ *      removed-target" no-op (spec/06 §5:143) and the compaction-removed-target no-op (spec/04 §4 — retried next
+ *      fire; PINNED shrinks no-op rather than re-resolving — identity-or-nothing, the rewind precedent).
  *   2. replacement = { ...orig, content: [{ type:"text", text: replacement }] }. The spread preserves EVERY other
  *      field (role, toolCallId, toolName, isError, customType, …). The spec's §5:136-138 ternary has IDENTICAL
  *      branches (both spread orig + override content — only the comment differs); written as ONE expression here
@@ -824,8 +880,10 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
  *
  * CONTRACT (spec/06 §1 pipeline, `messages = applyShrinkSafe(messages, m)`; filterPipeline T5.S1 calls THIS fn):
  *   - INPUT: `messages` (a real Pi AgentMessage[] assigns in with no cast via MessageLike[]), `marker`
- *     ({target: ShrinkTarget, replacement: string} — a real markers.ts ShrinkMarker assigns in with NO cast; only the
- *     two fields applyShrink reads are in the structural type — GOTCHA #2). NO import from markers.ts (Pi-free).
+ *     ({target, replacement, pinnedEntryId?} — a real markers.ts ShrinkMarker assigns in with NO cast; only the
+ *     three fields applyShrink reads are in the structural type — GOTCHA #2), and OPTIONAL `branchEntries`
+ *     (getBranch() DATA — needed only for the PINNED path; filterPipeline always passes it). NO import from
+ *     markers.ts (Pi-free).
  *   - NO MATCH (resolve returns null, marker is a non-record, or messages is a non-array) → messages UNCHANGED
  *     (SAME reference) for the null/marker paths; non-array messages → [] (defensive, mirrors applyRewind/
  *     partitionIntoUnits — GOTCHA #4).
@@ -835,21 +893,37 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
  * → NEVER throws (E13). Side-effect-free (never mutates `messages`). NO new imports (reuses MessageLike + ContentBlock
  * + isRecord/readOwn already in module scope; `grep -c '^import' src/transforms.ts` stays 0).
  *
- * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
- * @param marker { target: ShrinkTarget; replacement: string } (a real ShrinkMarker assigns in with no cast)
+ * @param messages       the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → []
+ * @param marker         { target, replacement, pinnedEntryId? } (a real ShrinkMarker assigns in with no cast)
+ * @param branchEntries  OPTIONAL root→leaf branch entries (getBranch() DATA); PINNED shrinks resolve by identity
+ *                       via resolvePinnedShrink — absent → a pinned shrink no-ops this fire (live shrinks ignore it)
  * @returns a NEW array with the matched message's content substituted; the SAME array reference on a no-op
  */
 export function applyShrink(
   messages: MessageLike[],
-  marker: { target: ShrinkTarget; replacement: string },
+  marker: { target: ShrinkTarget; replacement: string; pinnedEntryId?: string },
+  branchEntries?: BranchEntry[],
 ): MessageLike[] {
   // Defensive: non-array messages → [] (mirrors applyRewind/partitionIntoUnits); non-record marker → no-op (same ref).
   if (!Array.isArray(messages)) return [];
   if (!isRecord(marker)) return messages;
 
-  // Resolve the target (read marker.target via readOwn for throwing-Proxy safety; cast — resolveShrinkTarget
-  // re-validates isRecord). null/out-of-range → no-op, SAME reference (spec/06 §5:133).
-  const i = resolveShrinkTarget(messages, readOwn(marker, "target") as ShrinkTarget);
+  // Resolve the target to a message index. PINNED-FIRST (FINDING 3 fix — mirrors rewind hideEntryIds): when the
+  // marker carries a pinnedEntryId (the stable ENTRY id the target matched at creation), resolve by IDENTITY via
+  // resolvePinnedShrink instead of re-resolving the live selector. This LOCKS the substitution to one message, so
+  // by_tool_name+last / by_content_includes no longer drift onto later messages (the moving-target footgun). null
+  // (pinned entry gone / no branchEntries / compaction) → no-op this fire — we deliberately do NOT fall back to live
+  // resolution, matching the rewind precedent (identity-or-nothing). No pinnedEntryId → live resolution (backward
+  // compat for old markers + targets that did not match at creation — compaction-robust; spec/06 §5:133).
+  const pinnedId = readOwn(marker, "pinnedEntryId");
+  let i: number | null;
+  if (typeof pinnedId === "string" && pinnedId.length > 0) {
+    i = Array.isArray(branchEntries) ? resolvePinnedShrink(messages, branchEntries, pinnedId) : null;
+    if (i === null) return messages; // SAME reference (no-op — identity-or-nothing, like rewind)
+  } else {
+    // LIVE: read marker.target via readOwn (throwing-Proxy safe); cast — resolveShrinkTarget re-validates isRecord.
+    i = resolveShrinkTarget(messages, readOwn(marker, "target") as ShrinkTarget);
+  }
   if (i === null || i < 0 || i >= messages.length) return messages;
 
   const orig = messages[i];
@@ -948,6 +1022,13 @@ export interface ShrinkMarkerLike {
   seq: number;
   target: ShrinkTarget;
   replacement: string;
+  /**
+   * Stable ENTRY id the target matched at marker-creation time (FINDING 3 — pinned shrink). When present, applyShrink
+   * resolves the target by IDENTITY via resolvePinnedShrink (needs `branchEntries`, which filterPipeline passes) — the
+   * substitution locks to ONE message forever (no moving-target drift). Mirrors RewindMarkerLike.hideEntryIds.
+   * Absent → live re-resolution (backward compat / compaction-robust). OPTIONAL. Read via readOwn(sh,"pinnedEntryId").
+   */
+  pinnedEntryId?: string;
 }
 
 /**
@@ -1176,10 +1257,12 @@ export function filterPipeline(
     m = applyRewind(m, remove);
   }
 
-  // 2) SHRINKS, oldest-first (stableSortBySeq), on the post-rewind array. ShrinkMarkerLike is structurally assignable
-  //    to applyShrink's {target, replacement} param (extra seq is fine — GOTCHA #4). applyShrink is defensive + total.
+  // 2) SHRINKS, oldest-first (stableSortBySeq), on the post-rewind array. applyShrink is defensive + total.
+  //    `branchEntries` is passed so PINNED shrinks (FINDING 3 — pinnedEntryId) can resolve by identity via
+  //    resolvePinnedShrink; live shrinks ignore it. (A real ShrinkMarkerLike is structurally assignable to applyShrink's
+  //    {target, replacement, pinnedEntryId?} param — GOTCHA #4.)
   for (const sh of stableSortBySeq(shrinks)) {
-    m = applyShrink(m, sh);
+    m = applyShrink(m, sh, branchEntries);
   }
 
   return m;

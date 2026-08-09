@@ -13,7 +13,7 @@
  * spec/02-proven-constraints.md C4 (void = pass-through), C12 (read sessionManager fresh).
  *
  * NUDGE A — `tool_result` bloated-result reminder. Fires after EVERY tool execution; if a single result's
- * in-context byte size exceeds config.nudges.bloatThresholdBytes (default 8192 ≈ 2k tokens), the handler
+ * in-context byte size exceeds config.nudges.bloatThresholdBytes (default 16384 ≈ 4k tokens), the handler
  * APPENDS (never replaces — GOTCHA #7) a short reminder to that result's content telling the agent
  * `mulligan_shrink`/`mulligan_rewind` are available, AND records a bloat hit ({toolName, approxTokens})
  * into rt.pendingBloatHits so the per-turn drift nudge (Nudge B, P1.M6.T2.S1) can aggregate it. It skips

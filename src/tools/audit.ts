@@ -49,6 +49,7 @@ import { getRuntime } from "../runtime.js"; // primary path: rt.lastFiltered (th
 import { getConfig } from "../config.js"; // estimateConfidence + bloatThresholdBytes + protectedRoles
 import { filterPipeline } from "../transforms.js"; // GOTCHA #2: upstream (E16 fallback only)
 import { readMarkers } from "../filter.js"; // GOTCHA #2: upstream (active markers — rewinds/shrinks)
+import { bloatThresholdFor } from "../nudges.js"; // per-tool bloat threshold (Nudge A / spec/07 §1)
 import type { RewindMarker, ShrinkMarker } from "../markers.js"; // GOTCHA #3: TYPE-ONLY (audit writes nothing)
 
 // ── Parameter schema (spec/05 §4 — Typebox, VERBATIM incl. the field description) ───────────────
@@ -92,8 +93,10 @@ export interface AuditRow {
   role: string;
   /** A best-effort human label (describeMessage): e.g. `read src/big.log`, `user "snippet…"`. */
   label: string;
-  /** true when the message's in-context bytes exceed config.nudges.bloatThresholdBytes. */
+  /** true when the message's in-context bytes exceed the resolved per-tool bloat threshold (bloatThresholdFor). */
   bloaty: boolean;
+  /** The resolved per-tool bloat threshold (bytes) used to compute `bloaty` and render the KB flag. */
+  thresholdBytes: number;
 }
 
 /**
@@ -298,7 +301,7 @@ export function buildCallLookup(
  *
  * Reuses `resultBytes` (tokens.ts) so the audit and the nudge handler agree on what "bytes" means — no
  * byte-logic duplication (the PRP pattern). The bloat flag compares this to
- * `config.nudges.bloatThresholdBytes` (default 8192 = 8 KB).
+ * the resolved per-tool threshold via `bloatThresholdFor`.
  */
 export function messageBytes(msg: Record<string, unknown>): number {
   const content = readOwn(msg, "content");
@@ -364,7 +367,7 @@ function describeProtected(roles: string[]): string {
  * Protected: will not rewind past first:user/latest:user.
  *
  * Top messages by size:
- *    9412  toolResult  read src/big.log  ⚠ above bloat threshold (8 KB)
+ *    9412  toolResult  read src/big.log  ⚠ above bloat threshold (20 KB)
  *    1840  assistant   (thinking + toolCall x2)
  *
  * Suggestion: the `read src/big.log` result is the largest contributor. Consider mulligan_shrink.
@@ -375,6 +378,7 @@ function describeProtected(roles: string[]): string {
  *   - Active markers: rewinds (with their distinct granularities comma-joined) + shrink count + checkpoint
  *     count + names. An empty checkpoint set renders "[]".
  *   - Each top row: right-aligned 6-wide token count, 11-wide padded role, label, and (if bloaty) the flag.
+ *     Each flagged row renders its OWN resolved per-tool threshold (bloatThresholdFor) as the KB value.
  *   - The suggestion names rows[0].label (the largest). OMITTED when filtered is empty (→ "No messages …").
  */
 export function renderAuditReport(args: {
@@ -384,7 +388,6 @@ export function renderAuditReport(args: {
   shrinks: ShrinkMarker[];
   checkpointNames: string[];
   protectedRoles: string[];
-  thresholdBytes: number;
   rows: AuditRow[];
   filtered: unknown[];
 }): string {
@@ -413,9 +416,8 @@ export function renderAuditReport(args: {
   }
 
   L.push("Top messages by size:");
-  const kb = Math.round(args.thresholdBytes / 1024);
   for (const r of args.rows) {
-    const flag = r.bloaty ? `  ⚠ above bloat threshold (${kb} KB)` : "";
+    const flag = r.bloaty ? `  ⚠ above bloat threshold (${Math.round(r.thresholdBytes / 1024)} KB)` : "";
     L.push(`  ${String(r.tokens).padStart(6)}  ${r.role.padEnd(11)} ${r.label}${flag}`);
   }
 
@@ -517,17 +519,21 @@ async function auditExecute(
     // Top-N rows. `top` defaults to 8 (GOTCHA #8); only the "Top messages" block is truncated.
     const top = typeof params?.top === "number" && params.top > 0 ? Math.floor(params.top) : 8;
     const callLookup = buildCallLookup(filtered);
-    const threshold = config.nudges.bloatThresholdBytes;
     const ranked = filtered
       .map((m) => ({ tokens: estimateTokens([m] as unknown as TokenMessages).tokens, msg: m }))
       .sort((a, b) => b.tokens - a.tokens)
       .slice(0, top);
-    const rows: AuditRow[] = ranked.map(({ tokens, msg }) => ({
-      tokens,
-      role: readStr(msg, "role") ?? "?",
-      label: describeMessage(msg, callLookup),
-      bloaty: messageBytes(msg) > threshold,
-    }));
+    const rows: AuditRow[] = ranked.map(({ tokens, msg }) => {
+      const toolName = readStr(msg, "toolName");
+      const rowThreshold = bloatThresholdFor(toolName, config);
+      return {
+        tokens,
+        role: readStr(msg, "role") ?? "?",
+        label: describeMessage(msg, callLookup),
+        bloaty: messageBytes(msg) > rowThreshold,
+        thresholdBytes: rowThreshold,
+      };
+    });
 
     // (3) Active markers (readMarkers) + checkpoints (scanned separately — GOTCHA #7: readMarkers returns
     //     only custom-entry markers; checkpoints are LabelEntries).
@@ -542,7 +548,6 @@ async function auditExecute(
       shrinks: markers.shrinks as ShrinkMarker[],
       checkpointNames,
       protectedRoles: config.rewind.protectedRoles,
-      thresholdBytes: threshold,
       rows,
       filtered,
     });

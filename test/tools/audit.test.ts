@@ -18,7 +18,7 @@
  *      confidence === "low", report still renders.
  *   c) D5 guard: assert ctx.getContextUsage is NOT in the tracked call list (track calls[] on the fake ctx).
  *   d) top param: {top:2} truncates the "Top messages" block to 2 rows; default (undefined) → 8.
- *   e) bloat flag: a toolResult with bytes > config.nudges.bloatThresholdBytes → "⚠ above bloat threshold (8 KB)".
+ *   e) bloat flag: a toolResult with bytes > config.nudges.bloatThresholdBytes → "⚠ above bloat threshold (16 KB)" (the shipped default).
  *   f) active markers + checkpoints: getEntries() includes rewind/shrink custom entries + checkpoint labels →
  *      "Active markers: 1 rewind (last_tool_call_group), 1 shrink, 2 checkpoints [a, b]".
  *   g) suggestion: names rows[0].label; empty filtered → no suggestion, "No messages in filtered view."
@@ -252,7 +252,7 @@ function shrinkMarkerEntry(seq: number): SessionEntry {
   } as unknown as SessionEntry;
 }
 
-/** A string of ~`kb` KB of ASCII text (1 char = 1 byte), so messageBytes > 8 KB trips the bloat flag. */
+/** A string of ~`kb` KB of ASCII text (1 char = 1 byte), so messageBytes > 16 KB trips the bloat flag (shipped default). */
 function kbText(kb: number): string {
   return "x".repeat(kb * 1024);
 }
@@ -286,7 +286,7 @@ describe("mulligan_audit — registration metadata (spec/05 §5)", () => {
 // ── (a) PRIMARY path: cached rt.lastFiltered — spec/06 §7 ─────────────────────
 
 describe("mulligan_audit — PRIMARY path: cached rt.lastFiltered (spec/06 §7)", () => {
-  beforeEach(() => setConfig({})); // defaults: confidence medium, threshold 8192
+  beforeEach(() => setConfig({})); // defaults: confidence medium, threshold 16384 (16 KB)
 
   it("uses rt.lastFiltered; details.source === 'cached', confidence === 'medium'", async () => {
     const { ctx } = makeCtx();
@@ -411,7 +411,7 @@ describe("mulligan_audit — top param (GOTCHA #8: default 8; truncates only the
   });
 });
 
-// ── (e) bloat flag: toolResult bytes > bloatThresholdBytes (8 KB) ─────────────
+// ── (e) bloat flag: toolResult bytes > bloatThresholdBytes (16 KB shipped default) ─
 
 describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)", () => {
   beforeEach(() => setConfig({}));
@@ -419,11 +419,11 @@ describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)
   it("flags a toolResult whose bytes exceed config.nudges.bloatThresholdBytes", async () => {
     const { ctx } = makeCtx();
     getRuntime("s1").lastFiltered = [
-      toolResult("call-A", "read", kbText(10)), // 10 KB > 8 KB threshold → bloaty
+      toolResult("call-A", "read", kbText(20)), // 20 KB > 16 KB shipped default threshold → bloaty
     ];
     const res = await run(ctx, {});
     expect(res.details.top[0].bloaty).toBe(true);
-    expect(firstText(res)).toContain("⚠ above bloat threshold (8 KB)");
+    expect(firstText(res)).toContain("⚠ above bloat threshold (16 KB)");
   });
 
   it("does NOT flag a small toolResult", async () => {

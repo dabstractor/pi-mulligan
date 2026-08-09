@@ -339,6 +339,43 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
     });
   });
 
+  it("FINDING 3: matched → marker.pinnedEntryId === the matched ENTRY id (pinned shrink), per matcher", async () => {
+    // by_tool_call_id → the single matched entry
+    {
+      const e = msgEntry("toolResult", toolResult("call-A", "read", "x"));
+      const { appended, pi } = makePi();
+      const { ctx } = makeCtx({ contextEntries: [e] });
+      await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "s" });
+      expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e as { id: string }).id);
+    }
+    // by_tool_name occurrence:last → the LAST matching entry (the live selector's match is what gets PINNED)
+    {
+      const e1 = msgEntry("toolResult", toolResult("c1", "read", "first"));
+      const e2 = msgEntry("toolResult", toolResult("c2", "read", "second"));
+      const { appended, pi } = makePi();
+      const { ctx } = makeCtx({ contextEntries: [e1, e2] });
+      await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "last" }, replacement: "s" });
+      expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e2 as { id: string }).id); // LAST
+    }
+    // by_tool_name occurrence:first → the FIRST matching entry
+    {
+      const e1 = msgEntry("toolResult", toolResult("c1", "read", "first"));
+      const e2 = msgEntry("toolResult", toolResult("c2", "read", "second"));
+      const { appended, pi } = makePi();
+      const { ctx } = makeCtx({ contextEntries: [e1, e2] });
+      await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "first" }, replacement: "s" });
+      expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e1 as { id: string }).id); // FIRST
+    }
+    // by_content_includes → the first matching entry
+    {
+      const e = msgEntry("toolResult", toolResult("call-A", "bash", "ENOSPC at /disk"));
+      const { appended, pi } = makePi();
+      const { ctx } = makeCtx({ contextEntries: [e] });
+      await run(pi, ctx, { target: { by_content_includes: "ENOSPC" }, replacement: "s" });
+      expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e as { id: string }).id);
+    }
+  });
+
   it("reason persisted when provided; absent when not", async () => {
     const target = { by_tool_call_id: "call-A" };
     const baseEntries = [msgEntry("toolResult", toolResult("call-A", "read", "x"))];
@@ -399,6 +436,8 @@ describe("mulligan_shrink — no-match-is-NOT-a-refusal + best-effort failure (E
     expect(firstText(res)).toContain("(Matched now: no)");
     expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
     expect(appended).toHaveLength(1); // the marker STILL persists (E8 — retried next inference by the filter)
+    // FINDING 3: no match at creation → NO pinnedEntryId (the filter will fall back to live resolution)
+    expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBeUndefined();
   });
 
   it("by_content_includes no-match: target substring not present → matched:no + STILL persists", async () => {

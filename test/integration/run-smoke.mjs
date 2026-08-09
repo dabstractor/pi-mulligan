@@ -3,14 +3,16 @@
  *
  * For each F-* scenario in SCENARIOS:
  *   1. Set MULLIGAN_SMOKE_LOG to a per-scenario path under a temp dir.
- *   2. Spawn `pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-<scenario>
+ *   2. Spawn `pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-<scenario>-<RUN_ID>
+ *      (RUN_ID is unique per `npm run smoke` invocation — see below — so the session JSONL never accumulates
+ *      prior runs; F-reload/E11 share it across their two spawns WITHIN one run).
  *      -p "/mulligan_smoke <scenario>" -p "Reply with exactly: OK"`.
  *      ─ The FIRST prompt dispatches the deterministic command (sets up markers via the REAL tools).
  *      ─ The SECOND prompt triggers the observing model turn (fires context → the filter runs → smoke logs
  *        context.fire; and the model reply persists the session JSONL for the §2.3 assertions).
  *   3. Parse the smoke JSONL log (the PRIMARY assertion source) +, when available, the session JSONL.
  *   4. Run the scenario's assertion function; print PASS/FAIL.
- *   5. F-reload = TWO spawns sharing --session-id smoke-F-reload.
+ *   5. F-reload = TWO spawns sharing --session-id smoke-F-reload-<RUN_ID>.
  *
  * Exits 0 if all scenarios pass, 1 otherwise. Detects "EXTENSION LOAD FAILED" (non-zero pi exit + empty
  * smoke log → src/index.ts failed to load; GOTCHA #12) distinctly from a scenario-assertion failure.
@@ -47,6 +49,13 @@ const SMOKE_TMP_DIR = join(tmpdir(), "mulligan-smoke");
 mkdirSync(SMOKE_TMP_DIR, { recursive: true });
 const PI_TIMEOUT_MS = 120_000;
 
+// RUN_ID — a per-invocation suffix appended to every scenario's --session-id (FINDING 1 fix). It is stable FOR
+// THE DURATION of one `npm run smoke` (module load) so the two spawns of F-reload/E11 share a session, but UNIQUE
+// across invocations so the session JSONL never accumulates prior runs' seed replies / markers. This makes the
+// suite IDEMPOTENT (re-running `npm run smoke` no longer flakes F-rewind-core / F-checkpoint with false
+// "LEAKED BACK" / "seed LEAKED" failures from unpinned leftover seed replies).
+const RUN_ID = `${process.pid}-${Date.now().toString(36)}`;
+
 // SEED-canary string literals for the deterministic HIDING assertions (P1.M3.T2.S1). MUST be byte-identical to the
 // consts in smoke.ts (GOTCHA #8 — there is no shared module; a mismatch → seed never matches → K=0 → fail).
 const SEED_ANCHOR = "MULLIGAN-SMOKE-SEED-ANCHOR";
@@ -66,7 +75,9 @@ function runPi(scenario, { prompts, extraArgs = [] } = {}) {
   const argv = [
     "-e", "./src/index.ts",
     "-e", "./test/integration/smoke.ts",
-    "--session-id", `smoke-${scenario}`,
+    // Run-scoped session id (RUN_ID): unique per `npm run smoke` invocation → no cross-run JSONL accumulation
+    // (FINDING 1). F-reload/E11 share this id across their two spawns WITHIN one run (reloads reopen it).
+    "--session-id", `smoke-${scenario}-${RUN_ID}`,
     ...ps.flatMap((p) => ["-p", p]),
     ...extraArgs,
   ];
@@ -443,9 +454,9 @@ function assertE15({ smoke, piRes }) {
   const entries = readSessionEntries(smoke.sessionFile);
   if (entries.length > 0) {
     const rewindCount = countCustom(entries, "mulligan:rewind", "rewind");
-    // >= 50 (not ===) for robustness: the stable --session-id reopens the same JSONL across `npm run smoke`
-    // invocations, so prior runs' markers accumulate. The seed asserts exactly 50 THIS run (above); the JSONL
-    // assert proves they persisted (at least 50).
+    // >= 50 (not ===) for robustness: the run-scoped --session-id (RUN_ID) gives a FRESH JSONL per `npm run smoke`
+    // invocation, so the count is exactly 50 this run; >= 50 stays tolerant of any later in-run seeding variance.
+    // The seed asserts exactly 50 THIS run (above); the JSONL assert proves they persisted (at least 50).
     assert(results, "JSONL has ≥50 mulligan:rewind markers", rewindCount >= 50, `${rewindCount} found`);
     assertGlobalInvariants(results, entries);
   }

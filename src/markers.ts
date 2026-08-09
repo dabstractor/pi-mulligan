@@ -111,6 +111,16 @@ export interface ShrinkMarker extends MulliganEnvelope {
   replacement: string;
   /** Optional reason, surfaced in audit. */
   reason?: string;
+  /**
+   * Stable ENTRY id of the message the target matched at marker-creation time (FINDING 3 fix — pinned shrink).
+   * When present, the filter resolves the target by IDENTITY (resolvePinnedShrink) instead of re-resolving the
+   * selector live each inference. This locks the substitution to ONE message forever, so `by_tool_name`+`last` /
+   * `by_content_includes` no longer drift onto later, unrelated messages as the session grows (the moving-target
+   * footgun). Mirrors RewindMarker.hideEntryIds. Absent when the target did not match at creation time (then the
+   * filter falls back to live resolution — backward compat / compaction-robust). Holds an ENTRY id (stable), NOT a
+   * message index. OPTIONAL.
+   */
+  pinnedEntryId?: string;
   seq: number;
   ts: number;
 }

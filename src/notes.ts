@@ -272,7 +272,7 @@ export interface DriftNudgeInput {
  *
  * @param _toolName       the tool that produced the result (ACCEPTED, NOT used in v1 text; reserved for future use)
  * @param bytes           the result's UTF-8 byte size (from resultBytes — spec/07 §1)
- * @param thresholdBytes  the configured bloat threshold in bytes (config.nudges.bloatThresholdBytes, default 8192)
+ * @param thresholdBytes  the configured bloat threshold in bytes (config.nudges.bloatThresholdBytes, default 16384)
  * @returns the reminder string (leading "\n---\n" + 4-line body; NO trailing newline)
  */
 export function renderBloatReminder(

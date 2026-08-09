@@ -144,6 +144,8 @@ function applyShrink(messages: AgentMessage[], marker: ShrinkMarker): AgentMessa
 }
 ```
 
+**Pinned shrinks (FINDING 3).** `applyShrink` resolves the target **pinned-first**: when the marker carries a `pinnedEntryId` (the stable ENTRY id the target matched at marker-creation time — recorded by the tool), it resolves that id by **identity** via `resolvePinnedShrink(messages, branchEntries, pinnedEntryId)` (the single-id counterpart of `resolvePinnedHide`), NOT the live selector. This locks the substitution to ONE message forever, so `by_tool_name`+`last` and `by_content_includes` can no longer drift onto a later, unrelated message that merely happens to match (the moving-target footgun). If the pinned entry is no longer present (compaction), the shrink no-ops that inference rather than re-resolving the selector — identity-or-nothing, mirroring the rewind `hideEntryIds` precedent. `by_tool_call_id` is already stable, so pinning is a harmless no-op there. Markers without a `pinnedEntryId` (old markers, or a target that did not match at creation) fall back to the live `resolveShrinkTarget` above (compaction-robust as before).
+
 **Multiple shrinks on the same target:** applied in seq order, so the last one wins (its replacement is what's seen). **Shrink after rewind:** if a rewind already removed the target message, the shrink no-ops (resolve returns null) — harmless.
 
 **Pairing:** shrink preserves `toolCallId`/`role`, so pairing is untouched. Safe.

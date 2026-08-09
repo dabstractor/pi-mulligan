@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, resolvePinnedShrink, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -1161,6 +1161,50 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     expect(msgs.map((m) => m.role)).toEqual(snapshot.map((m) => m.role));
   });
 
+  // ── PINNED shrinks (FINDING 3 — identity resolution beats the live selector; no moving-target drift) ──
+
+  it("PINNED: pinnedEntryId substitutes by IDENTITY, ignoring the live selector (FINDING 3 — the moving-target fix)", () => {
+    // marker SAYS by_tool_name:"read",occurrence:"last" (which would LIVE-match the NEW read at idx 4) but is
+    // PINNED to e_old (the EARLIER read at idx 2). applyShrink must substitute idx 2, NOT idx 4.
+    const readOld: MessageLike = { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD READ" }] };
+    const readNew: MessageLike = { ...result("c2"), toolName: "read", content: [{ type: "text", text: "NEW READ" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c1"), readOld, asst("c2"), readNew];
+    const branch: BranchEntry[] = [
+      entry("e_u", "message"), entry("e_a1", "message"), entry("e_old", "message"),
+      entry("e_a2", "message"), entry("e_new", "message"),
+    ];
+    const out = applyShrink(
+      msgs,
+      { target: { by_tool_name: "read", occurrence: "last" }, replacement: "[shrunk]", pinnedEntryId: "e_old" },
+      branch,
+    );
+    expect(textOf(out[2])).toBe("[shrunk]"); // OLD read (pinned e_old) substituted
+    expect(out[2].toolCallId).toBe("c1");    // pairing preserved
+    expect(textOf(out[4])).toBe("NEW READ"); // NEW read UNTOUCHED (did NOT drift to the live "last" match)
+    expect(out[4]).toBe(msgs[4]);            // by reference — never even read
+  });
+
+  it("PINNED: pinnedEntryId absent from branch (compacted away) → no-op, SAME reference (identity-or-nothing; NO live fallback)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), { ...result("c"), toolName: "read", content: [{ type: "text", text: "X" }] }];
+    const branch: BranchEntry[] = [entry("e_u", "message"), entry("e_a", "message"), entry("e_gone", "message")];
+    // pinned to "e_missing" (not in branch) — must NOT fall back to the live by_tool_name:"read":last match at idx2
+    expect(applyShrink(msgs, { target: { by_tool_name: "read", occurrence: "last" }, replacement: "Z", pinnedEntryId: "e_missing" }, branch)).toBe(msgs);
+  });
+
+  it("PINNED: no branchEntries passed → no-op, SAME reference (cannot resolve by identity)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), { ...result("c"), toolName: "read", content: [{ type: "text", text: "X" }] }];
+    expect(applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "Z", pinnedEntryId: "e1" })).toBe(msgs);
+  });
+
+  it("UNPINNED (no pinnedEntryId) → LIVE resolution as before (backward compat — old markers / capture failure)", () => {
+    // No pinnedEntryId → live by_tool_name:"read",occurrence:"last" → matches the LAST read (idx 2). Backward compat.
+    const msgs: MessageLike[] = [
+      user("u"), asst("c1"), { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD" }] },
+    ];
+    const out = applyShrink(msgs, { target: { by_tool_name: "read", occurrence: "last" }, replacement: "[s]" });
+    expect(textOf(out[2])).toBe("[s]");
+  });
+
   it("returns MessageLike[] (resolveShrinkTarget returns number | null)", () => {
     expectTypeOf(applyShrink([], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(applyShrink([user("u")], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
@@ -1177,8 +1221,8 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
     return { seq, granularity, ...extra };
   }
   /** Build a ShrinkMarkerLike. */
-  function mkShrink(seq: number, target: ShrinkTarget, replacement: string): ShrinkMarkerLike {
-    return { seq, target, replacement };
+  function mkShrink(seq: number, target: ShrinkTarget, replacement: string, extra: Partial<ShrinkMarkerLike> = {}): ShrinkMarkerLike {
+    return { seq, target, replacement, ...extra };
   }
   /** Read the first text block's text from a message (for shrink-content assertions). */
   function textOf(m: MessageLike): string {
@@ -1358,6 +1402,40 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
       // iTarget = 1 (the checkpointed message "keep"); remove = indices > 1 → [2,3]. Result = [u0, keep].
       expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
       expect((out[1].content as unknown as { text: string }[])[0].text).toBe("keep");
+    });
+
+    it("FINDING 3 — PINNED shrink does NOT drift to a new later message as the session grows (moving-target fix at the pipeline level)", () => {
+      // A by_tool_name:"read",occurrence:"last" shrink PINNED to e_old. The session then grew with a NEW read
+      // (e_new at idx 4). filterPipeline must substitute ONLY e_old (idx 2); e_new stays verbatim. Pre-fix this
+      // clobbered e_new (the live "last" match) — exactly the moving-target footgun FINDING 3 closes.
+      const readOld: MessageLike = { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD READ" }] };
+      const readNew: MessageLike = { ...result("c2"), toolName: "read", content: [{ type: "text", text: "NEW READ" }] };
+      const msgs: MessageLike[] = [user("u"), asst("c1"), readOld, asst("c2"), readNew];
+      const branchEntries: BranchEntry[] = [
+        entry("e_u", "message"), entry("e_a1", "message"), entry("e_old", "message"),
+        entry("e_a2", "message"), entry("e_new", "message"),
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[shrunk]", { pinnedEntryId: "e_old" })],
+      };
+      const out = filterPipeline(msgs, markers, cfg, branchEntries);
+      expect(textOf(out[2])).toBe("[shrunk]"); // OLD read (pinned) substituted
+      expect(out[2].toolCallId).toBe("c1");
+      expect(textOf(out[4])).toBe("NEW READ"); // NEW read UNTOUCHED — no drift
+    });
+
+    it("FINDING 3 — UNPINNED shrink (no pinnedEntryId) still LIVE-resolves (backward compat: old markers)", () => {
+      // An old-style shrink without pinnedEntryId → live by_tool_name:"read":last → matches the LAST read (idx 2).
+      const msgs: MessageLike[] = [
+        user("u"), asst("c1"), { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD" }] },
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[s]")],
+      };
+      const out = filterPipeline(msgs, markers, cfg, []);
+      expect(textOf(out[2])).toBe("[s]");
     });
 
     it("defensive: no markers → SAME reference; non-array messages → []; non-record markers → pass-through", () => {
@@ -1646,6 +1724,65 @@ describe("resolvePinnedHide — types (fix_design.md §Change 3)", () => {
     const branch: BranchEntry[] = [{ type: "message", id: "e1", parentId: null, timestamp: "t" }];
     const hide: string[] = ["e1"];
     expectTypeOf(resolvePinnedHide(msgs, branch, hide)).toEqualTypeOf<number[]>();
+  });
+});
+
+// ── resolvePinnedShrink (FINDING 3; the single-id identity resolver for PINNED shrinks; mirrors resolvePinnedHide) ──
+
+describe("resolvePinnedShrink — FINDING 3 PINNED contract (basic / lock / compaction / not-found / defensive / types)", () => {
+  // getBranch() is ROOT→LEAF; each context-producing entry yields exactly 1 message → messages[k] ↔ k-th entry.
+
+  it("(a) basic — pin e2 among 3 message-entries → returns its message index 1", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")]; // idx0 user, idx1 asst, idx2 result
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("e2", "message"), entry("e3", "message"),
+    ];
+    expect(resolvePinnedShrink(msgs, branch, "e2")).toBe(1); // e2 → idx1
+  });
+
+  it("(b) LOCK — pin e1 against a branch with 2 MORE trailing entries → STILL returns 0 (the moving-target fix: identity beats the live selector)", () => {
+    // A by_tool_name:"read",occurrence:"last" shrink pinned to the FIRST read (e1) must keep substituting e1 even
+    // after two NEW reads (e3,e4) are appended — it does NOT drift to the new "last" read. (FINDING 3 core guarantee.)
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1"), asst("c2")]; // 4 msgs; e3,e4 are NEW work
+    const branchGrown: BranchEntry[] = [
+      entry("e1", "message"), entry("e2", "message"), entry("e3", "message"), entry("e4", "message"),
+    ];
+    expect(resolvePinnedShrink(msgs, branchGrown, "e1")).toBe(0); // LOCKED to e1 (idx0), NOT e3/e4
+  });
+
+  it("(c) compaction refusal — a branch containing a compaction entry → null (entryMessageYield === -1 → no-op)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("eC", "compaction"), entry("e2", "message"),
+    ];
+    expect(resolvePinnedShrink(msgs, branch, "e2")).toBeNull(); // alignment INDETERMINATE → no-op (identity-or-nothing)
+  });
+
+  it("(d) not-found — pin an id absent from the branch → null (pinned entry compacted away / wrong branch → no-op, NOT live fallback)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message"), entry("e3", "message")];
+    expect(resolvePinnedShrink(msgs, branch, "nonexistent-id")).toBeNull();
+  });
+
+  it("(e) defensive — non-array messages / branchEntries, or non-string/empty pinnedEntryId → null each", () => {
+    const msgs: MessageLike[] = [user("u")];
+    const branch: BranchEntry[] = [entry("e1", "message")];
+    expect(resolvePinnedShrink("garbage" as unknown as MessageLike[], branch, "e1")).toBeNull();
+    expect(resolvePinnedShrink(msgs, "garbage" as unknown as BranchEntry[], "e1")).toBeNull();
+    expect(resolvePinnedShrink(msgs, branch, "garbage" as unknown as string)).toBeNull();
+    expect(resolvePinnedShrink(null as unknown as MessageLike[], branch, "e1")).toBeNull();
+    expect(resolvePinnedShrink(msgs, null as unknown as BranchEntry[], "e1")).toBeNull();
+    expect(resolvePinnedShrink(msgs, branch, "")).toBeNull(); // empty id → null
+  });
+
+  it("(f) NEVER throws on a throwing-Proxy branch entry (E13)", () => {
+    const msgs: MessageLike[] = [user("u")];
+    const trap = new Proxy({}, { get() { throw new Error("trap"); } }) as unknown as BranchEntry;
+    expect(() => resolvePinnedShrink(msgs, [trap], "e1")).not.toThrow();
+  });
+
+  it("(g) types — returns number | null", () => {
+    expectTypeOf(resolvePinnedShrink([], [], "x")).toEqualTypeOf<number | null>();
   });
 });
 

@@ -178,23 +178,51 @@ function targetIsStructurallyValid(target: ShrinkArgs["target"] | undefined): bo
 }
 
 /**
- * bestEffortMatch — the ADVISORY read-only yes/no match (GOTCHA #5/#6). Builds a SNAPSHOT via
- * `ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)` (NOT event.messages —
- * the tool is write-only w.r.t. messages), feeds it to the PURE resolver `resolveShrinkTarget`
- * (transforms.ts), and returns whether the target matched. ADVISORY ONLY — it NEVER gates persistence (a
- * matched:false STILL persists + returns "(Matched now: no)" — spec/05 §2 step 3; E8). Wrapped in try/catch
- * → false (a throwing buildContextEntries / sessionEntryToContextMessages must never block a legitimate
- * shrink — E13). The AUTHORITATIVE substitution happens in the filter on the next inference (D7).
+ * entryIdAtMessageIndex — map a resolved MESSAGE index back to the STABLE ENTRY id of the entry that produced it
+ * (mirrors captureHideEntryIds in rewind.ts, for a SINGLE index). Walks `entries` with a cursor using the SAME
+ * `entries.flatMap(sessionEntryToContextMessages)` mapping that built `messages` (resolveTargetEntryId, below), so
+ * entry `e` ↔ messages[cursor..cursor+yield) is EXACT BY CONSTRUCTION — no position math. Returns null on no-match /
+ * a non-string/empty entry id (defensive). Called inside resolveTargetEntryId's try/catch → null on throw (E13).
  */
-function bestEffortMatch(ctx: ExtensionContext, target: ShrinkArgs["target"]): boolean {
+function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string | null {
+  if (!Array.isArray(entries) || typeof index !== "number" || !Number.isFinite(index) || index < 0) return null;
+  let cursor = 0;
+  for (const e of entries) {
+    const y = sessionEntryToContextMessages(e).length; // typically 1 (message/custom_message/branch_summary)
+    if (index < cursor + y) {
+      const id = (e as { id?: unknown }).id; // SessionEntryBase.id is a stable string; guard rejects empty/non-string
+      return typeof id === "string" && id.length > 0 ? id : null;
+    }
+    cursor += y;
+  }
+  return null;
+}
+
+/**
+ * resolveTargetEntryId — the ADVISORY read-only match that ALSO captures the matched message's STABLE ENTRY id
+ * (FINDING 3 fix; supersedes the old boolean bestEffortMatch). It builds a SNAPSHOT via
+ * `ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)` (NOT event.messages — the tool
+ * is write-only w.r.t. messages), feeds it to the PURE resolver `resolveShrinkTarget` (transforms.ts), and — on a
+ * match — maps the resolved MESSAGE index back to its ENTRY id via entryIdAtMessageIndex. Returns null on no-match.
+ *
+ * The captured ENTRY id becomes the marker's `pinnedEntryId`: at filter time applyShrink resolves it by IDENTITY
+ * (resolvePinnedShrink) instead of re-resolving the live selector, so by_tool_name+last / by_content_includes can no
+ * longer drift onto later messages as the session grows (the moving-target footgun). ADVISORY ONLY — a null return
+ * STILL persists the marker (live-resolution path; E8) and NEVER gates persistence. Wrapped in try/catch → null
+ * (a throwing buildContextEntries / sessionEntryToContextMessages must never block a legitimate shrink — E13). The
+ * AUTHORITATIVE substitution happens in the filter on the next inference (D7).
+ */
+function resolveTargetEntryId(ctx: ExtensionContext, target: ShrinkArgs["target"]): string | null {
   try {
     const entries = ctx.sessionManager.buildContextEntries(); // GOTCHA #5: snapshot, compaction-aware
     // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free
     // structural type — a real AgentMessage[] assigns in with NO cast (GOTCHA #5, api_verification.md §6.1/§6.3).
     const messages = entries.flatMap((e) => sessionEntryToContextMessages(e)) as unknown as MessageLike[];
-    return resolveShrinkTarget(messages, target as ShrinkTarget) !== null; // PURE resolver (transforms.ts)
+    const i = resolveShrinkTarget(messages, target as ShrinkTarget); // PURE resolver (transforms.ts)
+    if (i === null) return null;
+    return entryIdAtMessageIndex(entries, i); // map message index → stable ENTRY id (null on misalignment)
   } catch {
-    return false; // GOTCHA #6: never block a legitimate shrink on an advisory computation (E13)
+    return null; // GOTCHA #6: never block a legitimate shrink on an advisory computation (E13)
   }
 }
 
@@ -242,20 +270,27 @@ async function shrinkExecute(
     //     A non-empty-but-currently-unmatched target is NOT refused here (that is advisory feedback, step 3/4).
     if (!targetIsStructurallyValid(params?.target)) return refusal("target discriminator must be non-empty");
 
-    // (3/4) best-effort yes/no match (spec/05 §2 step 3 — ADVISORY; never blocks persistence — GOTCHA #6).
-    //       Inner try/catch is belt-and-suspenders (bestEffortMatch already catches → false — E13).
-    let matched: boolean;
+    // (3/4) best-effort yes/no match + PIN the matched entry id (spec/05 §2 step 3 — ADVISORY; never blocks
+    //       persistence — GOTCHA #6). resolveTargetEntryId returns the stable ENTRY id of the matched message
+    //       (or null). matched = (entryId !== null); the ENTRY id becomes the marker's pinnedEntryId so applyShrink
+    //       resolves by identity at filter time (FINDING 3 fix — no moving-target drift). Inner try/catch is
+    //       belt-and-suspenders (resolveTargetEntryId already catches → null — E13).
+    let entryId: string | null;
     try {
-      matched = bestEffortMatch(ctx, params.target);
+      entryId = resolveTargetEntryId(ctx, params.target);
     } catch {
-      matched = false;
+      entryId = null;
     }
+    const matched = entryId !== null;
 
     // (5) persist (spec/05 §2 step 4; GOTCHA #1 — NO cast, NO leaveNote; ShrinkMarkerInput matches EXACTLY).
+    //     pinnedEntryId is included ONLY when the target matched at creation (absent → the filter falls back to live
+    //     resolution — backward compat / compaction-robust). A non-matching target STILL persists (E8).
     const markerId = appendShrinkMarker(pi, ctx, {
       target: params.target,
       replacement: params.replacement,
       reason: params.reason,
+      ...(entryId ? { pinnedEntryId: entryId } : {}),
     } satisfies ShrinkMarkerInput);
 
     // (6) return (spec/05 §2 step 5) — feedback text (yes/no from the best-effort match) + details.
