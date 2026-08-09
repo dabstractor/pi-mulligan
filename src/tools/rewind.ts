@@ -502,6 +502,14 @@ async function rewindExecute(
     //     all three apply; first refusal wins. computeFilteredTotal is fail-open (returns {0,0} on any throw);
     //     the windowTokens > 0 check IS the fail-open (no model / undefined usage [E12] / throw → SKIP, never
     //     block a rewind — E13). D5: the total is the FILTERED view, NOT getContextUsage().tokens.
+    //
+    //     KNOWN ONE-TURN LAG: computeFilteredTotal reads the LAST context-fire's filtered view (snapshot
+    //     handed to the previous assistant turn), which EXCLUDES the current turn's just-produced tool
+    //     results. So in the exact re-bloat loop this guard targets — a spin that produces fresh large
+    //     results each turn — the total it compares is one turn stale and may not yet exceed the fraction.
+    //     This is spec-consistent (the current turn's results are not filtered-view-visible until the next
+    //     context fire) and the per-prompt retry budget (4b) catches repeated rewinds at the same prompt as
+    //     a complementary backstop; documented here so future maintainers don't mistake the lag for a bug.
     const { totalTokens, windowTokens } = computeFilteredTotal(ctx);
     if (windowTokens > 0 && totalTokens / windowTokens >= config.rewind.abortContextFraction) {
       const pct = Math.round((totalTokens / windowTokens) * 100);

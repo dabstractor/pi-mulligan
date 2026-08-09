@@ -1,0 +1,5 @@
+{
+  "hasIssues": false,
+  "issueCount": 0,
+  "summary": "Both PRD issues fixed (config surface reads settings.json + master-disable switch verified end-to-end; tsc --noEmit clean); 912/912 unit tests + 14/14 integration smoke scenarios pass; no new issues found."
+}
