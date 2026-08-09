@@ -12,7 +12,7 @@ Every persisted `CustomEntry` written by Mulligan includes a `v` (schema version
 interface MulliganEnvelope {
   schema: "pi-mulligan";
   v: 1;
-  kind: "rewind" | "shrink" | "turn-metric";
+  kind: "rewind" | "shrink" | "turn-metric" | "cancel";
   // ...kind-specific fields...
 }
 ```
@@ -24,6 +24,7 @@ All `customType` strings are namespaced under `mulligan:`. The `customType` is t
 | `mulligan:rewind` | `custom` | `"rewind"` | no |
 | `mulligan:shrink` | `custom` | `"shrink"` | no |
 | `mulligan:turn-metric` | `custom` | `"turn-metric"` | no |
+| `mulligan:cancel` | `custom` | `"cancel"` | no |
 | `mulligan:note` | `custom_message` | (n/a — it's a message) | **yes** |
 | (checkpoint) | `label` | (n/a) | no |
 
@@ -208,6 +209,27 @@ interface TurnMetric extends MulliganEnvelope {
 ```
 
 Because `turn_end` does not receive the message list, `deltaTokens` is computed from the **in-memory token baseline** (captured at `turn_start`/previous `turn_end`) compared to an estimate at `turn_end`. This is inherently approximate; the nudge is advisory, so approximation is acceptable. The baseline is keyed per-session in a module-scoped map, reset on `session_start`. If the baseline is missing (e.g. first turn, or post-reload), `deltaTokens` is `null` and the nudge falls back to `bloatHit`-only signaling.
+
+## 5½. Marker: cancel (marker retraction)
+
+Stored via `pi.appendEntry("mulligan:cancel", data)`. This is the foundational data model for **G3 / marker retraction** (spec `@08-edge-cases.md` E21), which amends decision D6 ("agent rewinds are permanent"): a mistaken `mulligan:rewind` / `mulligan:shrink` is no longer irrevocable — it becomes retractable. The `data`:
+
+```ts
+interface CancelMarker extends MulliganEnvelope {
+  kind: "cancel";
+  /** The uuid `id` field of the rewind/shrink marker being cancelled
+   *  (RewindMarker.id / ShrinkMarker.id) — NOT the Pi entry id. */
+  targetId: string;
+  seq: number;   // monotonic per-session counter (shared with rewind/shrink/turn-metric)
+  ts: number;    // Date.now() at append
+}
+```
+
+**No `id` field** (like `TurnMetric` in §5 — a cancel is not itself cancellable), so `appendCancelMarker` stamps NO uuid.
+
+**`targetId` semantics.** `targetId` holds the **uuid `id` field** of the rewind/shrink marker being cancelled (`RewindMarker.id` / `ShrinkMarker.id`), NOT the Pi entry id. The cancel tool (P3.M1.T3.S1) is responsible for validating that `targetId` exists on the branch; the persistence wrapper does not.
+
+**Retraction semantics** (applied downstream by `readMarkers`, P3.M1.T2.S1): the filter collects all `mulligan:cancel` entries, builds a `cancelledIds: Set<string>` from their `data.targetId` values, and drops any rewind/shrink whose `data.id` is in that set — **before** the filter sees them. This suppresses the cancelled marker going forward only. It does **not** undo on-disk side effects already caused by the rewind/shrink (D1/E5), nor does it replay any hidden content. See `@08-edge-cases.md` E21 for the full retraction contract.
 
 ## 6. Checkpoint
 

@@ -9,10 +9,10 @@
  *   markers. It is thin glue: it wraps pi.appendEntry, captures the new marker's entry id immediately after (C7),
  *   and increments the per-session seq via runtime.ts nextSeq(). The pure helpers (transforms/tokens/ledger/notes)
  *   consume NOTHING from here; the consumers are tools/* (P1.M5) and nudges.ts (P1.M6).
- * - Three wrappers: appendRewindMarker, appendShrinkMarker, appendTurnMetric. Each stamps the versioned envelope
- *   {schema:'pi-mulligan', v:1, kind} + a monotonic per-session seq + ts onto the caller's marker payload, appends
- *   it, and returns the NEW marker's entry id (or null). Rewind + shrink also stamp an `id` (uuid); turn-metric
- *   does NOT (spec/04 §5 has no id — GOTCHA #4).
+ * - Four wrappers: appendRewindMarker, appendShrinkMarker, appendTurnMetric, appendCancelMarker. Each stamps the
+ *   versioned envelope {schema:'pi-mulligan', v:1, kind} + a monotonic per-session seq + ts onto the caller's marker
+ *   payload, appends it, and returns the NEW marker's entry id (or null). Rewind + shrink also stamp an `id` (uuid);
+ *   turn-metric + cancel do NOT (spec/04 §5/§5½ have no id — GOTCHA #4).
  * - NEVER throws (fail-open discipline; markers.ts sits on the tool/event hot path). Each whole body is wrapped in
  *   try/catch → returns null on ANY failure (appendEntry throws, getLeafId throws/returns null, etc.).
  *
@@ -37,7 +37,7 @@ import type { NoteInput } from "./notes.js";
 export interface MulliganEnvelope {
   schema: "pi-mulligan";
   v: 1;
-  kind: "rewind" | "shrink" | "turn-metric";
+  kind: "rewind" | "shrink" | "turn-metric" | "cancel";
 }
 
 // ── Marker: rewind (spec/04-data-model.md §3) ───────────────────────────────
@@ -155,6 +155,32 @@ export interface TurnMetric extends MulliganEnvelope {
 /** TurnMetricInput — caller payload for appendTurnMetric (spec/04 §5 MINUS envelope + seq + ts; NO id — GOTCHA #4). */
 export type TurnMetricInput = Omit<TurnMetric, "schema" | "v" | "kind" | "seq" | "ts">;
 
+// ── Marker: cancel (spec/04-data-model.md §5½) ───────────────────────────────
+
+/**
+ * CancelMarker — persisted via pi.appendEntry("mulligan:cancel", data) (spec/04 §5½; G3 / marker retraction,
+ * amends D6 "agent rewinds are permanent"). `kind` narrows to "cancel". `targetId` is the uuid `id` field of the
+ * rewind/shrink marker being cancelled (RewindMarker.id / ShrinkMarker.id) — NOT the Pi entry id. readMarkers
+ * (P3.M1.T2.S1) builds cancelledIds from all cancel targetIds and drops rewinds/shrinks whose data.id ∈ that set
+ * BEFORE the filter sees them. NOTE (GOTCHA #4 applied to a second marker type): CancelMarker has NO `id` field
+ * (like TurnMetric) — a cancel is not itself cancellable, so appendCancelMarker stamps NO uuid. EXPORTED for the
+ * cancel tool (P3.M1.T3.S1) + the filter + audit + tests.
+ */
+export interface CancelMarker extends MulliganEnvelope {
+  kind: "cancel";
+  /** The uuid `id` field of the rewind/shrink marker being cancelled (NOT the entry id). readMarkers drops markers
+   *  whose data.id ∈ the set of cancel targetIds. */
+  targetId: string;
+  /** Monotonic per-session counter (runtime.ts nextSeq), shared with rewind/shrink/turn-metric. */
+  seq: number;
+  /** Date.now() at append. */
+  ts: number;
+}
+
+/** CancelMarkerInput — caller payload for appendCancelMarker (spec/04 §5½ MINUS envelope + seq + ts; NO id — GOTCHA #4).
+ *  Equals exactly { targetId: string }. */
+export type CancelMarkerInput = Omit<CancelMarker, "schema" | "v" | "kind" | "seq" | "ts">;
+
 // ── Wrappers (Pi appendEntry + leaf-id capture + seq stamp) ──────────────────
 
 /**
@@ -255,6 +281,54 @@ export function appendTurnMetric(
     return ctx.sessionManager.getLeafId();
   } catch {
     return null;
+  }
+}
+
+/**
+ * appendCancelMarker — persist a cancel marker, return its new entry id (or null). kind "cancel", customType
+ * "mulligan:cancel". Same shape/contract as appendShrinkMarker EXCEPT (GOTCHA #4 applied to a second marker type):
+ * this wrapper does NOT stamp an `id: randomUUID()` line — CancelMarker has no id field (a cancel is not itself
+ * cancellable; mirror appendTurnMetric, not appendRewindMarker/appendShrinkMarker). The payload is exactly
+ * { targetId } where targetId is the uuid `id` field of the rewind/shrink being cancelled (NOT the entry id).
+ *
+ * STEPS (spec/02 C7; the item contract):
+ *   1. sessionId = ctx.sessionManager.getSessionId()  — read FRESH each call (C12; GOTCHA #10).
+ *   2. seq = nextSeq(sessionId)                        — monotonic per-session counter (shared with rewind/shrink/turn-metric).
+ *   3. Build the entry: { ...data, schema, v:1, kind:"cancel", seq, ts: Date.now() }.
+ *   4. pi.appendEntry("mulligan:cancel", entry)         — appends a CustomEntry (NOT in LLM context). Returns void (C7).
+ *   5. IMMEDIATELY (same synchronous tick, before any other append — C7/GOTCHA #5): return ctx.sessionManager.getLeafId().
+ *
+ * NEVER throws: the whole body is wrapped in try/catch → returns null on ANY failure (appendEntry throws,
+ * getSessionId/getLeafId throw, or getLeafId returns null). The wrapper does NOT validate that targetId exists on
+ * the branch — that is the mulligan_cancel tool's job (P3.M1.T3.S1); this wrapper is dumb persistence. Writes
+ * through `pi`; reads through `ctx.sessionManager` (C1). Consumed by the cancel tool (P3.M1.T3.S1).
+ *
+ * @param pi   the Pi ExtensionAPI (appendEntry lives here, not on ctx — spec/02 C1/C9).
+ * @param ctx  the Pi ExtensionContext (sessionManager is ReadonlySessionManager — read-only; spec/02 C1).
+ * @param data the cancel payload ({ targetId } — the uuid id of the rewind/shrink being cancelled).
+ * @returns the new marker's entry id, or null on failure / when the session has no leaf.
+ */
+export function appendCancelMarker(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  data: CancelMarkerInput,
+): string | null {
+  try {
+    const sessionId = ctx.sessionManager.getSessionId();
+    const seq = nextSeq(sessionId);
+    const entry: CancelMarker = {
+      ...data,
+      schema: "pi-mulligan",
+      v: 1,
+      kind: "cancel",
+      seq,
+      ts: Date.now(),
+    };
+    pi.appendEntry("mulligan:cancel", entry);
+    // C7: appendEntry returns void — capture the new leaf id IMMEDIATELY, before any other append.
+    return ctx.sessionManager.getLeafId();
+  } catch {
+    return null; // never throw on the tool/event hot path (E13)
   }
 }
 

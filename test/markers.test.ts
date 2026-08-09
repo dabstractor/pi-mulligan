@@ -3,6 +3,7 @@ import {
   appendRewindMarker,
   appendShrinkMarker,
   appendTurnMetric,
+  appendCancelMarker,
   leaveNote,
   setCheckpoint,
   type MulliganEnvelope,
@@ -13,6 +14,8 @@ import {
   type ShrinkTarget,
   type TurnMetric,
   type TurnMetricInput,
+  type CancelMarker,
+  type CancelMarkerInput,
   type NoteDetails,
   type SetCheckpointResult,
 } from "../src/markers.js";
@@ -141,6 +144,8 @@ const METRIC_DATA: TurnMetricInput = {
   turnIndex: 3,
 };
 
+const CANCEL_DATA: CancelMarkerInput = { targetId: "target-uuid-123" };
+
 // ── envelope + customType + seq + ts stamping ────────────────────────────────
 
 describe("appendRewindMarker — envelope + customType + seq + ts stamping (spec/04 §1/§3, spec/05 §1 step6)", () => {
@@ -214,6 +219,33 @@ describe("appendTurnMetric — envelope + customType + payload (spec/04 §5)", (
   });
 });
 
+describe("appendCancelMarker — envelope + customType + payload (spec/04 §5½; G3 marker retraction)", () => {
+  it("calls pi.appendEntry once with customType 'mulligan:cancel', kind 'cancel', returns leaf id", () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx();
+    const id = appendCancelMarker(pi, ctx, CANCEL_DATA);
+    expect(appended).toHaveLength(1);
+    expect(appended[0].customType).toBe("mulligan:cancel");
+    const entry = appended[0].data as CancelMarker;
+    expect(entry.schema).toBe("pi-mulligan");
+    expect(entry.v).toBe(1);
+    expect(entry.kind).toBe("cancel");
+    expect(entry.targetId).toBe("target-uuid-123"); // carried verbatim from the input payload
+    expect(entry.seq).toBe(1); // first marker this session → seq 1 (nextSeq pre-increment)
+    expect(typeof entry.ts).toBe("number");
+    expect(entry.ts).toBeLessThanOrEqual(Date.now());
+    expect(id).toBe("leaf-1");
+  });
+
+  it("spreads the caller payload verbatim (targetId is the uuid id of the cancelled marker, NOT the entry id)", () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx();
+    appendCancelMarker(pi, ctx, { targetId: "uuid-of-rewind-being-cancelled" });
+    const entry = appended[0].data as CancelMarker;
+    expect(entry.targetId).toBe("uuid-of-rewind-being-cancelled");
+  });
+});
+
 // ── id rules (GOTCHA #4): rewind+shrink stamp a uuid; turn-metric stamps NONE ─
 
 describe("id stamping — rewind+shrink get a uuid; turn-metric gets NONE (spec/04 §3/§4/§5, GOTCHA #4)", () => {
@@ -246,6 +278,16 @@ describe("id stamping — rewind+shrink get a uuid; turn-metric gets NONE (spec/
     expect(entry.kind).toBe("turn-metric");
   });
 
+  it("appendCancelMarker does NOT stamp an `id` (spec/04 §5½ has no id field — a cancel is not itself cancellable)", () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx();
+    appendCancelMarker(pi, ctx, CANCEL_DATA);
+    const entry = appended[0].data as Record<string, unknown>;
+    expect(entry).not.toHaveProperty("id"); // GOTCHA #4 — mirror of TurnMetric, NOT ShrinkMarker
+    expect(entry.kind).toBe("cancel");
+    expect(entry).toHaveProperty("targetId", "target-uuid-123");
+  });
+
   it("two rewind markers get DISTINCT ids", () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx();
@@ -260,15 +302,26 @@ describe("id stamping — rewind+shrink get a uuid; turn-metric gets NONE (spec/
 // ── seq monotonic per session (nextSeq) ──────────────────────────────────────
 
 describe("seq — monotonic per session, stamped before append (spec/04 §3 seq; runtime.ts nextSeq)", () => {
-  it("seq increments across marker types within ONE session: rewind 1, shrink 2, turn-metric 3", () => {
+  it("seq increments across marker types within ONE session: rewind 1, shrink 2, turn-metric 3, cancel 4", () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1" });
     appendRewindMarker(pi, ctx, REWIND_DATA);
     appendShrinkMarker(pi, ctx, SHRINK_DATA);
     appendTurnMetric(pi, ctx, METRIC_DATA);
+    appendCancelMarker(pi, ctx, CANCEL_DATA);
     expect((appended[0].data as RewindMarker).seq).toBe(1);
     expect((appended[1].data as ShrinkMarker).seq).toBe(2);
     expect((appended[2].data as TurnMetric).seq).toBe(3);
+    expect((appended[3].data as CancelMarker).seq).toBe(4);
+  });
+
+  it("cancel participates in the shared per-session nextSeq sequence: rewind 1, cancel 2", () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ sessionId: "s1" });
+    appendRewindMarker(pi, ctx, REWIND_DATA); // seq 1
+    appendCancelMarker(pi, ctx, CANCEL_DATA); // seq 2 (shared counter — proves cancel is NOT isolated)
+    expect((appended[0].data as RewindMarker).seq).toBe(1);
+    expect((appended[1].data as CancelMarker).seq).toBe(2);
   });
 
   it("seq is ISOLATED per session — a second session starts at 1 (nextSeq contract)", () => {
@@ -339,11 +392,12 @@ describe("leaf-null return — getLeafId() returns null → wrapper returns null
     expect(appended).toHaveLength(1); // the marker WAS appended; we just can't report its id
   });
 
-  it("all three wrappers return null when getLeafId() is null", () => {
+  it("all four wrappers return null when getLeafId() is null", () => {
     const { pi } = makePi();
     expect(appendRewindMarker(pi, makeCtx({ leafId: null }).ctx, REWIND_DATA)).toBeNull();
     expect(appendShrinkMarker(pi, makeCtx({ leafId: null }).ctx, SHRINK_DATA)).toBeNull();
     expect(appendTurnMetric(pi, makeCtx({ leafId: null }).ctx, METRIC_DATA)).toBeNull();
+    expect(appendCancelMarker(pi, makeCtx({ leafId: null }).ctx, CANCEL_DATA)).toBeNull();
   });
 });
 
@@ -375,6 +429,27 @@ describe("never throws — every failure mode yields null (GOTCHA #3)", () => {
     expect(() => appendTurnMetric(pi, ctx, METRIC_DATA)).not.toThrow();
     expect(appendTurnMetric(pi, ctx, METRIC_DATA)).toBeNull();
   });
+
+  it("appendCancelMarker returns null and does not throw when appendEntry throws (E13 fail-open)", () => {
+    const { pi } = makePi({ throwOnAppend: true });
+    const { ctx } = makeCtx();
+    expect(() => appendCancelMarker(pi, ctx, CANCEL_DATA)).not.toThrow();
+    expect(appendCancelMarker(pi, ctx, CANCEL_DATA)).toBeNull();
+  });
+
+  it("appendCancelMarker returns null and does not throw when getSessionId throws (E13 fail-open)", () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({ throwOnGetSessionId: true });
+    expect(() => appendCancelMarker(pi, ctx, CANCEL_DATA)).not.toThrow();
+    expect(appendCancelMarker(pi, ctx, CANCEL_DATA)).toBeNull();
+  });
+
+  it("appendCancelMarker returns null and does not throw when getLeafId throws (E13 fail-open)", () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({ throwOnGetLeafId: true });
+    expect(() => appendCancelMarker(pi, ctx, CANCEL_DATA)).not.toThrow();
+    expect(appendCancelMarker(pi, ctx, CANCEL_DATA)).toBeNull();
+  });
 });
 
 // ── types ────────────────────────────────────────────────────────────────────
@@ -386,13 +461,14 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(appendRewindMarker(pi, ctx, REWIND_DATA)).toEqualTypeOf<string | null>();
     expectTypeOf(appendShrinkMarker(pi, ctx, SHRINK_DATA)).toEqualTypeOf<string | null>();
     expectTypeOf(appendTurnMetric(pi, ctx, METRIC_DATA)).toEqualTypeOf<string | null>();
+    expectTypeOf(appendCancelMarker(pi, ctx, CANCEL_DATA)).toEqualTypeOf<string | null>();
   });
 
-  it("MulliganEnvelope is { schema:'pi-mulligan'; v:1; kind:'rewind'|'shrink'|'turn-metric' }", () => {
+  it("MulliganEnvelope is { schema:'pi-mulligan'; v:1; kind:'rewind'|'shrink'|'turn-metric'|'cancel' }", () => {
     expectTypeOf<MulliganEnvelope>().toEqualTypeOf<{
       schema: "pi-mulligan";
       v: 1;
-      kind: "rewind" | "shrink" | "turn-metric";
+      kind: "rewind" | "shrink" | "turn-metric" | "cancel";
     }>();
   });
 
@@ -419,6 +495,40 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(m).not.toHaveProperty("id");
     expectTypeOf(m.deltaTokens).toEqualTypeOf<number | null>();
     expectTypeOf(m.kind).toEqualTypeOf<"turn-metric">();
+  });
+
+  it("CancelMarker extends the envelope and narrows kind to 'cancel' (no id field)", () => {
+    const m = {} as CancelMarker;
+    expectTypeOf(m.schema).toEqualTypeOf<"pi-mulligan">();
+    expectTypeOf(m.v).toEqualTypeOf<1>();
+    expectTypeOf(m.kind).toEqualTypeOf<"cancel">();
+    expectTypeOf(m).not.toHaveProperty("id"); // GOTCHA #4 — a cancel is not itself cancellable
+    expectTypeOf(m.targetId).toEqualTypeOf<string>();
+    expectTypeOf(m.seq).toEqualTypeOf<number>();
+    expectTypeOf(m.ts).toEqualTypeOf<number>();
+  });
+
+  it("CancelMarker is assignable to MulliganEnvelope (the union edit in Task 1 makes this compile)", () => {
+    const m: CancelMarker = {
+      schema: "pi-mulligan",
+      v: 1,
+      kind: "cancel",
+      targetId: "t",
+      seq: 1,
+      ts: 0,
+    };
+    expectTypeOf(m).toMatchTypeOf<MulliganEnvelope>();
+  });
+
+  it("CancelMarkerInput equals exactly { targetId: string } (Omit of the wrapper-stamped fields)", () => {
+    expectTypeOf<CancelMarkerInput>().toEqualTypeOf<{ targetId: string }>();
+    const c: CancelMarkerInput = CANCEL_DATA;
+    expectTypeOf(c.targetId).toEqualTypeOf<string>();
+    expectTypeOf(c).not.toHaveProperty("seq");
+    expectTypeOf(c).not.toHaveProperty("ts");
+    expectTypeOf(c).not.toHaveProperty("schema");
+    expectTypeOf(c).not.toHaveProperty("v");
+    expectTypeOf(c).not.toHaveProperty("kind");
   });
 
   it("ShrinkTarget is the 3-arm discriminated union", () => {
