@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResultEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { bloatReminderHandler, registerBloatReminder } from "../src/nudges.js";
-import { setConfig } from "../src/config.js";
+import { bloatReminderHandler, registerBloatReminder, bloatThresholdFor } from "../src/nudges.js";
+import { setConfig, getConfig, DEFAULT_CONFIG } from "../src/config.js";
+import type { MulliganConfig } from "../src/config.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
 import { setLogFile, type LogLine } from "../src/log.js";
 import { approxTokens, type ResultContentBlock } from "../src/tokens.js";
@@ -19,7 +20,8 @@ beforeEach(() => {
   clearAll(); // runtime map reset (mirror runtime.test.ts / markers.test.ts GOTCHA #7)
   // CONFIG RESET: setConfig mutates a MODULE-level cache; a prior test's setConfig({enabled:false}) would leak
   // in and silently disable the nudge. setConfig({}) re-validates from DEFAULT_CONFIG (config.ts is fail-open
-  // → unknown keys dropped, absent fields keep defaults → enabled:true, nudges.bloatReminder:true, threshold 8192).
+  // → unknown keys dropped, absent fields keep defaults → enabled:true, nudges.bloatReminder:true, threshold
+  // 16384 global / read 20480 / bash 32768 (per-tool resolution)).
   setConfig({});
   dir = mkdtempSync(join(tmpdir(), "mulligan-nudges-"));
   file = join(dir, "log.jsonl");
@@ -86,13 +88,19 @@ function readLogLines(): LogLine[] {
 }
 
 // The config gates default to enabled (config.ts DEFAULT_CONFIG: enabled:true, nudges.bloatReminder:true,
-// nudges.bloatThresholdBytes:8192). The over-threshold fixture below is >=8193 bytes.
+// nudges.bloatThresholdBytes:16384, nudges.bloatThresholdBytesByTool:{ bash:32768, read:20480 }). The
+// over-threshold fixture below is 21000 bytes > read's resolved 20480.
 
-/** OVER-THRESHOLD fixture: 9000-byte text → resultBytes=9000>8192; approxTokens=ceil(9000/4)=2250. */
-const OVER_TEXT = "x".repeat(9000);
-const OVER_BYTES = 9000;
-const THRESHOLD = 8192;
-/** UNDER-THRESHOLD fixture: small text → resultBytes well under 8192 → pass-through. */
+// Resolved per-tool thresholds (DEFAULT_CONFIG.nudges.bloatThresholdBytesByTool + global 16384).
+// These are the values bloatThresholdFor(toolName, getConfig()) returns for DEFAULT_CONFIG.
+const READ_THRESHOLD = 20480;   // makeEvent("read", ...) resolves here
+const BASH_THRESHOLD = 32768;   // makeEvent("bash", ...) resolves here
+const GLOBAL_THRESHOLD = 16384; // makeEvent("grep"/"unknown", ...) and undefined/"" resolve here
+/** OVER-THRESHOLD fixture for read-tool tests: 21000 > READ_THRESHOLD (20480) → over.
+ *  approxTokens = ceil(21000/4) = 5250. (For the grep bloat-hit test, 21000 > GLOBAL 16384 → over too.) */
+const OVER_TEXT = "x".repeat(21000);
+const OVER_BYTES = 21000;
+/** UNDER-THRESHOLD fixture: 5 bytes < any threshold → pass-through. */
 const UNDER_TEXT = "small";
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
@@ -118,6 +126,53 @@ describe("registerBloatReminder — arms pi.on('tool_result', bloatReminderHandl
     const res = h(event, makeCtx({ sessionId: "reg" }));
     expect(res).toBeDefined();
     expect(getRuntime("reg").pendingBloatHits).toHaveLength(1); // the registered handler IS the bloat handler
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// bloatThresholdFor — per-tool resolution (pure helper)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("bloatThresholdFor — per-tool resolution (spec/07 §1; DEFAULT_CONFIG)", () => {
+  it("resolves known tools to their per-tool override", () => {
+    const config = getConfig(); // DEFAULT_CONFIG after setConfig({}) in beforeEach
+    expect(bloatThresholdFor("bash", config)).toBe(32768);
+    expect(bloatThresholdFor("read", config)).toBe(20480);
+  });
+
+  it("resolves an unknown toolName to the GLOBAL default (16384)", () => {
+    const config = getConfig();
+    expect(bloatThresholdFor("unknown_tool", config)).toBe(16384);
+    expect(bloatThresholdFor("grep", config)).toBe(16384);
+  });
+
+  it("resolves a falsy/missing toolName to the GLOBAL default (16384)", () => {
+    const config = getConfig();
+    expect(bloatThresholdFor(undefined, config)).toBe(16384);
+    expect(bloatThresholdFor("", config)).toBe(16384); // empty string is falsy → global
+  });
+
+  it("falls back to the global when the override map is EMPTY (hand-built config, bypasses validateConfig)", () => {
+    // CRITICAL: setConfig({nudges:{bloatThresholdBytesByTool:{}}}) does NOT produce an empty map —
+    // coerceBloatThresholdByTool MERGES over the DEFAULT_CONFIG fallback ({bash:32768,read:20480}).
+    // So hand-build a literal that bypasses validateConfig entirely (bloatThresholdFor is pure).
+    const emptyMapConfig: MulliganConfig = {
+      ...DEFAULT_CONFIG,
+      nudges: { ...DEFAULT_CONFIG.nudges, bloatThresholdBytesByTool: {} },
+    };
+    expect(bloatThresholdFor("bash", emptyMapConfig)).toBe(16384); // bash not in {} → global
+    expect(bloatThresholdFor("read", emptyMapConfig)).toBe(16384);
+    expect(bloatThresholdFor("unknown_tool", emptyMapConfig)).toBe(16384);
+  });
+
+  it("respects an explicit custom override for a tool", () => {
+    // Same hand-built-literal technique to override a single tool without the merge filling in defaults.
+    const customConfig: MulliganConfig = {
+      ...DEFAULT_CONFIG,
+      nudges: { ...DEFAULT_CONFIG.nudges, bloatThresholdBytesByTool: { bash: 99999 } },
+    };
+    expect(bloatThresholdFor("bash", customConfig)).toBe(99999);
+    expect(bloatThresholdFor("read", customConfig)).toBe(16384); // read not in map → global (NOT 20480)
   });
 });
 
@@ -174,24 +229,24 @@ describe("mulligan_* toolName — skip our own tools (GOTCHA #3)", () => {
 describe("under-threshold result — pass-through, NO append, NO hit", () => {
   it("returns undefined when resultBytes < threshold", () => {
     const ctx = makeCtx({ sessionId: "under" });
-    const event = makeEvent("read", UNDER_TEXT); // 5 bytes < 8192
+    const event = makeEvent("read", UNDER_TEXT); // 5 bytes < 20480
     const res = bloatReminderHandler(event, ctx);
     expect(res).toBeUndefined();
     expect(getRuntime("under").pendingBloatHits).toHaveLength(0);
   });
 
   it("is exactly at the boundary: bytes == threshold is NOT over (strict <)", () => {
-    // resultBytes("y".repeat(8192)) == 8192; the handler returns when bytes < threshold (8192 < 8192 → false),
+    // resultBytes("y".repeat(20480)) == 20480; the handler returns when bytes < threshold (20480 < 20480 → false),
     // so exactly-threshold IS annotated. Confirm the boundary behavior is `<`, not `<=`.
-    const atText = "y".repeat(THRESHOLD); // exactly 8192 bytes
+    const atText = "y".repeat(READ_THRESHOLD); // exactly 20480 bytes (read's resolved threshold)
     const ctx = makeCtx({ sessionId: "boundary" });
     const res = bloatReminderHandler(makeEvent("read", atText), ctx);
-    expect(res).toBeDefined(); // 8192 is NOT < 8192 → over-threshold path → annotated
+    expect(res).toBeDefined(); // 20480 is NOT < 20480 → over-threshold path → annotated
     expect(getRuntime("boundary").pendingBloatHits).toHaveLength(1);
   });
 
   it("one byte under the boundary is pass-through", () => {
-    const justUnder = "z".repeat(THRESHOLD - 1); // 8191 bytes
+    const justUnder = "z".repeat(READ_THRESHOLD - 1); // 20479 bytes (< read's 20480 → pass-through)
     const ctx = makeCtx({ sessionId: "just-under" });
     const res = bloatReminderHandler(makeEvent("read", justUnder), ctx);
     expect(res).toBeUndefined();
@@ -227,7 +282,7 @@ describe("over-threshold result — APPEND reminder + record bloat hit (spec/07 
     const appended = content[content.length - 1];
     expect(appended.type).toBe("text");
     // reuse the COMPLETE helper — the reminder text must equal it byte-for-byte (no reimplementation)
-    expect(appended.text).toBe(renderBloatReminder("read", OVER_BYTES, THRESHOLD));
+    expect(appended.text).toBe(renderBloatReminder("read", OVER_BYTES, READ_THRESHOLD));
   });
 
   it("records a bloat hit {toolName, approxTokens: approxTokens(bytes)} in rt.pendingBloatHits (GOTCHA #4)", () => {
@@ -237,8 +292,8 @@ describe("over-threshold result — APPEND reminder + record bloat hit (spec/07 
     const hits = getRuntime("hit").pendingBloatHits;
     expect(hits).toHaveLength(1);
     expect(hits[0]).toEqual({ toolName: "grep", approxTokens: approxTokens(OVER_BYTES) });
-    // explicit pinned value: ceil(9000/4) = 2250
-    expect(hits[0].approxTokens).toBe(2250);
+    // explicit pinned value: ceil(21000/4) = 5250
+    expect(hits[0].approxTokens).toBe(5250);
   });
 
   it("does NOT mutate event.content in place (returns a NEW array reference — GOTCHA #7)", () => {
@@ -253,6 +308,42 @@ describe("over-threshold result — APPEND reminder + record bloat hit (spec/07 
 });
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
+// per-tool threshold resolution in bloatReminderHandler (behavioral proof)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("per-tool threshold resolution in bloatReminderHandler (DEFAULT_CONFIG)", () => {
+  it("a 'bash' result just under 32768 → pass-through (no reminder, no hit)", () => {
+    const ctx = makeCtx({ sessionId: "bash-under" });
+    const res = bloatReminderHandler(makeEvent("bash", "y".repeat(BASH_THRESHOLD - 1)), ctx);
+    expect(res).toBeUndefined();
+    expect(getRuntime("bash-under").pendingBloatHits).toHaveLength(0);
+  });
+
+  it("a 'bash' result over 32768 → reminder fires + 1 hit", () => {
+    const ctx = makeCtx({ sessionId: "bash-over" });
+    const res = bloatReminderHandler(makeEvent("bash", "y".repeat(40000)), ctx); // 40000 > 32768
+    expect(res).toBeDefined();
+    expect(getRuntime("bash-over").pendingBloatHits).toHaveLength(1);
+  });
+
+  it("an UNKNOWN tool result over 16384 but under 20480 → reminder fires (uses global 16384)", () => {
+    const ctx = makeCtx({ sessionId: "grep-over-global" });
+    const res = bloatReminderHandler(makeEvent("grep", "z".repeat(18000)), ctx); // 18000 > 16384
+    expect(res).toBeDefined();
+    expect(getRuntime("grep-over-global").pendingBloatHits).toHaveLength(1);
+  });
+
+  it("a 'read' result over 16384 but under 20480 → pass-through (read threshold is 20480, NOT 16384)", () => {
+    // DISCRIMINATING PAIR with the grep case above: SAME 18000 bytes, DIFFERENT toolName → different outcome.
+    // This is the strongest proof the handler resolves per-tool, not via a single global threshold.
+    const ctx = makeCtx({ sessionId: "read-under-own" });
+    const res = bloatReminderHandler(makeEvent("read", "z".repeat(18000)), ctx); // 18000 < 20480
+    expect(res).toBeUndefined();
+    expect(getRuntime("read-under-own").pendingBloatHits).toHaveLength(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
 // multi-result accumulation across a turn
 // ══════════════════════════════════════════════════════════════════════════════════════════
 
@@ -260,18 +351,18 @@ describe("multi-result turn — pendingBloatHits accumulates (NOT cleared here �
   it("a second over-threshold result appends a SECOND hit", () => {
     const ctx = makeCtx({ sessionId: "multi" });
     bloatReminderHandler(makeEvent("read", OVER_TEXT), ctx);
-    bloatReminderHandler(makeEvent("grep", "y".repeat(10000)), ctx); // different toolName + size
+    bloatReminderHandler(makeEvent("grep", "y".repeat(20000)), ctx); // 20000 > global 16384 → fires
     const hits = getRuntime("multi").pendingBloatHits;
     expect(hits).toHaveLength(2);
     expect(hits[0]).toEqual({ toolName: "read", approxTokens: approxTokens(OVER_BYTES) });
-    expect(hits[1]).toEqual({ toolName: "grep", approxTokens: approxTokens(10000) });
+    expect(hits[1]).toEqual({ toolName: "grep", approxTokens: approxTokens(20000) });
   });
 
   it("an under-threshold result interleaved does NOT add a hit", () => {
     const ctx = makeCtx({ sessionId: "mixed" });
-    bloatReminderHandler(makeEvent("read", OVER_TEXT), ctx); // over → 1 hit
+    bloatReminderHandler(makeEvent("read", OVER_TEXT), ctx); // over (read) → 1 hit
     bloatReminderHandler(makeEvent("read", UNDER_TEXT), ctx); // under → no hit
-    bloatReminderHandler(makeEvent("bash", "q".repeat(20000)), ctx); // over → 1 hit
+    bloatReminderHandler(makeEvent("bash", "q".repeat(40000)), ctx); // 40000 > bash 32768 → 1 hit
     const hits = getRuntime("mixed").pendingBloatHits;
     expect(hits).toHaveLength(2);
     expect(hits.map((h) => h.toolName)).toEqual(["read", "bash"]);

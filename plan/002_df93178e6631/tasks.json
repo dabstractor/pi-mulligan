@@ -87,7 +87,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S2",
                   "title": "Update nudges tests: resize fixtures, per-tool scenarios, bloatThresholdFor unit test",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",
@@ -107,7 +107,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S3",
                   "title": "Update test/integration/smoke.ts threshold references",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T2.S1"
