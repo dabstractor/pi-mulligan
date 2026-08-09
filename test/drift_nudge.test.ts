@@ -246,6 +246,7 @@ function rt(above = false): SessionRuntime {
     pendingBloatHits: [],
     shrinkMissCounts: new Map(),
     aboveHighWater: above,
+    rewindRefusedTurnIndex: null,
   } as SessionRuntime;
 }
 

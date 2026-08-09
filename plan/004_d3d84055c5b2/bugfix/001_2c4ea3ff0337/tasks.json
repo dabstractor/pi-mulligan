@@ -105,21 +105,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "BUG-002: Fix tsc --noEmit + add CI typecheck gate",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Fix the single TS2352 error caused by a stale SessionRuntime test fixture in test/drift_nudge.test.ts (missing rewindRefusedTurnIndex field), and add a typecheck script to package.json so the project can be CI-gated on tsc --noEmit.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Fix stale test fixture and add typecheck CI script",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Two atomic fixes: (1) add the missing rewindRefusedTurnIndex: null field to the rt() helper in test/drift_nudge.test.ts so the SessionRuntime fixture matches the current type, and (2) add a 'typecheck' script to package.json so CI can enforce tsc --noEmit.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Fix stale SessionRuntime fixture in drift_nudge.test.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §3-4. The fixture is at test/drift_nudge.test.ts:238-250 in the rt() helper. It builds a near-complete SessionRuntime literal but omits rewindRefusedTurnIndex (added by P4 drift-nudge-mute work). The cast `as SessionRuntime` on a near-complete object triggers TS2352 under strict:true. The SessionRuntime type (src/runtime.ts) has 10 required fields; the fixture has 9. The missing field rewindRefusedTurnIndex has type number | null and default null (per freshRuntime). All 882 vitest tests pass (vitest transpiles without type-checking); the error only surfaces under tsc --noEmit.\n2. INPUT: The existing rt() fixture at test/drift_nudge.test.ts:238-250. The SessionRuntime type from src/runtime.ts (specifically the rewindRefusedTurnIndex: number | null field).\n3. LOGIC:\n   a) In the rt() helper's returned object literal (between aboveHighWater: above and the closing brace), add the line: `rewindRefusedTurnIndex: null,`.\n   b) The value null matches the freshRuntime() default and the field's type (number | null). The shouldHighWater tests that use this fixture never read rewindRefusedTurnIndex, so null is safe.\n   c) Do NOT change the cast from `as SessionRuntime` to `as unknown as SessionRuntime` — adding the field is the correct, more honest fix.\n4. OUTPUT: The fixture is now type-complete. `npx tsc --noEmit` will exit 0. The 882 existing tests remain unaffected.\n5. MOCKING: None needed. The fixture is a plain object literal. Verify: run `npx tsc --noEmit` (must exit 0) and `npx vitest run` (must stay 882/882).\n6. DOCS: [Mode A] none — no user-facing/config/API surface change. This is a test-internal fix.",
@@ -133,7 +133,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Add typecheck script to package.json",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §5. package.json currently has scripts: { test: 'vitest run', smoke: 'node test/integration/run-smoke.mjs' }. There is no typecheck/tsc script. The tsconfig.json includes both src and test, so tsc --noEmit checks the full project. typescript ^5 is a devDependency (already installed). vitest transpiles without type-checking, which is why the stale fixture (BUG-002) went unnoticed.\n2. INPUT: The existing package.json scripts object.\n3. LOGIC:\n   a) Add a new script entry: `\"typecheck\": \"tsc --noEmit\"` to the scripts object in package.json.\n   b) Place it alphabetically or logically alongside the existing test and smoke scripts.\n4. OUTPUT: `npm run typecheck` (or `npx tsc --noEmit`) now type-checks the entire project. CI can add this as a gate.\n5. MOCKING: None. Verify: `npm run typecheck` exits 0 after S1 is applied.\n6. DOCS: [Mode A] The package.json scripts section is developer-facing documentation. The new script name 'typecheck' is self-documenting. No additional doc change needed.",
