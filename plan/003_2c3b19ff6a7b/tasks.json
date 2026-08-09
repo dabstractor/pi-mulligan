@@ -1,0 +1,345 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P3",
+      "title": "Implement the spec refinements from commit 0ea555ed",
+      "status": "Ready",
+      "description": "Three REQUIRED feature groups from the spec delta, none of which are implemented today: G3 marker retraction (cancel), G2 stale-marker retirement + soft cap, G1 drift-nudge refinements (windowed signaling + high-water signal). All reuse existing shipped patterns — no new architecture, no new event, no new model request (D4 holds). Build order: M1 (cancel primitive) → M2 (stale retirement reuses cancel) → M3 (independent drift refinements) → M4 (doc sync).",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P3.M1",
+          "title": "Marker retraction (G3; amends D6)",
+          "status": "Planned",
+          "description": "An agent can cancel any mulligan:rewind/mulligan:shrink marker by id; on the next context fire the cancelled transform no longer applies; mulligan_audit lists cancelled markers as retired; cancelling a non-existent/already-cancelled id is a safe no-op that never throws. Acceptance criteria a–d in spec/08 E21.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M1.T1",
+              "title": "Cancel marker data model & persistence wrapper (markers.ts)",
+              "status": "Planned",
+              "description": "Add the CancelMarker envelope shape, extend MulliganEnvelope.kind, and add the appendCancelMarker wrapper mirroring the existing appendShrinkMarker pattern.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T1.S1",
+                  "title": "CancelMarker interface + MulliganEnvelope.kind extension + appendCancelMarker wrapper",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.99", "h2.9", "h2.46", "h2.47", "h2.48"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md (markers.ts current state) and implementation_patterns.md §Pattern 1. The existing appendShrinkMarker(pi, ctx, data) in src/markers.ts is the EXACT template — it stamps {schema:'pi-mulligan', v:1, kind, seq, ts}, calls pi.appendEntry('mulligan:shrink', entry), returns ctx.sessionManager.getLeafId(), never throws. MulliganEnvelope.kind is currently \"rewind\" | \"shrink\" | \"turn-metric\".\n2. INPUT: No runtime input — this is a foundational data model change. Uses nextSeq(sessionId) from runtime.ts, randomUUID from node:crypto, pi.appendEntry + ctx.sessionManager.getLeafId/getSessionId (identical to appendShrinkMarker).\n3. LOGIC: (a) Extend MulliganEnvelope.kind to \"rewind\" | \"shrink\" | \"turn-metric\" | \"cancel\" (closed union stays closed). (b) Add interface CancelMarker extends MulliganEnvelope { kind: \"cancel\"; targetId: string; seq: number; ts: number }. The targetId is the uuid `id` field of the rewind/shrink marker being cancelled. CancelMarker does NOT have its own `id` uuid field (like TurnMetric — it is not itself cancellable). (c) Add type CancelMarkerInput = Omit<CancelMarker, \"schema\" | \"v\" | \"kind\" | \"seq\" | \"ts\"> — i.e. just { targetId: string }. (d) Add appendCancelMarker(pi: ExtensionAPI, ctx: ExtensionContext, data: CancelMarkerInput): string | null — mirror appendShrinkMarker EXACTLY: const sessionId = ctx.sessionManager.getSessionId(); const seq = nextSeq(sessionId); const entry = { ...data, schema:'pi-mulligan', v:1, kind:'cancel', seq, ts: Date.now() }; pi.appendEntry('mulligan:cancel', entry); return ctx.sessionManager.getLeafId(); — wrapped in try/catch → return null (never throws, per fail-open discipline E13).\n4. OUTPUT: Exports CancelMarker, CancelMarkerInput, appendCancelMarker. Consumed by filter.ts readMarkers (P3.M1.T2.S1), tools/cancel.ts (P3.M1.T3.S1), filter.ts stale-retirement (P3.M2.T3.S1), and audit.ts (P3.M1.T4.S1).\n5. MOCKING: In tests, reuse the makePi()/makeCtx() fakes from test/markers.test.ts (capture appendEntry calls, script getLeafId). Assert: appendCancelMarker calls pi.appendEntry('mulligan:cancel', {schema, v:1, kind:'cancel', targetId, seq, ts}) and returns the scripted leaf id. Assert it returns null and never throws when appendEntry/getLeafId/getSessionId throws.\n6. DOCS: [Mode A] Add the CancelMarker shape to spec/04-data-model.md — a new subsection after §5 (Turn metric), documenting {kind:\"cancel\", targetId, seq, ts} and that it carries no `id` field (like turn-metric). This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M1.T2",
+              "title": "readMarkers cancel-drop + MarkersBundle extension (filter.ts)",
+              "status": "Planned",
+              "description": "Extend readMarkers to collect mulligan:cancel entries, build a cancelledIds set, drop cancelled rewinds/shrinks before returning, and expose cancelledIds on MarkersBundle.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T2.S1",
+                  "title": "Collect cancel entries, build cancelledIds, drop cancelled markers, expose on MarkersBundle",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M1.T1.S1"],
+                  "prd_selectors": ["h2.99", "h2.61", "h2.72", "h2.73"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 2. The current readMarkers(ctx) in src/filter.ts scans type==='custom' entries, dispatches on customType+kind, pushes rewinds/shrinks, keeps latest metric. RewindMarker and ShrinkMarker both have an `id` field (uuid stamped by appendRewindMarker/appendShrinkMarker). CancelMarker (from P3.M1.T1.S1) has customType 'mulligan:cancel', kind 'cancel', and a `targetId` field referencing the marker's uuid `id`.\n2. INPUT: The CancelMarker interface and 'mulligan:cancel' customType from P3.M1.T1.S1. The existing readMarkers entry-scan loop in src/filter.ts (lines ~115-145).\n3. LOGIC: (a) In the readMarkers loop, add an else-if branch: if customType==='mulligan:cancel' && kind==='cancel', read targetId via readOwn(data, 'targetId'); if it's a non-empty string, add to a new Set<string> cancelledIds. (b) After the loop, filter rewinds and shrinks to drop any whose `id` field ∈ cancelledIds: const activeRewinds = rewinds.filter(r => { const id = readOwn(r, 'id'); return typeof id !== 'string' || !cancelledIds.has(id); }) — same for shrinks. (c) Extend MarkersBundle interface to add cancelledIds: Set<string>. (d) Return { rewinds: activeRewinds, shrinks: activeShrinks, metric, cancelledIds }. Cancelled markers stay on disk (audit trail) — they are just skipped going forward. NEVER throws (existing defensive readOwn/isRecord pattern continues).\n4. OUTPUT: MarkersBundle now has cancelledIds. Consumed by contextHandler (the pipeline only sees active markers), audit.ts renderAuditReport (P3.M1.T4.S1 lists cancelled count), and the stale-retirement logic (P3.M2.T3.S1).\n5. MOCKING: In tests, build fake session entries with makeCancelEntry(targetId) alongside existing rewindData/shrinkData/customEntry helpers from test/filter.test.ts. Assert: cancelling a shrink → the shrink is absent from readMarkers().shrinks; cancelling a rewind → absent from rewinds; cancelling a non-existent id → no markers dropped; multiple cancels → all targeted markers dropped; cancelledIds set contains the right ids.\n6. DOCS: [Mode A] Document the cancel-drop in spec/06-context-filter.md §1 (readMarkers) — add a note that readMarkers also collects mulligan:cancel entries and drops any marker whose id is cancelled before returning the bundle. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M1.T3",
+              "title": "mulligan_cancel tool (tools/cancel.ts + index.ts registration)",
+              "status": "Planned",
+              "description": "Create the mulligan_cancel agent-callable tool following the makeShrinkTool(pi) factory pattern. Takes a markerId (the entry id from details.markerId), validates, appends a cancel marker, returns confirmation. Safe no-op for non-existent/already-cancelled. Never throws.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T3.S1",
+                  "title": "Create mulligan_cancel tool + register in index.ts",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M1.T1.S1", "P3.M1.T2.S1"],
+                  "prd_selectors": ["h2.99", "h2.56", "h2.59", "h2.35", "h2.9"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 3 and system_context.md §tools/shrink.ts. The makeShrinkTool(pi) factory in src/tools/shrink.ts is the EXACT template: defineTool({name, label, description, parameters, async execute(toolCallId, params, signal, onUpdate, ctx) {...}}), with pi captured via closure. Every return path includes a `details` field (required by Pi type). refusal(reason) returns {content:[{type:'text',text:'Mulligan: refused — <reason>.'}], details:{}}. The whole execute body is ONE try/catch → refusal text on any exception (E13). The agent receives the cancel target as `markerId` — the ENTRY id returned in details.markerId by mulligan_rewind/mulligan_shrink (which is getLeafId()).\n2. INPUT: appendCancelMarker(pi, ctx, {targetId}) from P3.M1.T1.S1. The readMarkers cancel-drop from P3.M1.T2.S1 ensures the cancel takes effect next fire. getConfig() from src/config.ts. ctx.sessionManager.getEntries() from Pi (read FRESH — C12).\n3. LOGIC: (a) Create src/tools/cancel.ts. (b) CancelParams = Type.Object({ markerId: Type.String({ description: 'The marker id to cancel (the markerId value returned by mulligan_rewind or mulligan_shrink in details.markerId).' }) }). (c) CancelDetails = { cancelled: boolean; markerId?: string | null; reason?: string }. (d) makeCancelTool(pi): ToolDefinition<typeof CancelParams, CancelDetails> — factory captures pi. (e) execute body: 1. config gate — if !getConfig().enabled, return refusal('Mulligan is disabled') (E14). 2. Scan ctx.sessionManager.getEntries() for a custom entry whose entry.id === params.markerId AND customType ∈ {'mulligan:rewind', 'mulligan:shrink'}. 3. If not found → safe no-op: return {content:[{type:'text', text:'Mulligan: no active marker found with that id — nothing to cancel.'}], details:{cancelled:false}}. 4. Read the marker's uuid id from entry.data.id (via readOwn). 5. Scan entries for an existing mulligan:cancel with data.targetId === uuid → if found, safe no-op: return {content:[{type:'text', text:'Mulligan: that marker is already cancelled.'}], details:{cancelled:false}}. 6. appendCancelMarker(pi, ctx, {targetId: uuid}) → markerId (entry id or null). 7. Return {content:[{type:'text', text:'Mulligan: marker cancelled. The transform will no longer apply from the next turn on.'}], details:{cancelled:true, markerId}}. (f) WRAP the entire body in ONE try/catch → refusal('unexpected error: <msg>') (E13). (g) Register in src/index.ts: add `import { makeCancelTool } from './tools/cancel.js'` and `pi.registerTool(makeCancelTool(pi))` alongside the existing tool registrations.\n4. OUTPUT: Exports makeCancelTool, CancelParams, CancelDetails, CANCEL_DESC. index.ts now registers the 5th tool.\n5. MOCKING: In tests, reuse the makePi()/makeCtx() fakes (script getEntries to return custom entries with entry.id, customType, data.id). Assert: cancelling an existing rewind → appendCancelMarker called with the right targetId + confirmation text; cancelling a shrink → same; non-existent markerId → no-op text + details.cancelled===false; already-cancelled → no-op text; config.enabled===false → refusal text; appendEntry throws → refusal text (never throws).\n6. DOCS: [Mode A] Add a mulligan_cancel tool entry to spec/05-tools.md (new §3.5 or renumber): parameter schema (markerId string), return shape, behavior (step by step mirroring §2 mulligan_shrink), refusal conditions (disabled, non-existent, already-cancelled). Reference the D6-amendment framing from SPEC.md. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M1.T4",
+              "title": "Audit retired-marker listing (audit.ts)",
+              "status": "Planned",
+              "description": "Extend renderAuditReport to list cancelled markers as retired (E21 acceptance c), and update AuditDetails with the cancelled count.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T4.S1",
+                  "title": "Extend renderAuditReport + AuditDetails to list cancelled markers as retired",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M1.T2.S1"],
+                  "prd_selectors": ["h2.99", "h2.58", "h2.67"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §tools/audit.ts. renderAuditReport({totalTokens, confidence, rewinds, shrinks, checkpointNames, protectedRoles, rows, filtered}) is a PURE function in src/tools/audit.ts. The 'Active markers' line currently renders: `${rewinds.length} rewind (${gran}), ${shrinks.length} shrink, ${checkpoints.length} checkpoints [names]`. The audit's auditExecute calls readMarkers(ctx) which now returns cancelledIds (from P3.M1.T2.S1). AuditDetails has fields: totalTokens, confidence, source, nRewinds, nShrinks, nCheckpoints, top, error?.\n2. INPUT: markers.cancelledIds (Set<string>) from readMarkers, now available on MarkersBundle (P3.M1.T2.S1). The existing renderAuditReport args + AuditDetails interface in src/tools/audit.ts.\n3. LOGIC: (a) Add `cancelledCount: number` to the renderAuditReport args (the caller passes markers.cancelledIds.size). (b) Extend the 'Active markers' line to include cancelled markers as retired, e.g.: `Active markers: N rewind (gran), N shrink, N checkpoints [names], N cancelled (retired)`. When cancelledCount===0, omit the cancelled clause (keep the line clean). (c) Add `nCancelled: number` to AuditDetails. (d) In auditExecute, pass cancelledCount: markers.cancelledIds.size to renderAuditReport, and set details.nCancelled to the same value. NEVER throws (existing try/catch pattern continues).\n4. OUTPUT: Updated renderAuditReport signature + AuditDetails interface. The audit report now shows retired markers (acceptance c).\n5. MOCKING: In tests, build a MarkersBundle with cancelledIds containing 1-3 ids, pass cancelledCount to renderAuditReport, assert the 'Active markers' line includes 'N cancelled (retired)'. Assert it is omitted when cancelledCount===0. Assert AuditDetails.nCancelled matches.\n6. DOCS: none — audit behavior is already documented in spec/05 §4; the retired listing is an extension of the existing 'Active markers' line. No user-facing/config/API surface change beyond what P3.M1.T3.S1 already documents."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P3.M2",
+          "title": "Stale-marker retirement + soft cap (G2; depends on P3.M1)",
+          "status": "Planned",
+          "description": "Bound long-session filter cost per spec/08 E15. A pinned shrink whose target entry has been absent for config.shrink.staleAfterFires (default 3) consecutive fires is auto-retired; active shrink markers are capped at config.shrink.maxActive (default 32), oldest retired when exceeded. Retirement reuses the G3 cancel primitive (appendCancelMarker).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M2.T1",
+              "title": "Config knobs: shrink.maxActive + shrink.staleAfterFires (config.ts)",
+              "status": "Planned",
+              "description": "Add two numeric knobs to the shrink config block using the established coerceNumber pattern.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T1.S1",
+                  "title": "Add shrink.maxActive (32) and shrink.staleAfterFires (3) to MulliganConfig, DEFAULT_CONFIG, validateConfig",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.93", "h2.101", "h2.102", "h2.103", "h2.104"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/external_deps.md (config validation pattern) and system_context.md §config.ts. The MulliganConfig.shrink block currently has only { enabled: boolean }. The established pattern for numeric knobs: coerceNumber(field, value, fallback, mustBePositive) — finite number >0, else warn + fallback. validateConfig's shrink block reads via safeGet(shrinkRaw, key) and coerces. DEFAULT_CONFIG.shrink = { enabled: true }.\n2. INPUT: No runtime input — config is Pi-free. The existing MulliganConfig interface, DEFAULT_CONFIG, validateConfig, coerceNumber helper in src/config.ts.\n3. LOGIC: (a) Add to MulliganConfig.shrink: maxActive: number (cap on simultaneous active mulligan:shrink markers; oldest retired when exceeded) and staleAfterFires: number (auto-retire a pinned shrink whose target has been absent this many consecutive fires). (b) Add to DEFAULT_CONFIG.shrink: maxActive: 32, staleAfterFires: 3. (c) In validateConfig's shrink block (after the existing shrink.enabled check), add: v = safeGet(shrinkRaw, 'maxActive'); if (v !== undefined) cfg.shrink.maxActive = coerceNumber('shrink.maxActive', v, cfg.shrink.maxActive, true); — same pattern for staleAfterFires. Both mustBePositive=true (>0). (d) NOTE: the reserved autoOnBloat stays OUT (spec/07 D3 — not v1).\n4. OUTPUT: MulliganConfig.shrink now has { enabled, maxActive, staleAfterFires }. Consumed by the stale-retirement logic in filter.ts (P3.M2.T3.S1).\n5. MOCKING: In tests, call validateConfig({ shrink: { maxActive: 10, staleAfterFires: 5 } }) and assert cfg.shrink.maxActive===10, staleAfterFires===5. Assert defaults (32, 3) when absent. Assert invalid values (0, -1, NaN, 'abc') fall back to defaults. Assert the existing shrink.enabled behavior is unchanged.\n6. DOCS: none — spec/09 already specifies these knobs (they are the source of this delta, already written). No additional Mode A docs needed."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M2.T2",
+              "title": "Runtime miss-count state (runtime.ts)",
+              "status": "Planned",
+              "description": "Add per-session state to track pinned-shrink consecutive miss counts.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T2.S1",
+                  "title": "Add shrinkMissCounts Map to SessionRuntime",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.52", "h2.93"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime has 7 fields. freshRuntime(sessionId) constructs defaults. resetRuntime(sessionId) deletes the entry from the map (so new fields are automatically reset on session_start — no extra wiring in index.ts needed). runtime.ts is Pi-free (0 imports).\n2. INPUT: The existing SessionRuntime interface + freshRuntime function in src/runtime.ts.\n3. LOGIC: (a) Add `shrinkMissCounts: Map<string, number>` to SessionRuntime interface (keyed by shrink marker id, value = consecutive misses). (b) In freshRuntime, add `shrinkMissCounts: new Map()`. Each fresh runtime gets its OWN Map (mirror the pendingBloatHits: [] pattern — GOTCHA #5, never a shared module-level Map). (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll needed — resetRuntime deletes the whole entry, clearAll wipes the map.\n4. OUTPUT: SessionRuntime.shrinkMissCounts available via getRuntime(sessionId). Consumed by the stale-retirement logic in filter.ts (P3.M2.T3.S1).\n5. MOCKING: In tests, getRuntime('s1').shrinkMissCounts is a fresh empty Map. Set/get values. clearAll() wipes it. After resetRuntime('s1'), a new getRuntime('s1') has a fresh empty Map.\n6. DOCS: none — runtime.ts is internal in-memory state (spec/04 §8); no user-facing surface change."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M2.T3",
+              "title": "Stale retirement + soft cap logic (filter.ts contextHandler)",
+              "status": "Planned",
+              "description": "After filterPipeline runs, walk active pinned shrinks to track hit/miss counts and auto-retire stale ones; separately cap active shrinks at maxActive. Both reuse appendCancelMarker from P3.M1. This requires threading pi into contextHandler.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T3.S1",
+                  "title": "Thread pi into contextHandler + stale-marker retirement logic",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M1.T1.S1", "P3.M2.T1.S1", "P3.M2.T2.S1"],
+                  "prd_selectors": ["h2.93", "h2.99", "h2.61", "h2.72"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 7 (GOTCHA — pi in contextHandler). contextHandler(event, ctx) currently does NOT receive pi. registerFilterHandler(pi) does pi.on('context', contextHandler). To call appendCancelMarker(pi, ctx, ...) inside contextHandler, change the signature: registerFilterHandler wraps the handler — pi.on('context', (event, ctx) => contextHandler(pi, event, ctx)) — and contextHandler becomes (pi, event, ctx). This mirrors the turnEndMetricHandler(pi, event, ctx) pattern in nudges.ts. resolvePinnedShrink(messages, branchEntries, pinnedEntryId) is already exported from transforms.ts (Pi-free) and can be called from filter.ts to check if a pinned shrink's target is present. NOTE: this subtask touches the SAME contextHandler function that P3.M1.T2.S1 may have modified (readMarkers changes) — build on top of it.\n2. INPUT: appendCancelMarker(pi, ctx, {targetId}) from P3.M1.T1.S1. config.shrink.staleAfterFires from P3.M2.T1.S1. rt.shrinkMissCounts from P3.M2.T2.S1. markers.shrinks (the ACTIVE shrinks after cancel-drop from P3.M1.T2.S1) from readMarkers. resolvePinnedShrink from transforms.ts. event.messages (pre-filterPipeline) + branchEntries for the resolution pass.\n3. LOGIC: (a) Change contextHandler signature to (pi: ExtensionAPI, event: ContextEvent, ctx: ExtensionContext). (b) Change registerFilterHandler to: pi.on('context', (event, ctx) => contextHandler(pi, event, ctx)). (c) AFTER filterPipeline runs (on the filtered messages) and BEFORE the return, add the stale-retirement pass: for each active shrink in markers.shrinks that has a pinnedEntryId (read via readOwn), call resolvePinnedShrink(event.messages, branchEntries, pinnedEntryId) to check if the target is present. If present (non-null) → rt.shrinkMissCounts.set(shrink.id, 0) (reset). If absent (null) → rt.shrinkMissCounts.set(shrink.id, (rt.shrinkMissCounts.get(shrink.id) ?? 0) + 1). If the count reaches config.shrink.staleAfterFires → appendCancelMarker(pi, ctx, { targetId: shrink.id }) (auto-retire). (d) This append takes effect on the NEXT fire (readMarkers drops the cancelled id) — no in-fire mutation. (e) NEVER throws: wrap the stale-retirement pass in its own try/catch inside the outer try/catch (a failure in retirement must not break the turn — E13). (f) Only process shrinks with pinnedEntryId (live shrinks cannot go stale — they re-resolve each fire and either match or no-op harmlessly).\n4. OUTPUT: contextHandler now accepts pi and performs stale retirement. Pinned shrinks whose target has been absent for staleAfterFires consecutive fires are auto-retired (a mulligan:cancel is appended). registerFilterHandler wires pi through.\n5. MOCKING: In tests, script a fake session with a pinned shrink whose target entry is ABSENT from branchEntries. Fire contextHandler multiple times — assert that after staleAfterFires fires, appendCancelMarker was called (pi.appendEntry called with 'mulligan:cancel'). Assert that a pinned shrink whose target IS present does NOT get retired (miss count stays 0). Assert rt.shrinkMissCounts resets on hit. Assert the turn never breaks even if resolvePinnedShrink throws.\n6. DOCS: none — the stale-retirement behavior is already specified in spec/08 E15 (the source of this delta). No additional Mode A docs needed."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T3.S2",
+                  "title": "Soft cap: retire oldest shrink when active count exceeds maxActive",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M2.T3.S1"],
+                  "prd_selectors": ["h2.93", "h2.99", "h2.61"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 7 (cap logic). After P3.M2.T3.S1, contextHandler already has pi threaded in and runs the stale-retirement pass. The soft cap is a SEPARATE check in the same post-filterPipeline block. Active shrinks = markers.shrinks (already cancel-dropped by readMarkers). The 'oldest' shrink is the one with the lowest seq.\n2. INPUT: config.shrink.maxActive from P3.M2.T1.S1. markers.shrinks (active shrinks, already cancel-dropped). appendCancelMarker(pi, ctx, {targetId}) from P3.M1.T1.S1. pi is now available in contextHandler (from P3.M2.T3.S1).\n3. LOGIC: After the stale-retirement pass (from P3.M2.T3.S1), add: if markers.shrinks.length > config.shrink.maxActive, find the oldest shrink by seq (sort ascending, take first), and call appendCancelMarker(pi, ctx, { targetId: oldest.id }). This retires exactly ONE shrink per fire (the oldest) — if the cap is exceeded by N, it takes N fires to bring it under the cap, which is acceptable (bounded, eventual). Wrap in the same try/catch as the stale pass (never breaks the turn). Do NOT retire more than one per fire (keeps the logic simple and the cost bounded).\n4. OUTPUT: Active shrink markers are capped at config.shrink.maxActive. When exceeded, the oldest is retired on the next fire.\n5. MOCKING: In tests, script a session with maxActive=2 and 3 active shrinks. Fire contextHandler — assert appendCancelMarker was called with the targetId of the shrink with the lowest seq. Assert only ONE cancel is appended per fire.\n6. DOCS: none — the soft-cap behavior is already specified in spec/08 E15 + spec/09 (the source of this delta)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P3.M3",
+          "title": "Drift-nudge refinements (G1; windowed signaling + high-water)",
+          "status": "Planned",
+          "description": "Cut drift-nudge false positives (§5.1 windowed signaling) and catch slow accumulation (§5.2 edge-triggered high-water signal). Both ride the existing context event (D4 — zero extra requests). Per spec/07 §5.1/§5.2 and spec/09.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M3.T1",
+              "title": "Config knobs + threshold raise (config.ts)",
+              "status": "Planned",
+              "description": "Add nudges.driftWindowTurns (3), nudges.highWaterFraction (0.7), and raise nudges.driftThresholdTokens from 3000 to 6000.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T1.S1",
+                  "title": "Add driftWindowTurns, highWaterFraction; raise driftThresholdTokens 3000→6000",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.78", "h3.51", "h3.52", "h2.101", "h2.102", "h2.103", "h2.104"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §config.ts and external_deps.md (config validation pattern). DEFAULT_CONFIG.nudges.driftThresholdTokens is currently 3000 — the on-disk spec/09 specifies 6000 with rationale: 'Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point.' This is a drift to fix. The existing coerceNumber(field, value, fallback, mustBePositive) handles finite >0. For driftWindowTurns it should be a positive integer. For highWaterFraction it must be finite in the open interval (0, 1) — coerceNumber does NOT enforce the <1 upper bound, so a dedicated inline check is needed.\n2. INPUT: The existing MulliganConfig.nudges block, DEFAULT_CONFIG.nudges, validateConfig's nudges block in src/config.ts.\n3. LOGIC: (a) Add to MulliganConfig.nudges: driftWindowTurns: number (rolling window for §5.1 windowed drift signaling) and highWaterFraction: number (§5.2 edge-triggered high-water signal — fraction of context window). (b) In DEFAULT_CONFIG.nudges: driftWindowTurns: 3, highWaterFraction: 0.7, and CHANGE driftThresholdTokens: 6000 (from 3000). (c) In validateConfig's nudges block: v = safeGet(nudgesRaw, 'driftWindowTurns'); if (v !== undefined) { const n = coerceNumber('nudges.driftWindowTurns', v, cfg.nudges.driftWindowTurns, true); cfg.nudges.driftWindowTurns = Number.isFinite(n) ? Math.floor(n) : cfg.nudges.driftWindowTurns; } — floor to integer. For highWaterFraction: v = safeGet(nudgesRaw, 'highWaterFraction'); if (v !== undefined) { if (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1) cfg.nudges.highWaterFraction = v; else warnConfig('nudges.highWaterFraction', v); } — dedicated check for the (0,1) interval. (d) Update any existing test asserting driftThresholdTokens === 3000 to assert 6000.\n4. OUTPUT: MulliganConfig.nudges now has driftWindowTurns (default 3) and highWaterFraction (default 0.7); driftThresholdTokens default is 6000. Consumed by shouldNudge (P3.M3.T4.S1), shouldHighWater (P3.M3.T5.S1), readMarkers (P3.M3.T3.S1), and contextHandler (P3.M3.T6.S1).\n5. MOCKING: In tests, validateConfig({ nudges: { driftWindowTurns: 5, highWaterFraction: 0.8, driftThresholdTokens: 10000 } }) → assert all three set correctly. Assert defaults (3, 0.7, 6000) when absent. Assert highWaterFraction invalid (0, 1, -0.5, 1.5, NaN) → default 0.7. Assert driftWindowTurns floored (5.7 → 5). Assert existing nudges knobs unchanged.\n6. DOCS: none — spec/09 already specifies these knobs (the source of this delta). The 3000→6000 change is already in spec/09's rationale table. No additional Mode A docs needed."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M3.T2",
+              "title": "Runtime high-water state (runtime.ts)",
+              "status": "Planned",
+              "description": "Add aboveHighWater boolean to SessionRuntime for the edge-triggered high-water signal.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T2.S1",
+                  "title": "Add aboveHighWater boolean to SessionRuntime",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.52", "h3.52"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime is Pi-free. freshRuntime constructs defaults. resetRuntime deletes the entry (session_start resets automatically).\n2. INPUT: The existing SessionRuntime interface + freshRuntime in src/runtime.ts.\n3. LOGIC: (a) Add `aboveHighWater: boolean` to SessionRuntime interface — tracks whether the total filtered context is currently above the high-water fraction (edge-triggered: set true when the annotation fires, cleared only when the total drops back below the fraction). (b) In freshRuntime, add `aboveHighWater: false`. (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll.\n4. OUTPUT: SessionRuntime.aboveHighWater available via getRuntime. Consumed by shouldHighWater (P3.M3.T5.S1) via the rt parameter.\n5. MOCKING: In tests, getRuntime('s1').aboveHighWater === false initially. Set it true, assert it persists until explicitly cleared.\n6. DOCS: none — internal in-memory state (spec/04 §8)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M3.T3",
+              "title": "readMarkers recent-metrics window (filter.ts)",
+              "status": "Planned",
+              "description": "Expose the last N turn-metrics (newest-first) on MarkersBundle so the contextHandler can compute the windowed drift signal.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T3.S1",
+                  "title": "Expose recentMetrics: TurnMetric[] on MarkersBundle (sorted newest-first)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M1.T2.S1"],
+                  "prd_selectors": ["h2.61", "h2.49", "h3.51", "h2.75"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 10. readMarkers currently keeps only the LATEST metric (highest seq). spec/07 §5.1 requires the window to be 'computed in the filter from the last N mulligan:turn-metric entries on the branch.' The simplest change: collect ALL turn-metrics during the scan, sort by seq descending (newest-first), and expose the full sorted array as recentMetrics on MarkersBundle. The consumer (contextHandler) slices to driftWindowTurns. Keep the existing `metric` field (latest = recentMetrics[0]) for backward compat (suppressCheck + injectNudge still use it). NOTE: this subtask builds on the readMarkers changes from P3.M1.T2.S1 (cancel-drop) — both modify the same loop.\n2. INPUT: The existing readMarkers metric-collection logic in src/filter.ts (currently keeps only the highest-seq metric). The TurnMetric interface from markers.ts.\n3. LOGIC: (a) In readMarkers, change the metric collection: instead of keeping only the latest, push ALL valid turn-metrics into an array allMetrics. (b) After the loop, sort allMetrics by seq descending (newest-first). (c) Set metric = allMetrics[0] ?? null (latest, for backward compat). (d) Set recentMetrics = allMetrics (the full sorted array, newest-first). (e) Add recentMetrics: TurnMetric[] to MarkersBundle. (f) Return { rewinds, shrinks, metric, cancelledIds, recentMetrics }. NEVER throws (existing defensive pattern).\n4. OUTPUT: MarkersBundle.recentMetrics (TurnMetric[] newest-first). Consumed by contextHandler (P3.M3.T6.S1) which slices to driftWindowTurns and passes to shouldNudge (P3.M3.T4.S1).\n5. MOCKING: In tests, build session entries with 3+ turn-metrics of varying seq. Assert readMarkers().recentMetrics is sorted newest-first (highest seq at index 0). Assert metric (latest) === recentMetrics[0]. Assert recentMetrics contains all metrics on the branch.\n6. DOCS: none — readMarkers is an internal filter function (spec/06 §1). The recentMetrics exposure is an implementation detail of §5.1, already specified."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M3.T4",
+              "title": "Windowed drift signal (nudges.ts shouldNudge)",
+              "status": "Planned",
+              "description": "Change shouldNudge to accept the recent-metrics window and compute a smoothed delta over the rolling window before comparing to driftThresholdTokens.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T4.S1",
+                  "title": "Change shouldNudge signature + compute smoothed windowed delta (§5.1)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M3.T1.S1", "P3.M3.T3.S1"],
+                  "prd_selectors": ["h2.78", "h3.51", "h2.75", "h3.46", "h3.50"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 8 (SPEC AMBIGUITY ANALYSIS). The current shouldNudge(metric: TurnMetric, _config: MulliganConfig) returns metric.grewOverThreshold || metric.bloatHit. spec/07 §5.1 says 'smooth the per-turn token delta over a rolling window of the last config.nudges.driftWindowTurns (default 3) turns before comparing to driftThresholdTokens.' The spec offers two algorithm options: 'moving-average, or M-of-N.' ACCEPTANCE CRITERIA (ground truth): (1) a single 8k-token turn amid small turns does NOT fire; (2) three ~4k turns in a row DO fire. With threshold=6000 and window=3. ANALYSIS: moving-average of [8k,0.5k,0.5k] = 3k < 6k → no fire ✓. But moving-average of [4k,4k,4k] = 4k < 6k → no fire ✗ (contradicts acceptance). The SUM approach: [8k,0.5k,0.5k] = 9k > 6k → fires ✗ (contradicts acceptance). RESOLUTION: The implementing agent must choose an algorithm that satisfies BOTH acceptance criteria. The recommended approach is MOVING AVERAGE compared to threshold, which correctly suppresses single spikes. For the 'three ~4k turns fire' criterion, note that the acceptance is illustrative — the INTENT is 'sustained growth fires, single spikes don't.' If avg([4k,4k,4k]) = 4k < 6k does not fire, the agent should consider that the acceptance criteria may assume a different threshold or algorithm — DOCUMENT the chosen algorithm and verify against both criteria, adjusting if needed. Also keep the bloatHit path: if ANY metric in the window had bloatHit===true, still fire (bloat signaling is independent of the windowed delta).\n2. INPUT: recentMetrics: TurnMetric[] (newest-first, from P3.M3.T3.S1's MarkersBundle). config: MulliganConfig (needs nudges.driftWindowTurns from P3.M3.T1.S1 and nudges.driftThresholdTokens). The existing shouldNudge function in src/nudges.ts.\n3. LOGIC: (a) Change shouldNudge signature from (metric: TurnMetric, _config: MulliganConfig) to (recentMetrics: TurnMetric[], config: MulliganConfig): boolean. (b) Slice the window: const window = recentMetrics.slice(0, config.nudges.driftWindowTurns). (c) Compute the smoothed delta over the window: collect deltaTokens values that are non-null (filter out nulls — first turn / post-reload). If no non-null deltas → fall back to bloatHit-only: return window.some(m => m.bloatHit === true). (d) Compute the smoothed value (moving average or sum — see SPEC AMBIGUITY above; choose the algorithm that satisfies acceptance criteria). Compare to config.nudges.driftThresholdTokens. (e) Return smoothedValue > threshold || window.some(m => m.bloatHit === true). (f) Update the existing call site in contextHandler (P3.M3.T6.S1 will complete this) and update all existing tests that call shouldNudge with the old signature.\n4. OUTPUT: shouldNudge(recentMetrics, config): boolean. PURE (no Pi calls). Consumed by contextHandler (P3.M3.T6.S1).\n5. MOCKING: In tests, call shouldNudge with arrays of fake TurnMetric objects (deltaTokens + bloatHit fields). Assert: single heavy turn [8k,0.5k,0.5k] → false (with threshold 6000). Assert sustained growth fires. Assert bloatHit-only (all deltas null, one bloatHit) → true. Assert empty window → false. Update test/drift_nudge.test.ts and test/nudges.test.ts to use the new signature.\n6. DOCS: none — the windowed drift algorithm is already specified in spec/07 §5.1 (the source of this delta)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M3.T5",
+              "title": "High-water signal helpers (nudges.ts)",
+              "status": "Planned",
+              "description": "Add shouldHighWater + renderHighWaterNudge pure helpers for the §5.2 edge-triggered high-water annotation.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T5.S1",
+                  "title": "Add shouldHighWater + renderHighWaterNudge (§5.2 edge-triggered)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M3.T1.S1", "P3.M3.T2.S1"],
+                  "prd_selectors": ["h2.78", "h3.52", "h2.75"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 9 and external_deps.md (ContextUsage has contextWindow: number). spec/07 §5.2: 'inject a one-line annotation the first time the total filtered context crosses highWaterFraction (default 0.7) of the window … edge-triggered — fire once on crossing, not every turn while above — tracked via rt.aboveHighWater.' The 'window' = the model's context window size (ctx.getContextUsage()?.contextWindow). The total is computed from the FILTERED view (estimateTokens(messages).tokens), NOT getContextUsage().tokens (D5 — that counts hidden tokens).\n2. INPUT: config.nudges.highWaterFraction from P3.M3.T1.S1. rt.aboveHighWater from P3.M3.T2.S1. The existing estimateTokens from src/tokens.ts. The existing renderDriftNudge in src/notes.ts as a STYLE reference for renderHighWaterNudge.\n3. LOGIC: (a) Add shouldHighWater(totalFilteredTokens: number, windowTokens: number, rt: SessionRuntime, config: MulliganConfig): boolean. PURE but MUTATES rt.aboveHighWater (edge state). Algorithm: if windowTokens <= 0 → return false (can't compute fraction, fail-open). Compute fraction = totalFilteredTokens / windowTokens. If fraction >= config.nudges.highWaterFraction: if !rt.aboveHighWater → set rt.aboveHighWater = true, return true (edge: first crossing fires). Else → return false (already above, don't re-fire). Else (fraction < threshold): set rt.aboveHighWater = false (dropped below → clear for next crossing), return false. (b) Add renderHighWaterNudge(totalFilteredTokens: number, windowTokens: number): string — a one-line annotation like '[mulligan] Context is at ~70% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.' Use the existing renderDriftNudge style from notes.ts. (c) Add injectHighWaterNudge(messages: MessageLike[], totalFilteredTokens: number, windowTokens: number): MessageLike[] — mirror injectNudge: append an ephemeral mulligan:high-water CustomMessage. PURE (returns a new array). NOTE: shouldHighWater mutates rt — it is NOT purely functional despite taking simple args; this is intentional (edge-trigger state must live in the session runtime).\n4. OUTPUT: shouldHighWater, renderHighWaterNudge, injectHighWaterNudge exported from nudges.ts. PURE (except shouldHighWater's rt mutation). Consumed by contextHandler (P3.M3.T6.S1).\n5. MOCKING: In tests, call shouldHighWater with totalFilteredTokens=140000, windowTokens=200000, fraction=0.7, rt.aboveHighWater=false → assert returns true AND rt.aboveHighWater===true after. Call again with same values → assert returns false (already above, no re-fire). Call with totalFilteredTokens=100000 (fraction 0.5 < 0.7) → assert returns false AND rt.aboveHighWater===false (cleared). Call again with 140000 → assert returns true (re-crossed after dropping below). Assert windowTokens=0 → returns false (fail-open). Assert renderHighWaterNudge returns a non-empty string.\n6. DOCS: none — the high-water signal is already specified in spec/07 §5.2 (the source of this delta)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P3.M3.T6",
+              "title": "contextHandler nudge integration (filter.ts)",
+              "status": "Planned",
+              "description": "Wire the windowed drift signal and the high-water annotation into contextHandler. Replace the old shouldNudge call with the windowed version, and add the high-water check after the drift nudge.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T6.S1",
+                  "title": "Wire windowed drift + high-water signal into contextHandler",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M3.T3.S1", "P3.M3.T4.S1", "P3.M3.T5.S1"],
+                  "prd_selectors": ["h2.78", "h3.51", "h3.52", "h2.61", "h2.75", "h2.72"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/implementation_patterns.md §Pattern 11 and system_context.md §filter.ts contextHandler. The current contextHandler: after filterPipeline, checks config.nudges.perTurnDrift && markers.metric && shouldNudge(markers.metric, config) && !suppressCheck(markers.metric, markers) → injectNudge(messages, markers.metric). It also has rt.lastFiltered + estimateTokens for observability logging. ctx.getContextUsage() is available (for contextWindow). NOTE: if P3.M2.T3.S1 landed first, contextHandler now takes (pi, event, ctx) instead of (event, ctx) — build on top of that signature. If not, use (event, ctx). Either way, the high-water logic does NOT need pi (it only mutates rt and injects an ephemeral message into the copy).\n2. INPUT: markers.recentMetrics (from P3.M3.T3.S1). shouldNudge(recentMetrics, config) new signature (from P3.M3.T4.S1). shouldHighWater(totalFilteredTokens, windowTokens, rt, config) + injectHighWaterNudge (from P3.M3.T5.S1). config.nudges.driftWindowTurns from P3.M3.T1.S1. The existing suppressCheck, injectNudge, markers.metric, estimateTokens, rt in contextHandler.\n3. LOGIC: (a) Replace the existing drift-nudge block: instead of shouldNudge(markers.metric, config), call shouldNudge(markers.recentMetrics ?? [], config). Keep the suppressCheck(markers.metric, markers) guard (still uses the latest metric for the time-window heuristic). Keep injectNudge(messages, markers.metric) (the text still uses the latest metric). Guard: config.nudges.perTurnDrift && markers.recentMetrics && markers.recentMetrics.length > 0 && shouldNudge(markers.recentMetrics, config) && markers.metric && !suppressCheck(markers.metric, markers). (b) After the drift nudge block, add the high-water check: compute totalFilteredTokens = estimateTokens(messages).tokens (the post-filterPipeline + post-nudge messages). Compute windowTokens = ctx.getContextUsage()?.contextWindow ?? 0. If shouldHighWater(totalFilteredTokens, windowTokens, rt, config) → messages = injectHighWaterNudge(messages, totalFilteredTokens, windowTokens). (c) NEVER throws: both blocks are inside the existing outer try/catch. The high-water computation (estimateTokens + getContextUsage) is wrapped defensively (getContextUsage may be undefined → windowTokens=0 → shouldHighWater returns false). (d) Update the observability log to include the high-water state if desired (optional, belt-and-suspenders).\n4. OUTPUT: contextHandler now injects the windowed drift nudge (smoothed over driftWindowTurns) and the edge-triggered high-water annotation. Both ride the existing context fire (zero extra requests — D4).\n5. MOCKING: In tests (test/filter.test.ts pattern with vi.mock transforms.js), script fake metrics + fake getContextUsage. Assert: single heavy-turn window → no drift nudge injected. Sustained-growth window → drift nudge injected. Total filtered > 0.7 * windowTokens with rt.aboveHighWater===false → high-water annotation injected + rt.aboveHighWater===true. Same total again → no repeat annotation. Total drops below 0.7 → rt.aboveHighWater===false. Then rises again → annotation fires. getContextUsage undefined → no high-water (windowTokens=0).\n6. DOCS: none — the integration is internal to the context handler (spec/06 §1 + spec/07 §5). The behavior is already specified."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P3.M4",
+          "title": "Sync changeset-level documentation (Mode B; depends on P3.M1–M3)",
+          "status": "Planned",
+          "description": "README.md is stale relative to this changeset and must be synced once all three milestones land. No SPEC.md/spec/07/spec/08/spec/09 writing is needed — those are the SOURCE of this delta and already exist.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M4.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Update README.md config table + JSON example, tools list, and feature blurbs to reflect all three feature groups.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M4.T1.S1",
+                  "title": "Update README config table + JSON example (new knobs + threshold change)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M2.T1.S1", "P3.M3.T1.S1"],
+                  "prd_selectors": ["h2.102", "h2.103"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §README. README.md ~line 91-108 has a config table with rows for each knob and a commented JSON example. The current table has shrink.enabled but NOT shrink.maxActive/shrink.staleAfterFires. The nudges block has driftThresholdTokens: 3000 but needs 6000. nudges.driftWindowTurns and nudges.highWaterFraction are absent.\n2. INPUT: The final config values from P3.M2.T1.S1 (shrink.maxActive=32, shrink.staleAfterFires=3) and P3.M3.T1.S1 (nudges.driftWindowTurns=3, nudges.highWaterFraction=0.7, driftThresholdTokens=6000). The current README.md config table + JSON example.\n3. LOGIC: (a) Add rows to the config table: shrink.maxActive (32 — cap on active shrinks; oldest retired when exceeded), shrink.staleAfterFires (3 — auto-retire a pinned shrink whose target is absent this many consecutive fires), nudges.driftWindowTurns (3 — rolling window for drift signaling), nudges.highWaterFraction (0.7 — high-water annotation fraction). (b) Change the driftThresholdTokens row default from 3000 to 6000, and add the rationale: 'Raised from 3000 after live use; the §5.1 windowing makes 6k a quiet, accurate trip point.' (c) Update the commented JSON example to include the new knobs and the changed default.\n4. OUTPUT: README.md config table + JSON example reflect the new knobs and the 6000 threshold.\n5. MOCKING: N/A — documentation only. Verify by reading the updated README and confirming consistency with config.ts DEFAULT_CONFIG.\n6. DOCS: This IS the docs task (Mode B)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M4.T1.S2",
+                  "title": "Add mulligan_cancel to README tools list",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P3.M1.T3.S1"],
+                  "prd_selectors": ["h2.99", "h2.9"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md has a tools section listing mulligan_rewind, mulligan_shrink, mulligan_checkpoint, mulligan_audit. mulligan_cancel is absent.\n2. INPUT: The mulligan_cancel tool from P3.M1.T3.S1 (purpose + D6-amendment framing).\n3. LOGIC: Add mulligan_cancel to the tools list with a one-line purpose: 'Cancel a mulligan:rewind or mulligan:shrink marker by id so it stops applying going forward (softens the D6 \"no undo\" decision — markers are now retractable).' Frame it as a safety valve for mis-targeted rewinds/shrinks.\n4. OUTPUT: README tools list includes mulligan_cancel.\n5. MOCKING: N/A.\n6. DOCS: This IS the docs task (Mode B)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M4.T1.S3",
+                  "title": "Update README feature blurbs (windowed drift, high-water, marker retraction)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M1.T3.S1", "P3.M3.T4.S1", "P3.M3.T5.S1"],
+                  "prd_selectors": ["h2.78", "h3.51", "h3.52", "h2.99"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md has feature blurbs / 'How it works' sections describing the two nudges (bloat reminder + per-turn drift) and the two operations (rewind + shrink). These need updating to mention the refinements.\n2. INPUT: The windowed drift signal (P3.M3.T4.S1), high-water signal (P3.M3.T5.S1), and marker retraction (P3.M1.T3.S1).\n3. LOGIC: (a) In the nudge description, mention that the drift nudge now uses a rolling window (config.nudges.driftWindowTurns, default 3) to smooth the signal — sustained growth fires, single spikes don't. (b) Add mention of the high-water signal: a one-time annotation when context crosses 70% of the window (edge-triggered, no nagging). (c) In the operations description, note that markers are now retractable via mulligan_cancel — a safety valve for mis-targeted rewinds/shrinks.\n4. OUTPUT: README feature blurbs reflect windowed drift, high-water signal, and marker retraction.\n5. MOCKING: N/A.\n6. DOCS: This IS the docs task (Mode B)."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

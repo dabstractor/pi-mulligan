@@ -1,0 +1,13 @@
+33e00a964ed1 spec/SPEC.md
+42d9ee85b9a7 spec/01-pi-context-internals.md
+b649e78324f6 spec/02-proven-constraints.md
+f73c94643444 spec/03-architecture.md
+d68bc168af6b spec/04-data-model.md
+6d814bddb3b4 spec/05-tools.md
+68744be53140 spec/06-context-filter.md
+b287cf96e3b1 spec/07-preventive-and-nudges.md
+8936ccfb3079 spec/08-edge-cases.md
+9078e8481e8a spec/09-configuration.md
+a81ad4e6ac82 spec/10-testing.md
+5662b9955f02 spec/11-build-order.md
+ff606a0aa21a spec/12-glossary.md

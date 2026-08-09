@@ -1,0 +1,202 @@
+h1.0 pi-mulligan — Specification
+ h2.0 0. How to read this document
+ h2.1 1. Executive summary
+ h2.2 2. Problem statement (PRD)
+  h3.0 2.1 The pain
+  h3.1 2.2 Why Pi's existing tools don't solve this
+  h3.2 2.3 What we build
+  h3.3 2.4 Target users
+  h3.4 2.5 Success criteria
+  h3.5 2.6 Non-goals (explicitly out of scope)
+ h2.3 3. Design principles
+ h2.4 4. High-level architecture
+ h2.5 5. The two operations (plain-language summary)
+ h2.6 6. The two nudges (plain-language summary)
+ h2.7 7. Configuration surface (summary)
+ h2.8 8. Verification strategy (summary)
+ h2.9 9. Decision log (condensed)
+ h2.10 10. Glossary (summary)
+ h2.11 Index
+ h2.12 1. What an extension is
+ h2.13 2. The two context objects
+  h3.6 2.1 ExtensionContext — given to event handlers and tools
+  h3.7 2.2 ExtensionCommandContext — given only to command handlers
+ h2.14 3. ExtensionAPI (the pi object) — what tools can actually do
+ h2.15 4. The session is an append-only tree; sessionManager is read-only
+  h3.8 4.1 The on-disk format
+  h3.9 4.2 ReadonlySessionManager — the read surface
+ h2.16 5. The context event — Mulligan's primary surface
+ h2.17 6. The agent loop & "auto-prompt"
+ h2.18 7. getContextUsage() — and why Mulligan must not trust it
+ h2.19 8. Compaction (so Mulligan can coexist with it)
+ h2.20 9. Built-in tool truncation (calibrates the "bloat" problem)
+ h2.21 10. Modes (ctx.mode)
+ h2.22 Cross-references
+ h2.23 C1. A tool cannot mutate the session through ctx.sessionManager
+ h2.24 C2. An extension-injected message does NOT dispatch as a command
+ h2.25 C3. navigateTree is command-context-only (and thus unreachable by the agent)
+ h2.26 C4. The context event is non-destructive and per-inference — and that is exactly what we want
+ h2.27 C5. The filter takes effect on the next inference in the same loop, and the model auto-continues
+ h2.28 C6. tool_result / message_end rewrites persist — but only at production time
+ h2.29 C7. pi.appendEntry returns void, not an id
+ h2.30 C8. pi.sendMessage from within a tool is safe and synchronous-ish
+ h2.31 C9. pi.setLabel / getLabel round-trip works from a tool
+ h2.32 C10. Extension-injected messages traverse the input event
+ h2.33 C11. Compaction summarizes the head, not the tail — rewind is a distinct primitive
+ h2.34 C12. The session rebinds after certain operations — captured references go stale
+ h2.35 Summary table — what a Mulligan tool may and may not do
+ h2.36 Cross-references
+ h2.37 1. One-sentence architecture
+ h2.38 2. Components
+  h3.10 2.1 Tools (@05-tools.md)
+  h3.11 2.2 Event handlers
+  h3.12 2.3 Pure helpers (@06-context-filter.md)
+ h2.39 3. Data flow
+  h3.13 3.1 A rewind, step by step
+  h3.14 3.2 A shrink, step by step
+  h3.15 3.3 The per-turn nudge, step by step (@07-preventive-and-nudges.md)
+ h2.40 4. Where each piece of information lives
+ h2.41 5. Ordering, composition, and idempotency
+ h2.42 6. Why this shape (rejected alternatives)
+ h2.43 7. Module layout (internal)
+ h2.44 8. Cross-references
+ h2.45 1. Versioning
+ h2.46 2. The note (input + rendered)
+  h3.16 2.1 NoteInput — what the agent passes to mulligan_rewind
+  h3.17 2.2 FileLedger — deterministically extracted, appended to the note
+  h3.18 2.3 Rendered note (the CustomMessage content)
+ h2.47 3. Marker: rewind
+ h2.48 4. Marker: shrink
+ h2.49 5. Turn metric (for the nudge)
+ h2.50 6. Checkpoint
+ h2.51 7. Configuration (mulligan in settings.json)
+ h2.52 8. In-memory (non-persisted) state
+ h2.53 9. Logging shape (for log.file)
+ h2.54 10. Cross-references
+ h2.55 1. mulligan_rewind
+  h3.19 Purpose
+  h3.20 When the agent should use it
+  h3.21 Parameter schema (typebox)
+  h3.22 Return shape
+  h3.23 Behavior (step by step)
+  h3.24 Notes on resolution timing
+  h3.25 Example
+ h2.56 2. mulligan_shrink
+  h3.26 Purpose
+  h3.27 When to use it (vs mulligan_rewind)
+  h3.28 Parameter schema
+  h3.29 Return shape
+  h3.30 Behavior
+ h2.57 3. mulligan_checkpoint
+  h3.31 Purpose
+  h3.32 Parameter schema
+  h3.33 Return shape
+  h3.34 Behavior
+ h2.58 4. mulligan_audit
+  h3.35 Purpose (the read-only exception)
+  h3.36 Parameter schema
+  h3.37 Return shape
+  h3.38 Behavior
+ h2.59 5. Tool registration summary (for index.ts)
+  h3.39 Description strings (craft carefully — they drive LLM usage)
+ h2.60 6. Cross-references
+ h2.61 1. The handler (glue)
+ h2.62 2. Pairing: the cardinal rule
+ h2.63 3. resolveLastToolCallGroup
+ h2.64 4. resolveLastTurn
+ h2.65 5. applyShrink — content substitution
+ h2.66 6. Checkpoint targeting (entry → message mapping)
+ h2.67 7. Caching the filtered view for mulligan_audit
+ h2.68 8. Protected messages
+ h2.69 9. Parallel-tool-mode corner case
+ h2.70 10. Interaction with compaction
+ h2.71 11. Composition & idempotency (recap with example)
+ h2.72 12. Pseudocode: the full pipeline (reference)
+ h2.73 13. Cross-references
+ h2.74 1. Nudge A — bloated-result reminder (tool_result event)
+  h3.40 Purpose
+  h3.41 Mechanism
+  h3.42 renderBloatReminder
+  h3.43 Threshold default & calibration
+  h3.44 Interaction with shrink/rewind
+  h3.45 Why advisory, not auto-shrink (D3)
+ h2.75 2. Nudge B — per-turn drift nudge (turn_end → context injection)
+  h3.46 Purpose
+  h3.47 Mechanism — two phases
+  h3.48 Why this is zero-extra-requests
+  h3.49 Cost
+  h3.50 Edge cases
+ h2.76 3. Determinism & testability
+ h2.77 4. Cross-references
+ h2.78 5. Drift-nudge refinements (REQUIRED)
+  h3.51 5.1 Windowed drift signaling (REQUIRED)
+  h3.52 5.2 Edge-triggered high-water signal (REQUIRED)
+ h2.79 E1. Orphaned toolResult (no matching toolCall)
+ h2.80 E2. Rewinding the executing turn
+ h2.81 E3. Rewinding across a protected message
+ h2.82 E4. Max rewind depth exceeded
+ h2.83 E5. Rewinding a span that had side effects (writes/bash)
+ h2.84 E6. Parallel tool mode: mulligan_rewind with siblings
+ h2.85 E7. Compaction summarizes content Mulligan hid
+ h2.86 E8. Marker targets nothing (already removed/compacted)
+ h2.87 E9. Note field validation failure
+ h2.88 E10. Checkpoint name invalid or not found
+ h2.89 E11. Session reload / /resume mid-task
+ h2.90 E12. getContextUsage() undefined (no model / pre-first-inference)
+ h2.91 E13. Tool throws internally
+ h2.92 E14. Extension disabled via config
+ h2.93 E15. Very large number of accumulated markers/notes (long sessions)
+ h2.94 E16. mulligan_audit called before any inference
+ h2.95 E17. Two shrinks target the same message
+ h2.96 E18. The model ignores the nudges
+ h2.97 E19. Shrink target is a non-toolResult message
+ h2.98 E20. pi.appendEntry / pi.sendMessage ordering race
+ h2.99 E21. Marker retraction — cancel an erroneous/stale marker (REQUIRED; softens D6)
+ h2.100 Cross-references
+ h2.101 1. Where config is read
+ h2.102 2. Schema & defaults
+ h2.103 3. Rationale per knob
+ h2.104 4. Validation rules (in config.ts)
+ h2.105 5. Environment overrides (optional, v1.1 — not required for v1)
+ h2.106 6. Cross-references
+ h2.107 1. Tier 1 — Unit tests (pure helpers, no Pi)
+  h3.53 1.1 partitionIntoUnits (pairing)
+  h3.54 1.2 resolveLastToolCallGroup
+  h3.55 1.3 resolveLastTurn
+  h3.56 1.4 applyRewind
+  h3.57 1.5 applyShrink
+  h3.58 1.6 extractFileLedger
+  h3.59 1.7 estimateTokens
+  h3.60 1.8 renderNote / field validation
+  h3.61 1.9 Pipeline composition (filterPipeline)
+ h2.108 2. Tier 2 — Integration smoke harness (real pi)
+  h3.62 2.1 Required scenarios & pass criteria (mirror the spike)
+  h3.63 2.2 Driving reliability
+  h3.64 2.3 Session JSONL assertions
+ h2.109 3. Property/invariant tests (optional, high-value)
+ h2.110 4. Manual / TUI smoke
+ h2.111 5. Cross-references
+ h2.112 1. Repository layout
+  h3.65 1.1 package.json (minimum viable)
+  h3.66 1.2 tsconfig.json (minimum)
+ h2.113 2. Build order (do these in sequence; verify before proceeding)
+  h3.67 Step 0 — Scaffold & types (15 min)
+  h3.68 Step 1 — config.ts + log.ts + runtime.ts (30 min)
+  h3.69 Step 2 — Pure helpers: tokens.ts, ledger.ts, notes.ts (1–2 h)
+  h3.70 Step 3 — Pure core: transforms.ts (2–3 h — the bulk)
+  h3.71 Step 4 — markers.ts (30 min)
+  h3.72 Step 5 — filter.ts (1 h)
+  h3.73 Step 6 — Tools: tools/rewind.ts, shrink.ts, checkpoint.ts, audit.ts (2 h)
+  h3.74 Step 7 — nudges.ts (1 h)
+  h3.75 Step 8 — index.ts wiring + edge pass (1 h)
+  h3.76 Step 9 — Polish
+ h2.114 3. "Definition of done"
+ h2.115 4. Cross-references
+ h2.116 Glossary
+ h2.117 References
+  h3.77 Pi documentation (read during the spike; authoritative for the surfaces used)
+  h3.78 Pi examples referenced
+  h3.79 Project-internal references
+  h3.80 Decision log (one-line each; full reasoning in @reference/HANDOFF.md and @SPEC.md §9)
+---
+code:57 para:181 list:114 table:7 quote:20
