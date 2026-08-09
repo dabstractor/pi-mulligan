@@ -107,7 +107,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S3",
                   "title": "Update test/integration/smoke.ts threshold references",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T2.S1"
