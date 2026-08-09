@@ -55,10 +55,20 @@ export default function (pi: ExtensionAPI): void {
   registerBloatReminder(pi); // pi.on("tool_result", bloatReminderHandler) — Nudge A
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
 
-  // 5. session_start → reset this session's runtime (read sessionId FRESH — C12; never cache a
-  //    sessionManager handle). A resumed/reloaded session starts from clean in-memory control state;
-  //    persisted markers are untouched and remain the source of truth. Never branches on reason.
+  // 5. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
+  //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory
+  //    (step 1) loaded config with process.cwd() because it had no ctx (lifecycle asymmetry, D4);
+  //    here ctx.cwd is the real project root, so this is the correct place to re-read. Doubly
+  //    fail-open: loadMulliganConfig is fail-open (→ undefined) and setConfig is fail-open (→
+  //    DEFAULT_CONFIG), so a corrupt/changed settings file never crashes a reload (NO try/catch).
+  //    setLogFile re-points the logger AFTER the cache is repopulated (reads getConfig().log.file —
+  //    D6; must follow setConfig). _event.reason is available but intentionally NOT branched on (all
+  //    reasons re-read identically). resetRuntime is the tail and reads sessionId FRESH (C12; never
+  //    cache a sessionManager handle). A resumed/reloaded session starts from clean in-memory control
+  //    state; persisted markers are untouched and remain the source of truth.
   pi.on("session_start", (_event, ctx) => {
+    setConfig(loadMulliganConfig(ctx.cwd));
+    setLogFile(getConfig().log.file);
     resetRuntime(ctx.sessionManager.getSessionId());
   });
 

@@ -8,13 +8,16 @@ import { getRuntime, clearAll } from "../src/runtime.js";
 // (a real ~/.pi or repo .pi settings.json would make this machine-dependent). vi.mock is file-scoped
 // → does not leak to test/settings.test.ts or others. The hand-rolled Pi fakes (makePi/makeCtx) stay.
 vi.mock("../src/settings.js", () => ({ loadMulliganConfig: vi.fn() }));
+vi.mock("../src/log.js", () => ({ setLogFile: vi.fn() }));
 import { loadMulliganConfig } from "../src/settings.js"; // the mocked binding (assert/program it)
 import { getConfig } from "../src/config.js"; // to assert the return flowed to the cache
+import { setLogFile } from "../src/log.js"; // mocked — assert the session_start re-fire
 
 // ── module-level state reset (GOTCHA #12: runtime map is module-scoped) ───────────────────
 beforeEach(() => {
   clearAll();
   vi.mocked(loadMulliganConfig).mockReset(); // default vi.fn() → returns undefined → DEFAULT_CONFIG
+  vi.mocked(setLogFile).mockReset(); // default vi.fn() → no-op; cleared so factory step-2 calls don't leak
 });
 
 // ── fakes (hand-rolled, no vi.fn for Pi objects — mirror nudges.test.ts / filter.test.ts) ──
@@ -37,8 +40,10 @@ function makePi() {
   return { handlers, tools, pi: pi as unknown as ExtensionAPI };
 }
 
-/** Minimal fake ExtensionContext: only sessionManager.getSessionId() is needed by the session_start handler. */
-function makeCtx(sessionId = "sess-test") {
+/** Minimal fake ExtensionContext: carries the sessionManager (getSessionId) and cwd that the
+ *  session_start handler reads (T2.S2 re-reads config with ctx.cwd). cwd defaults to "/test/cwd" so
+ *  pre-T2.S2 callers are unaffected (backward compatible). */
+function makeCtx(sessionId = "sess-test", cwd = "/test/cwd") {
   const sessionManager = {
     getSessionId() {
       return sessionId;
@@ -46,6 +51,7 @@ function makeCtx(sessionId = "sess-test") {
   };
   return {
     sessionManager: sessionManager as unknown as ExtensionContext["sessionManager"],
+    cwd,
   } as ExtensionContext;
 }
 
@@ -168,11 +174,70 @@ describe("index.ts config loading (factory)", () => {
     expect(getConfig().enabled).toBe(true); // DEFAULT_CONFIG.enabled === true
   });
 
-  it("never calls loadMulliganConfig from the session_start handler (that re-read is T2.S2)", () => {
+  // (T2.S1's "never calls loadMulliganConfig from the session_start handler" scope-guard test was
+  //  REMOVED — it is now factually wrong because T2.S2 intentionally adds that exact re-read.
+  //  The positive assertions live in the `index.ts session_start config re-read (T2.S2)` block below.)
+});
+
+describe("index.ts session_start config re-read (T2.S2)", () => {
+  it("re-reads config with the authoritative ctx.cwd", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
-    const callsBefore = vi.mocked(loadMulliganConfig).mock.calls.length;
+    // The factory (step 2) also calls setLogFile; clear it so only the session_start re-fire is counted.
+    vi.mocked(setLogFile).mockClear();
+    vi.mocked(loadMulliganConfig).mockReturnValue({ log: { file: "/proj.log" } });
+
+    handlers["session_start"]!(makeStartEvent("reload"), makeCtx("s1", "/proj"));
+
+    expect(loadMulliganConfig).toHaveBeenCalledWith("/proj");
+    expect(getConfig().log.file).toBe("/proj.log");
+  });
+
+  it("re-fires setLogFile with the re-read config's log.file", () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(setLogFile).mockClear();
+    vi.mocked(loadMulliganConfig).mockReturnValue({ log: { file: "/x.log" } });
+
     handlers["session_start"]!(makeStartEvent("new"), makeCtx("s1"));
-    expect(vi.mocked(loadMulliganConfig).mock.calls.length).toBe(callsBefore); // unchanged
+
+    expect(setLogFile).toHaveBeenCalledTimes(1);
+    expect(setLogFile).toHaveBeenCalledWith("/x.log");
+  });
+
+  it("is fail-open to DEFAULT_CONFIG when re-read returns undefined", () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(setLogFile).mockClear();
+    vi.mocked(loadMulliganConfig).mockReturnValue(undefined); // absent/invalid settings
+
+    handlers["session_start"]!(makeStartEvent("resume"), makeCtx("s1"));
+
+    expect(getConfig().enabled).toBe(true); // DEFAULT_CONFIG.enabled === true
+    expect(setLogFile).toHaveBeenCalledWith(null); // DEFAULT_CONFIG.log.file === null
+  });
+
+  it("re-reads on EVERY reason (startup|reload|new|resume|fork)", () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+
+    for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
+      vi.mocked(loadMulliganConfig).mockReset();
+      handlers["session_start"]!(makeStartEvent(reason), makeCtx("s1", "/r"));
+      expect(loadMulliganConfig, `reason=${reason}`).toHaveBeenCalledWith("/r");
+    }
+  });
+
+  it("still resets the session runtime", () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+
+    const sid = "s1";
+    const rt = getRuntime(sid);
+    rt.seq = 99;
+
+    handlers["session_start"]!(makeStartEvent("new"), makeCtx(sid));
+
+    expect(getRuntime(sid).seq).toBe(0);
   });
 });

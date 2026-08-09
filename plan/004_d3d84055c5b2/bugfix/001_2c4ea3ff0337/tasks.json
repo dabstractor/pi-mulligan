@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "BUG-001: Wire settings.json configuration surface",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Make the entire documented configuration surface functional: read the mulligan block from Pi's settings.json (global ~/.pi/agent/settings.json + project-local <cwd>/.pi/settings.json), deep-merge them (project-local wins), and feed the result to setConfig() instead of setConfig(undefined). The downstream consumers (filter.ts, nudges.ts, all five tools) already gate on getConfig().enabled — they need zero changes. The fix is a new src/settings.ts module (Pi-bound, reads files from disk) wired into the index.ts factory and session_start handler.",
           "tasks": [
             {
@@ -59,7 +59,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Wire settings loading into extension lifecycle (src/index.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Replace the hard-coded setConfig(undefined) at index.ts:30 with real settings loading via loadMulliganConfig(). Wire it at two seams: (1) the factory body (best-effort global + project-local via process.cwd()), and (2) the session_start handler (authoritative project-local via ctx.cwd, re-reads on /reload). After each setConfig() call, re-fire setLogFile(getConfig().log.file) so logging respects the config. Update the stale code comments that admit the gap. Update index.test.ts assertions for the new behavior.",
               "subtasks": [
                 {
@@ -83,7 +83,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Add config re-read in session_start handler + re-fire setLogFile",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",
@@ -119,7 +119,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Fix stale SessionRuntime fixture in drift_nudge.test.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §3-4. The fixture is at test/drift_nudge.test.ts:238-250 in the rt() helper. It builds a near-complete SessionRuntime literal but omits rewindRefusedTurnIndex (added by P4 drift-nudge-mute work). The cast `as SessionRuntime` on a near-complete object triggers TS2352 under strict:true. The SessionRuntime type (src/runtime.ts) has 10 required fields; the fixture has 9. The missing field rewindRefusedTurnIndex has type number | null and default null (per freshRuntime). All 882 vitest tests pass (vitest transpiles without type-checking); the error only surfaces under tsc --noEmit.\n2. INPUT: The existing rt() fixture at test/drift_nudge.test.ts:238-250. The SessionRuntime type from src/runtime.ts (specifically the rewindRefusedTurnIndex: number | null field).\n3. LOGIC:\n   a) In the rt() helper's returned object literal (between aboveHighWater: above and the closing brace), add the line: `rewindRefusedTurnIndex: null,`.\n   b) The value null matches the freshRuntime() default and the field's type (number | null). The shouldHighWater tests that use this fixture never read rewindRefusedTurnIndex, so null is safe.\n   c) Do NOT change the cast from `as SessionRuntime` to `as unknown as SessionRuntime` — adding the field is the correct, more honest fix.\n4. OUTPUT: The fixture is now type-complete. `npx tsc --noEmit` will exit 0. The 882 existing tests remain unaffected.\n5. MOCKING: None needed. The fixture is a plain object literal. Verify: run `npx tsc --noEmit` (must exit 0) and `npx vitest run` (must stay 882/882).\n6. DOCS: [Mode A] none — no user-facing/config/API surface change. This is a test-internal fix.",
