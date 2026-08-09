@@ -1,0 +1,156 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Configuration Surface Repair + Type-Safety Gate",
+      "status": "Planned",
+      "description": "Fix two defects identified in end-to-end validation: BUG-001 (the documented settings.json configuration surface is never read — the master enabled off-switch and all 17 knobs are silently ignored because src/index.ts:30 hard-codes setConfig(undefined)) and BUG-002 (the project fails tsc --noEmit due to one stale SessionRuntime test fixture). Core rewind/shrink/checkpoint/audit/cancel functionality, nudges, transforms, filter, and the E22 runaway-loop backstops all work correctly out of the box via defaults; the gap is configurability and type-check cleanliness.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "BUG-001: Wire settings.json configuration surface",
+          "status": "Planned",
+          "description": "Make the entire documented configuration surface functional: read the mulligan block from Pi's settings.json (global ~/.pi/agent/settings.json + project-local <cwd>/.pi/settings.json), deep-merge them (project-local wins), and feed the result to setConfig() instead of setConfig(undefined). The downstream consumers (filter.ts, nudges.ts, all five tools) already gate on getConfig().enabled — they need zero changes. The fix is a new src/settings.ts module (Pi-bound, reads files from disk) wired into the index.ts factory and session_start handler.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Create settings-loading module (src/settings.ts)",
+              "status": "Planned",
+              "description": "Create a new Pi-bound module that reads the mulligan config block from Pi's settings.json files. This module is the bridge between Pi's file-based settings system and config.ts's Pi-free validation engine. It reads global settings (via getAgentDir()) and project-local settings (via cwd), deep-merges them (project-local wins), and returns the raw mulligan object for setConfig() to validate. config.ts stays Pi-free by design.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Implement readSettingsFile() + deepMergeSettings() private helpers",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5", "para.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/system_context.md §1.3 and architecture/pi_api_research.md §C.4. Pi 0.84.1 exports getAgentDir() at runtime (returns ~/.pi/agent/, respects PI_CODING_AGENT_DIR env var). getSettingsPath() is NOT exported at runtime (returns undefined). Settings files are JSON: global at path.join(getAgentDir(), 'settings.json'), project-local at path.join(cwd, '.pi', 'settings.json'). Pi deep-merges settings (settings-manager.js:8-34 deepMergeObjects): both objects → recurse, otherwise project value replaces.\n2. INPUT: No inputs — these are leaf utility functions. Uses node:fs readFileSync and node:path join.\n3. LOGIC:\n   a) readSettingsFile(filePath: string): Record<string, unknown> — Synchronously reads and JSON.parses a settings file. Wrapped in try/catch: missing file, unreadable, or invalid JSON → return {} (empty object, NOT throw). Validates the parsed value is a non-null, non-array object; otherwise returns {}.\n   b) deepMergeSettings(global: Record<string, unknown>, project: Record<string, unknown>): Record<string, unknown> — Recursive deep-merge where project-local wins. For each key: if both values are plain objects (typeof 'object', not null, not array), recurse; otherwise project value replaces global value. This must match Pi's deepMergeObjects semantics (see settings-manager.js:8-34). Arrays are REPLACED (not concatenated).\n   c) Both helpers are PRIVATE (not exported) — only loadMulliganConfig (S2) calls them.\n4. OUTPUT: readSettingsFile returns Record<string, unknown> (never throws). deepMergeSettings returns Record<string, unknown>. Both consumed by P1.M1.T1.S2.\n5. MOCKING: For tests, mock node:fs.readFileSync via vitest vi.mock or write real temp files with os.tmpdir(). No Pi mocking needed for these helpers (they are pure fs + merge logic). Test: missing file → {}, invalid JSON → {}, valid JSON → parsed object. deepMerge: overlapping nested objects recurse, non-overlapping keys preserved from both, arrays replace.\n6. DOCS: [Mode A] JSDoc on each private helper explaining the merge semantics and fail-open contract. No user-facing doc change — these are internal utilities."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Implement loadMulliganConfig(cwd?) entry point",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5", "para.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/system_context.md §1.5. The module imports getAgentDir from @earendil-works/pi-coding-agent (confirmed available at runtime). config.ts stays Pi-free (config.ts:160). The module contract: read files → merge → extract .mulligan → return raw object for setConfig() to validate. Fail-open: any error → undefined → validateConfig(undefined) → DEFAULT_CONFIG. The factory (P1.M1.T2.S1) and session_start handler (P1.M1.T2.S2) both call this function.\n2. INPUT: cwd?: string — optional project working directory. Falls back to process.cwd() when undefined. At factory time (no ctx), pass undefined or process.cwd(). At session_start (has ctx), pass ctx.cwd.\n3. LOGIC:\n   a) Import getAgentDir from '@earendil-works/pi-coding-agent'. Import readFileSync from 'node:fs', join from 'node:path'.\n   b) Export function loadMulliganConfig(cwd?: string): unknown.\n   c) Read global settings: path.join(getAgentDir(), 'settings.json') via readSettingsFile (S1).\n   d) Read project-local settings: path.join(cwd ?? process.cwd(), '.pi', 'settings.json') via readSettingsFile (S1).\n   e) Deep-merge: deepMergeSettings(global, project) (S1). Project-local wins.\n   f) Extract: return (merged as Record<string, unknown>)?.mulligan — may be undefined if the mulligan key is absent (zero-config case → DEFAULT_CONFIG).\n   g) ENTIRE body wrapped in try/catch: any error (getAgentDir throws, fs fails, etc.) → return undefined. NEVER throws.\n   h) If getAgentDir() import fails or throws, catch and return undefined (fail-open to DEFAULT_CONFIG).\n4. OUTPUT: Returns unknown — the raw mulligan object from merged settings, or undefined if absent/error. Consumed by index.ts (P1.M1.T2.S1, P1.M1.T2.S2) which passes it to setConfig().\n5. MOCKING: For tests, mock getAgentDir to return a temp directory. Create real settings.json files in temp dirs with os.tmpdir() + fs.mkdirSync. Test cases: (a) no mulligan key → undefined, (b) global-only mulligan → returns global mulligan, (c) project-only → returns project mulligan, (d) both → merged (project wins), (e) missing files → undefined, (f) invalid JSON → undefined, (g) getAgentDir throws → undefined (fail-open).\n6. DOCS: [Mode A] JSDoc on loadMulliganConfig explaining: what it reads (global + project-local), merge precedence (project-local wins), fail-open contract (any error → undefined → DEFAULT_CONFIG), and the cwd parameter semantics. This is the module's only export."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Wire settings loading into extension lifecycle (src/index.ts)",
+              "status": "Planned",
+              "description": "Replace the hard-coded setConfig(undefined) at index.ts:30 with real settings loading via loadMulliganConfig(). Wire it at two seams: (1) the factory body (best-effort global + project-local via process.cwd()), and (2) the session_start handler (authoritative project-local via ctx.cwd, re-reads on /reload). After each setConfig() call, re-fire setLogFile(getConfig().log.file) so logging respects the config. Update the stale code comments that admit the gap. Update index.test.ts assertions for the new behavior.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Wire loadMulliganConfig into factory body + update code comments",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S2"],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5", "para.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/system_context.md §1.4 (lifecycle asymmetry) and architecture/config_flow_research.md §2. The factory function signature is `export default function (pi: ExtensionAPI): void` — it receives ONLY pi, NO ctx. At factory time, process.cwd() is the best available project directory. The session_start handler (S2) will do the authoritative load with ctx.cwd. The existing factory body (src/index.ts:28-33) calls setConfig(undefined) then setLogFile(getConfig().log.file). The code comment at lines 28-29 explicitly admits the gap: 'v1: validated defaults — no Pi settings accessor in v1; setConfig(undefined) → DEFAULT_CONFIG; reading real settings.mulligan is v1.1'.\n2. INPUT: loadMulliganConfig(cwd?: string): unknown from P1.M1.T1.S2. setConfig(raw: unknown) and getConfig() from src/config.ts (unchanged). setLogFile(path) from src/log.ts (unchanged).\n3. LOGIC:\n   a) Add import: `import { loadMulliganConfig } from './settings.js';` at the top of src/index.ts.\n   b) Replace `setConfig(undefined);` (line 30) with `setConfig(loadMulliganConfig());` — no cwd arg means it falls back to process.cwd() inside settings.ts.\n   c) Keep `setLogFile(getConfig().log.file);` (line 33) unchanged — it now passes the REAL configured path instead of null.\n   d) Update the code comment at lines 28-29 to reflect the new behavior: 'Load + cache config from Pi settings.json (global + project-local via process.cwd()). Fail-open: any error → DEFAULT_CONFIG. Re-read with authoritative ctx.cwd on session_start (see below).'\n   e) Update the JSDoc on the factory function (lines 14-27) to remove the 'setConfig(undefined) → DEFAULT_CONFIG' language and reflect that real settings are loaded.\n4. OUTPUT: The factory now initializes config from real settings at load time. The existing setLogFile call automatically respects the loaded log.file path. No new exports.\n5. MOCKING: In index.test.ts, the factory is tested with a fake ExtensionAPI (makePi()). The test must mock or spy on loadMulliganConfig to verify it is called. Since settings.ts imports getAgentDir from Pi, and the test environment may not have a real settings.json, loadMulliganConfig will return undefined → DEFAULT_CONFIG (fail-open). Test: verify setConfig is called with the return of loadMulliganConfig (not undefined directly). May need vi.mock('./settings.js') to control the return value and assert it was called.\n6. DOCS: [Mode A] Update the code comments and JSDoc in src/index.ts as described in step (d)/(e). These are developer-facing docs embedded in source."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Add config re-read in session_start handler + re-fire setLogFile",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S2", "P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5", "para.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/system_context.md §1.4 and architecture/config_flow_research.md §2. The session_start handler at index.ts currently calls only resetRuntime(ctx.sessionManager.getSessionId()). SessionStartEvent has reason: 'startup' | 'reload' | 'new' | 'resume' | 'fork' — all are valid re-read triggers (config may change between sessions, especially on /reload). ExtensionContext has cwd: string (authoritative project dir). After setConfig(), setLogFile(getConfig().log.file) MUST be re-fired because the log destination can change with new settings. The spec (spec/09 §1) promises 're-read on /reload'.\n2. INPUT: loadMulliganConfig(cwd?: string) from P1.M1.T1.S2. ctx.cwd from ExtensionContext (the handler's second arg). setConfig, getConfig from config.ts. setLogFile from log.ts. resetRuntime, clearAll from runtime.ts.\n3. LOGIC:\n   a) In the existing `pi.on('session_start', (_event, ctx) => { ... })` handler body, BEFORE the existing resetRuntime call:\n   b) Add: `setConfig(loadMulliganConfig(ctx.cwd));` — authoritative project-local settings.\n   c) Add: `setLogFile(getConfig().log.file);` — re-fire log destination after config reload.\n   d) Keep the existing: `resetRuntime(ctx.sessionManager.getSessionId());` — unchanged.\n   e) Update the code comment above the handler to explain: config is re-read on every session_start (covers startup, /reload, new, resume, fork) using the authoritative ctx.cwd. This fulfills spec/09 §1 're-read on /reload'.\n   f) The _event param can remain unused (or rename to _event with a comment that reason is available but all reasons trigger re-read).\n4. OUTPUT: The session_start handler now re-reads config with the authoritative cwd and re-points the logger. No new exports.\n5. MOCKING: In index.test.ts, the session_start handler test uses a fake ctx (makeCtx()) that exposes only sessionManager.getSessionId(). The test must: (a) extend makeCtx to include cwd (string field), (b) mock loadMulliganConfig to verify it's called with ctx.cwd on session_start, (c) verify setLogFile is re-fired. Test: session_start calls loadMulliganConfig(ctx.cwd), then setConfig result is cached, then setLogFile receives the config's log.file.\n6. DOCS: [Mode A] Update the code comment on the session_start handler explaining the config re-read behavior. No user-facing doc change in this subtask."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "BUG-002: Fix tsc --noEmit + add CI typecheck gate",
+          "status": "Planned",
+          "description": "Fix the single TS2352 error caused by a stale SessionRuntime test fixture in test/drift_nudge.test.ts (missing rewindRefusedTurnIndex field), and add a typecheck script to package.json so the project can be CI-gated on tsc --noEmit.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Fix stale test fixture and add typecheck CI script",
+              "status": "Planned",
+              "description": "Two atomic fixes: (1) add the missing rewindRefusedTurnIndex: null field to the rt() helper in test/drift_nudge.test.ts so the SessionRuntime fixture matches the current type, and (2) add a 'typecheck' script to package.json so CI can enforce tsc --noEmit.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Fix stale SessionRuntime fixture in drift_nudge.test.ts",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §3-4. The fixture is at test/drift_nudge.test.ts:238-250 in the rt() helper. It builds a near-complete SessionRuntime literal but omits rewindRefusedTurnIndex (added by P4 drift-nudge-mute work). The cast `as SessionRuntime` on a near-complete object triggers TS2352 under strict:true. The SessionRuntime type (src/runtime.ts) has 10 required fields; the fixture has 9. The missing field rewindRefusedTurnIndex has type number | null and default null (per freshRuntime). All 882 vitest tests pass (vitest transpiles without type-checking); the error only surfaces under tsc --noEmit.\n2. INPUT: The existing rt() fixture at test/drift_nudge.test.ts:238-250. The SessionRuntime type from src/runtime.ts (specifically the rewindRefusedTurnIndex: number | null field).\n3. LOGIC:\n   a) In the rt() helper's returned object literal (between aboveHighWater: above and the closing brace), add the line: `rewindRefusedTurnIndex: null,`.\n   b) The value null matches the freshRuntime() default and the field's type (number | null). The shouldHighWater tests that use this fixture never read rewindRefusedTurnIndex, so null is safe.\n   c) Do NOT change the cast from `as SessionRuntime` to `as unknown as SessionRuntime` — adding the field is the correct, more honest fix.\n4. OUTPUT: The fixture is now type-complete. `npx tsc --noEmit` will exit 0. The 882 existing tests remain unaffected.\n5. MOCKING: None needed. The fixture is a plain object literal. Verify: run `npx tsc --noEmit` (must exit 0) and `npx vitest run` (must stay 882/882).\n6. DOCS: [Mode A] none — no user-facing/config/API surface change. This is a test-internal fix."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Add typecheck script to package.json",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/tsc_fixture_research.md §5. package.json currently has scripts: { test: 'vitest run', smoke: 'node test/integration/run-smoke.mjs' }. There is no typecheck/tsc script. The tsconfig.json includes both src and test, so tsc --noEmit checks the full project. typescript ^5 is a devDependency (already installed). vitest transpiles without type-checking, which is why the stale fixture (BUG-002) went unnoticed.\n2. INPUT: The existing package.json scripts object.\n3. LOGIC:\n   a) Add a new script entry: `\"typecheck\": \"tsc --noEmit\"` to the scripts object in package.json.\n   b) Place it alphabetically or logically alongside the existing test and smoke scripts.\n4. OUTPUT: `npm run typecheck` (or `npx tsc --noEmit`) now type-checks the entire project. CI can add this as a gate.\n5. MOCKING: None. Verify: `npm run typecheck` exits 0 after S1 is applied.\n6. DOCS: [Mode A] The package.json scripts section is developer-facing documentation. The new script name 'typecheck' is self-documenting. No additional doc change needed."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Sync changeset-level documentation",
+          "status": "Planned",
+          "description": "Final documentation sweep across the whole changeset. The README already documents the correct configuration behavior (it was the code that was broken, not the docs). After BUG-001 is fixed, the README's Configuration section, Disabling subsection, and settings.json example become accurate. Verify they are coherent with the implementation. Add an implementation note to spec/09 explaining that Mulligan reads settings.json files directly from disk (since Pi 0.84.1's ExtensionAPI does not expose a settings accessor).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Sweep README.md and spec/09-configuration.md for coherence with the implemented changeset. The README's Configuration + Disabling sections were already accurate (the bug was in the code). Verify they are consistent with the new direct-file-read implementation. Add an implementation note to spec/09 §1 about the direct file-read approach. Run full validation: typecheck + test suite + smoke harness.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Verify README Configuration + Disabling sections are accurate post-fix",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2", "P1.M2.T1.S1", "P1.M2.T1.S2"],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/docs_spec_research.md §1. README.md:67-124 (§3 Configuration) documents 17 knobs, the global+project-local merge precedence, lazy loading, and /reload re-read. README.md:120-122 (Disabling subsection) documents the enabled:false master switch. These were ALREADY correct descriptions of the intended behavior — the code was broken, not the docs. After BUG-001 is fixed, these sections become accurate. The only potential discrepancy: the README says 'Pi's normal merge' handles global+project-local — the implementation actually does its own deepMergeSettings (since Pi exposes no accessor). The user-facing behavior is identical.\n2. INPUT: All implementing subtasks (P1.M1.T1.S1 through P1.M2.T1.S2). The README.md content as-is.\n3. LOGIC:\n   a) Read README.md §3 Configuration (lines 67-124) and the Disabling subsection (lines 120-122).\n   b) Verify every documented behavior now works: enabled:false is honored, all knobs are read, log.file is respected, /reload re-reads.\n   c) If the README's language about 'Pi's normal merge' is misleading given the direct-file-read approach, add a brief parenthetical note: '(Mulligan reads the settings files directly and merges them internally, since Pi's extension API does not expose a settings accessor as of v0.84.x)'.\n   d) Verify the settings.json example (README.md:107-118) is consistent.\n   e) Run `npx tsc --noEmit` (exit 0) and `npx vitest run` (882+ tests pass) as final validation.\n4. OUTPUT: README.md Configuration + Disabling sections are verified accurate. Minor clarifications added only if the implementation approach diverges from what the README implies.\n5. MOCKING: None. This is a documentation review + validation step.\n6. DOCS: [Mode B] This IS the changeset-level documentation sync task. It sweeps README.md for coherence with the full changeset."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S2",
+                  "title": "Update spec/09-configuration.md with implementation note",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/docs_spec_research.md §2.1 and architecture/pi_api_research.md §C.4. spec/09-configuration.md §1 currently says: 'Source: the merged Pi settings object. Mulligan reads settings.mulligan (project-local wins over global via Pi's normal merge).' This implies Pi hands Mulligan an already-merged object. In reality, Pi 0.84.1's ExtensionAPI exposes no settings accessor, so Mulligan reads the files directly from disk (src/settings.ts) and does its own merge. The user-visible behavior is identical.\n2. INPUT: The spec/09-configuration.md §1 text. All BUG-001 implementing subtasks.\n3. LOGIC:\n   a) Read spec/09-configuration.md §1 (Where config is read).\n   b) Add an implementation note (sub-bullet or parenthetical) clarifying: 'Implementation: Pi's extension API (v0.84.x) does not expose a settings accessor to extensions. Mulligan therefore reads the settings.json files directly from disk (via getAgentDir() for the global path and the session cwd for project-local), deep-merges them internally (matching Pi's own deepMergeObjects semantics), and extracts settings.mulligan. The user-visible merge behavior is identical to Pi's normal merge.'\n   c) Do NOT change the spec's semantic contract — the behavior description is correct. Only add the implementation clarification.\n4. OUTPUT: spec/09-configuration.md §1 has an implementation note explaining the direct-file-read approach.\n5. MOCKING: None. Documentation-only change.\n6. DOCS: [Mode B] Part of the changeset-level documentation sync. This spec file describes the config surface that the changeset makes functional."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
