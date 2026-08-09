@@ -43,7 +43,7 @@
               "type": "Task",
               "id": "P4.M1.T2",
               "title": "Rewind tool guards (src/tools/rewind.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add two hard guards to rewindExecute step 4, AFTER the existing maxDepth guard (~line 399) and BEFORE step 5 (resolvePreview). All three guards (maxDepth, retry-budget, context-fraction) apply INDEPENDENTLY (first refusal wins). Both new guards refuse BEFORE persisting and never throw (E13). T2.S3 (nudge suppression) is a SHOULD/advisory that may be deferred.",
               "subtasks": [
                 {
@@ -67,7 +67,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S2",
                   "title": "Out-of-band context-fraction stop guard",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1"
@@ -87,7 +87,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S3",
                   "title": "Suppress drift nudge for a turn in which a rewind was refused (SHOULD/advisory)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T2.S1",

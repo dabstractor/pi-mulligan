@@ -461,6 +461,48 @@ function entriesToMessages(entries: SessionEntry[]): Record<string, unknown>[] {
   return out;
 }
 
+/**
+ * computeFilteredTotal — the shared filtered-context total + context-window SIZE estimate (spec/05 §4 step 2;
+ * spec/08 E22 out-of-band context-fraction stop). Returns the SAME total `mulligan_audit` reports and the
+ * model's window SIZE, so the rewind tool's context-fraction stop guard (P4.M1.T2.S2) and the audit never
+ * diverge. EXPORTED so audit + rewind share one computation (and tests can assert it directly).
+ *
+ * D5 compliance: the total is computed on the FILTERED view (rt.lastFiltered — what the model actually sees),
+ * NEVER ctx.getContextUsage().tokens (which counts hidden/rewound tokens — bookkeeping drift). The window SIZE
+ * (`.contextWindow`) IS read and permitted — D5 forbids `.tokens` only (filter.ts L326 already reads .contextWindow).
+ *
+ * rt.lastFiltered is the PREVIOUS context-fire's cached view (written by filterPipeline each fire). Read
+ * mid-turn from a tool, it is a STALE estimate (predates the current turn's contributions) — ACCEPTED for a
+ * STOP guard: staleness errs toward UNDER-counting → the guard fires LATER / lets more rewinds through, the
+ * safe direction. DO NOT "fix" the staleness by reading getContextUsage().tokens — D5 violation.
+ *
+ * Fail-open (E13): ONE try/catch around the WHOLE body → on ANY failure returns { totalTokens: 0, windowTokens: 0 }.
+ * The rewind guard treats windowTokens === 0 as "skip" (no model [E12] / undefined usage / throw → never block a
+ * rewind). Module-local entriesToMessages keeps this helper self-contained without an extra export.
+ */
+export function computeFilteredTotal(ctx: ExtensionContext): { totalTokens: number; windowTokens: number } {
+  try {
+    const rt = getRuntime(ctx.sessionManager.getSessionId());
+    let filtered;
+    if (Array.isArray(rt.lastFiltered)) {
+      filtered = rt.lastFiltered;
+    } else {
+      // E16-style fallback: entries → messages. CHEAPER than audit's fallback (no filterPipeline re-run) — the
+      // rewind guard is on the hot path and only needs an estimate. (Audit keeps its own more-accurate fallback.)
+      const entries = ctx.sessionManager.buildContextEntries();
+      filtered = entriesToMessages(entries);
+    }
+    type TM = Parameters<typeof estimateTokens>[0];
+    const totalTokens = estimateTokens(filtered as unknown as TM).tokens; // estimateTokens never throws (GOTCHA #3)
+    const usage = ctx.getContextUsage?.();
+    const windowTokens = usage?.contextWindow ?? 0; // D5: .contextWindow (the SIZE) is permitted; .tokens is not
+    return { totalTokens, windowTokens };
+  } catch {
+    // fail-open sentinel — windowTokens 0 makes the rewind guard SKIP (never block a rewind — E13)
+    return { totalTokens: 0, windowTokens: 0 };
+  }
+}
+
 // ── execute (spec/05 §4 behavior; shared tool convention = never throws) ─────
 
 /**

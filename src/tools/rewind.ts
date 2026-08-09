@@ -65,6 +65,7 @@ import {
   type BranchEntry,
   type MessageLike,
 } from "../transforms.js";
+import { computeFilteredTotal } from "./audit.js"; // E22 out-of-band context-fraction stop (shared with mulligan_audit)
 
 // ── Parameter schema (spec/05 §1 — Typebox, VERBATIM incl. every field description) ──────────
 
@@ -460,6 +461,24 @@ async function rewindExecute(
     if (retries >= config.rewind.maxRetriesPerPrompt) {
       return refusal(
         `hit the per-prompt retry budget (${retries}/${config.rewind.maxRetriesPerPrompt} rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again`,
+        granularity,
+      );
+    }
+
+    // (4c) out-of-band context-fraction stop (step 4; E22 hard backstop #2). Catches the ZERO-MARKER loop
+    //     vector — a spin that persists no rewind yet re-bloats the filtered context each turn (e.g. re-reading
+    //     the same large files because a bloated-result nudge keeps re-firing) — which the marker-counting
+    //     budget (4b) CANNOT see. If the filtered-context total is >= abortContextFraction of the window,
+    //     rewinding hides near nothing relative to the bloat and just grows the session with another marker +
+    //     note → refuse and steer to mulligan_shrink. Independent of maxDepth (4) and the retry budget (4b):
+    //     all three apply; first refusal wins. computeFilteredTotal is fail-open (returns {0,0} on any throw);
+    //     the windowTokens > 0 check IS the fail-open (no model / undefined usage [E12] / throw → SKIP, never
+    //     block a rewind — E13). D5: the total is the FILTERED view, NOT getContextUsage().tokens.
+    const { totalTokens, windowTokens } = computeFilteredTotal(ctx);
+    if (windowTokens > 0 && totalTokens / windowTokens >= config.rewind.abortContextFraction) {
+      const pct = Math.round((totalTokens / windowTokens) * 100);
+      return refusal(
+        `context is at ${pct}% of the window; rewinding will not help. Run mulligan_audit and shrink the largest result`,
         granularity,
       );
     }
