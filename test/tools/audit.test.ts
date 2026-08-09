@@ -416,14 +416,15 @@ describe("mulligan_audit — top param (GOTCHA #8: default 8; truncates only the
 describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)", () => {
   beforeEach(() => setConfig({}));
 
-  it("flags a toolResult whose bytes exceed config.nudges.bloatThresholdBytes", async () => {
+  it("flags a read toolResult whose bytes exceed the resolved read threshold", async () => {
     const { ctx } = makeCtx();
     getRuntime("s1").lastFiltered = [
-      toolResult("call-A", "read", kbText(20)), // 20 KB > 16 KB shipped default threshold → bloaty
+      toolResult("call-A", "read", kbText(21)), // 21 KB > read's 20 KB threshold → bloaty
     ];
     const res = await run(ctx, {});
     expect(res.details.top[0].bloaty).toBe(true);
-    expect(firstText(res)).toContain("⚠ above bloat threshold (16 KB)");
+    expect(res.details.top[0].thresholdBytes).toBe(20480);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (20 KB)");
   });
 
   it("does NOT flag a small toolResult", async () => {
@@ -431,7 +432,69 @@ describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)
     getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "tiny")];
     const res = await run(ctx, {});
     expect(res.details.top[0].bloaty).toBe(false);
+    expect(res.details.top[0].thresholdBytes).toBe(20480);
     expect(firstText(res)).not.toContain("⚠ above bloat threshold");
+  });
+});
+
+// ── (e2) per-tool bloat thresholds (BUG-001 fix: audit now agrees with Nudge A) ──
+
+describe("mulligan_audit — per-tool bloat thresholds (BUG-001 fix)", () => {
+  beforeEach(() => setConfig({}));
+
+  it("bash 20000B is NOT flagged (bash threshold 32 KB)", async () => {
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "bash", "x".repeat(20000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(false); // 20000 < 32768
+    expect(res.details.top[0].thresholdBytes).toBe(32768);
+    expect(firstText(res)).not.toContain("⚠ above bloat threshold");
+  });
+
+  it('bash 40000B is flagged with "(32 KB)" (bash threshold 32 KB)', async () => {
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "bash", "x".repeat(40000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(true); // 40000 > 32768
+    expect(res.details.top[0].thresholdBytes).toBe(32768);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (32 KB)");
+  });
+
+  it("read 18000B is NOT flagged (read threshold 20 KB)", async () => {
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "x".repeat(18000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(false); // 18000 < 20480
+    expect(res.details.top[0].thresholdBytes).toBe(20480);
+    expect(firstText(res)).not.toContain("⚠ above bloat threshold");
+  });
+
+  it('read 21000B is flagged with "(20 KB)" (read threshold 20 KB)', async () => {
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "x".repeat(21000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(true); // 21000 > 20480
+    expect(res.details.top[0].thresholdBytes).toBe(20480);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (20 KB)");
+  });
+
+  it('generic tool (grep) 17000B is flagged with "(16 KB)" (global fallback)', async () => {
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "grep", "x".repeat(17000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(true); // 17000 > 16384 global
+    expect(res.details.top[0].thresholdBytes).toBe(16384);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (16 KB)");
+  });
+
+  it('a non-toolResult user message (no toolName) uses the global threshold', async () => {
+    // guards the falsy-toolName branch of bloatThresholdFor (GOTCHA #5)
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [userMsg("x".repeat(17000))];
+    const res = await run(ctx, {});
+    expect(res.details.top[0].bloaty).toBe(true); // 17000 > 16384 global
+    expect(res.details.top[0].thresholdBytes).toBe(16384);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (16 KB)");
   });
 });
 
@@ -670,9 +733,9 @@ describe("mulligan_audit — pure helpers (describeMessage / buildCallLookup / l
 describe("renderAuditReport — spec/05 §4 verbatim format", () => {
   it("renders the full report (total, markers, protected, top rows, suggestion)", () => {
     const rows: AuditRow[] = [
-      { tokens: 9412, role: "toolResult", label: "read src/big.log", bloaty: true },
-      { tokens: 1840, role: "assistant", label: "(thinking + toolCall x2)", bloaty: false },
-      { tokens: 612, role: "toolResult", label: 'grep "auth"', bloaty: false },
+      { tokens: 9412, role: "toolResult", label: "read src/big.log", bloaty: true, thresholdBytes: 8192 },
+      { tokens: 1840, role: "assistant", label: "(thinking + toolCall x2)", bloaty: false, thresholdBytes: 8192 },
+      { tokens: 612, role: "toolResult", label: 'grep "auth"', bloaty: false, thresholdBytes: 8192 },
     ];
     const report = renderAuditReport({
       totalTokens: 12340,
@@ -681,7 +744,6 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       shrinks: [],
       checkpointNames: ["before-x", "before-y"],
       protectedRoles: ["first:user", "latest:user"],
-      thresholdBytes: 8192,
       rows,
       filtered: [1, 2, 3], // non-empty → suggestion present
     });
@@ -711,7 +773,6 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       shrinks: [],
       checkpointNames: [],
       protectedRoles: ["first:user", "latest:user"],
-      thresholdBytes: 8192,
       rows: [],
       filtered: [],
     });
@@ -731,8 +792,7 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
       shrinks: [],
       checkpointNames: [],
       protectedRoles: ["first:user", "latest:user"],
-      thresholdBytes: 8192,
-      rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false }],
+      rows: [{ tokens: 5, role: "user", label: 'user "hi"', bloaty: false, thresholdBytes: 8192 }],
       filtered: [{}],
     });
     expect(report).toContain("0 rewind, 0 shrink, 0 checkpoints []");
