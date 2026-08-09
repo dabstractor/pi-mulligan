@@ -17,6 +17,8 @@ describe("DEFAULT_CONFIG", () => {
         enabled: true,
         protectedRoles: ["first:user", "latest:user"],
         maxDepth: 5,
+        maxRetriesPerPrompt: 5,
+        abortContextFraction: 0.9,
         requireMutationWarning: true,
       },
       shrink: { enabled: true, maxActive: 32, staleAfterFires: 3 },           // no autoOnBloat (not v1)
@@ -73,7 +75,7 @@ describe("validateConfig", () => {
     });
     expect(cfg).toEqual({
       enabled: false,
-      rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, requireMutationWarning: false },
+      rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, maxRetriesPerPrompt: 5, abortContextFraction: 0.9, requireMutationWarning: false },
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },

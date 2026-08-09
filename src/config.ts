@@ -37,6 +37,18 @@ export interface MulliganConfig {
     /** Max simultaneous active mulligan:rewind markers on a branch. Bounds marker
      *  accumulation (markers are permanent). Default: 5. */
     maxDepth: number;
+    /** Max CONSECUTIVE rewinds re-landing at the same latest user prompt before the tool
+     *  refuses (the runaway-loop bound; `@08-edge-cases.md` E22). Distinct from `maxDepth`
+     *  (which bounds cumulative markers): a loop can persist while re-bloating between
+     *  rewinds, so depth alone cannot stop it. Integer >= 1. Default: 5. Consumed by
+     *  P4.M1.T2.S1 (the per-prompt retry budget guard in src/tools/rewind.ts). */
+    maxRetriesPerPrompt: number;
+    /** Wall-clock backstop: refuse any rewind once the filtered-context estimate reaches
+     *  this fraction of the model's window (catches the zero-marker loop vector the
+     *  retry budget cannot see; `@08-edge-cases.md` E22). Number in (0,1]. Default: 0.9
+     *  (leaves headroom below the provider's "Prompt too long" rejection). Consumed by
+     *  P4.M1.T2.S2 (the context-fraction stop guard in src/tools/rewind.ts). */
+    abortContextFraction: number;
     /** If true, the rewind tool appends a warning when the hidden span contained write /
      *  side-effecting tool calls (those effects PERSIST on disk). Default: true. */
     requireMutationWarning: boolean;
@@ -116,6 +128,8 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     enabled: true,
     protectedRoles: ["first:user", "latest:user"],
     maxDepth: 5,
+    maxRetriesPerPrompt: 5,
+    abortContextFraction: 0.9,
     requireMutationWarning: true,
   },
   shrink: {
@@ -222,6 +236,16 @@ export function validateConfig(raw: unknown): MulliganConfig {
       if (v !== undefined) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
       v = safeGet(rewindRaw, "maxDepth");
       if (v !== undefined) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
+      v = safeGet(rewindRaw, "maxRetriesPerPrompt");
+      if (v !== undefined) {
+        const n = coerceNumber("rewind.maxRetriesPerPrompt", v, cfg.rewind.maxRetriesPerPrompt, true);
+        cfg.rewind.maxRetriesPerPrompt = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.rewind.maxRetriesPerPrompt;
+      }
+      v = safeGet(rewindRaw, "abortContextFraction");
+      if (v !== undefined) {
+        if (typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1) cfg.rewind.abortContextFraction = v;
+        else warnConfig("rewind.abortContextFraction", v);
+      }
       v = safeGet(rewindRaw, "requireMutationWarning");
       if (v !== undefined) cfg.rewind.requireMutationWarning = coerceBoolean(v, cfg.rewind.requireMutationWarning);
     }
