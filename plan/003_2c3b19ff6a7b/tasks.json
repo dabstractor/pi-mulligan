@@ -280,14 +280,14 @@
               "type": "Task",
               "id": "P3.M3.T3",
               "title": "readMarkers recent-metrics window (filter.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Expose the last N turn-metrics (newest-first) on MarkersBundle so the contextHandler can compute the windowed drift signal.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T3.S1",
                   "title": "Expose recentMetrics: TurnMetric[] on MarkersBundle (sorted newest-first)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T2.S1"
@@ -306,14 +306,14 @@
               "type": "Task",
               "id": "P3.M3.T4",
               "title": "Windowed drift signal (nudges.ts shouldNudge)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Change shouldNudge to accept the recent-metrics window and compute a smoothed delta over the rolling window before comparing to driftThresholdTokens.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T4.S1",
                   "title": "Change shouldNudge signature + compute smoothed windowed delta (§5.1)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M3.T1.S1",

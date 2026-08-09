@@ -101,6 +101,17 @@ export interface MarkersBundle {
    *  readMarkers drops any marker whose data.id ∈ this set BEFORE returning, so the pipeline only sees the
    *  active markers. Always present (empty Set when there are no cancels on the branch). */
   cancelledIds: Set<string>;
+  /** The full set of `mulligan:turn-metric` entries on the branch, sorted NEWEST-FIRST (highest `seq` at
+   *  index 0). `metric` (the latest) === `recentMetrics[0]` (or null when empty) — kept for backward compat
+   *  (suppressCheck + the current per-turn shouldNudge(metric)/injectNudge(metric) calls in contextHandler
+   *  still use the single latest metric). The consumer (contextHandler, P3.M3.T6.S1) slices this to
+   *  `config.nudges.driftWindowTurns` and passes the window to the windowed shouldNudge (P3.M3.T4.S1) per
+   *  spec/07 §5.1. readMarkers does NOT slice — it exposes EVERY metric on the branch so the window math is
+   *  the consumer's responsibility (the item contract mandates this; Pattern 10's in-readMarkers slice is
+   *  superseded). Defensive on a missing/non-number `seq` (coerced to -Infinity → sorted to the end; still
+   *  included — never drop on bad data). Always present (empty array when there are no turn-metrics, and on
+   *  the getEntries-throws fail-open path). Internal (spec/06 §1: readMarkers is an internal filter fn). */
+  recentMetrics: TurnMetric[];
 }
 
 /**
@@ -127,12 +138,13 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
   const shrinks: ShrinkMarker[] = [];
   let metric: TurnMetric | null = null;
   const cancelledIds = new Set<string>();
+  const allMetrics: TurnMetric[] = []; // P3.M3.T3.S1: collect ALL valid turn-metrics (sorted later)
 
   let entries: SessionEntry[];
   try {
     entries = ctx.sessionManager.getEntries(); // read FRESH (C12)
   } catch {
-    return { rewinds, shrinks, metric, cancelledIds }; // a throwing getEntries → empty bundle (fail-open)
+    return { rewinds, shrinks, metric, cancelledIds, recentMetrics: allMetrics }; // fail-open (recentMetrics: [])
   }
 
   for (const entry of entries) {
@@ -150,10 +162,7 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
     } else if (customType === "mulligan:shrink" && kind === "shrink") {
       shrinks.push(data as unknown as ShrinkMarker);
     } else if (customType === "mulligan:turn-metric" && kind === "turn-metric") {
-      const candidate = data as unknown as TurnMetric;
-      const cSeq = typeof candidate.seq === "number" ? candidate.seq : -Infinity;
-      const mSeq = metric && typeof metric.seq === "number" ? metric.seq : -Infinity;
-      if (metric === null || cSeq > mSeq) metric = candidate; // keep the LATEST (highest seq)
+      allMetrics.push(data as unknown as TurnMetric); // P3.M3.T3.S1: collect ALL (sorted newest-first below)
     } else if (customType === "mulligan:cancel" && kind === "cancel") {
       // P3.M1.T2.S1 / E21: collect the uuid id of the rewind/shrink being retired. readMarkers drops
       // any marker whose data.id ∈ cancelledIds AFTER the scan (order-independent: full scan, then filter).
@@ -176,7 +185,23 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
     return typeof id !== "string" || !cancelledIds.has(id);
   });
 
-  return { rewinds: activeRewinds, shrinks: activeShrinks, metric, cancelledIds };
+  // P3.M3.T3.S1 / spec/07 §5.1: expose the full turn-metric window. Sort ALL collected metrics
+  // NEWEST-FIRST (highest seq at index 0). seq is monotonic per-session (ties impossible by
+  // construction), so among well-formed metrics this is a strict total order. Defensive: a non-number
+  // seq is coerced to -Infinity (sorted to the END — still included; never drop on bad data, matching
+  // the established defensive rule). metric (latest) = recentMetrics[0] for backward compat
+  // (suppressCheck + contextHandler's shouldNudge(metric)/injectNudge(metric) still use it). The
+  // consumer (P3.M3.T6.S1) slices to driftWindowTurns — readMarkers does NOT slice and does NOT import
+  // config (the item contract mandates a full, config-free array; Pattern 10's in-readMarkers slice is
+  // superseded).
+  const recentMetrics = allMetrics.sort(
+    (a, b) =>
+      (typeof b.seq === "number" ? b.seq : -Infinity) -
+      (typeof a.seq === "number" ? a.seq : -Infinity),
+  );
+  metric = recentMetrics[0] ?? null;
+
+  return { rewinds: activeRewinds, shrinks: activeShrinks, metric, cancelledIds, recentMetrics };
 }
 
 // ── contextHandler — the heart of the extension (spec/03 §7, spec/06 §1) ─────────────────────

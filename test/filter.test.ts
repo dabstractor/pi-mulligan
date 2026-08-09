@@ -147,6 +147,7 @@ describe("readMarkers — fresh read, bucket, latest metric (spec/06 §1, api_ve
     expect(bundle.rewinds).toEqual([]);
     expect(bundle.shrinks).toEqual([]);
     expect(bundle.metric).toBeNull();
+    expect(bundle.recentMetrics).toEqual([]);
   });
 
   it("buckets mulligan:rewind and mulligan:shrink custom entries", () => {
@@ -167,6 +168,9 @@ describe("readMarkers — fresh read, bucket, latest metric (spec/06 §1, api_ve
     const bundle = readMarkers(makeCtx({ entries }));
     expect(bundle.metric).not.toBeNull();
     expect((bundle.metric as { seq: number }).seq).toBe(3);
+    expect(bundle.recentMetrics).toHaveLength(3);
+    expect((bundle.recentMetrics[0] as { seq: number }).seq).toBe(3); // newest-first
+    expect(bundle.metric).toBe(bundle.recentMetrics[0]);              // latest === recentMetrics[0]
   });
 
   it("ignores custom_message (notes) and label (checkpoints) — type!=='custom'", () => {
@@ -205,6 +209,7 @@ describe("readMarkers — fresh read, bucket, latest metric (spec/06 §1, api_ve
     expect(bundle.metric).toBeNull();
     expect(bundle.cancelledIds).toBeInstanceOf(Set); // cancelledIds always present (catch path)
     expect(bundle.cancelledIds.size).toBe(0);
+    expect(bundle.recentMetrics).toEqual([]); // recentMetrics always present on the fail-open path
   });
 });
 
@@ -303,6 +308,69 @@ describe("readMarkers — cancel-drop (marker retraction, spec/08 E21)", () => {
     const bundle = readMarkers(makeCtx({ entries }));
     expect(bundle.rewinds).toHaveLength(1); // kept — id unreadable, never dropped on bad data
     expect(bundle.cancelledIds).toEqual(new Set(["anything"]));
+  });
+});
+
+// ── readMarkers — recentMetrics window (P3.M3.T3.S1 / spec/07 §5.1) ───────────────────────────
+
+describe("readMarkers — recentMetrics window (P3.M3.T3.S1 / spec/07 §5.1)", () => {
+  it("exposes recentMetrics sorted NEWEST-FIRST (highest seq at index 0)", () => {
+    const entries = [
+      customEntry("mulligan:turn-metric", metricData(1)),
+      customEntry("mulligan:turn-metric", metricData(3, true)),
+      customEntry("mulligan:turn-metric", metricData(2)),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.recentMetrics).toHaveLength(3);
+    expect(bundle.recentMetrics.map(m => (m as { seq: number }).seq)).toEqual([3, 2, 1]); // descending
+  });
+
+  it("metric (latest) === recentMetrics[0] (backward compat)", () => {
+    const entries = [
+      customEntry("mulligan:turn-metric", metricData(1)),
+      customEntry("mulligan:turn-metric", metricData(3, true)),
+      customEntry("mulligan:turn-metric", metricData(2)),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.metric).not.toBeNull();
+    expect(bundle.metric).toBe(bundle.recentMetrics[0]);              // SAME object (toBe), not a copy
+    expect((bundle.metric as { seq: number }).seq).toBe(3);
+  });
+
+  it("recentMetrics contains ALL turn-metrics on the branch (readMarkers does NOT slice)", () => {
+    const entries = [
+      customEntry("mulligan:turn-metric", metricData(1)),
+      customEntry("mulligan:turn-metric", metricData(2)),
+      customEntry("mulligan:turn-metric", metricData(3)),
+      customEntry("mulligan:turn-metric", metricData(4)),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.recentMetrics).toHaveLength(4); // full array — NO slicing to driftWindowTurns here
+    expect(bundle.recentMetrics.map(m => (m as { seq: number }).seq)).toEqual([4, 3, 2, 1]);
+  });
+
+  it("recentMetrics is always an array (empty when no turn-metrics; [] on getEntries-throws)", () => {
+    const empty = readMarkers(makeCtx({ entries: [] }));
+    expect(Array.isArray(empty.recentMetrics)).toBe(true);
+    expect(empty.recentMetrics).toEqual([]);
+    const thrown = readMarkers(makeCtx({ throwOnGetEntries: true }));
+    expect(Array.isArray(thrown.recentMetrics)).toBe(true);
+    expect(thrown.recentMetrics).toEqual([]); // fail-open path → []
+  });
+
+  it("defensive: a turn-metric with a non-number seq is INCLUDED (sorted to the end)", () => {
+    const malformed = { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq: "oops", ts: 1,
+      deltaTokens: 1, bloatHit: false, bloatHits: [], grewOverThreshold: false, turnIndex: 0 };
+    const entries = [
+      customEntry("mulligan:turn-metric", metricData(5)),
+      customEntry("mulligan:turn-metric", malformed),   // non-number seq → coerced to -Infinity → end
+      customEntry("mulligan:turn-metric", metricData(10)),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.recentMetrics).toHaveLength(3);                       // malformed still included
+    expect((bundle.recentMetrics[0] as { seq: number }).seq).toBe(10);  // valid highest first
+    expect((bundle.recentMetrics[1] as { seq: number }).seq).toBe(5);   // valid next
+    expect(bundle.recentMetrics[2]).toBe(malformed);                    // malformed last (same object)
   });
 });
 
