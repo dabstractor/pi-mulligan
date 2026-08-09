@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Audit Tool Per-Tool Resolution + Spec Alignment (BUG-001 + BUG-003)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the core integration gap in src/tools/audit.ts so the mulligan_audit tool resolves the bloat threshold per message toolName via bloatThresholdFor (the same pure helper the bloat reminder uses), and update spec/05-tools.md to match the shipped per-tool behavior.",
           "tasks": [
             {
@@ -42,14 +42,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Align spec/05 §4 audit example and clause with per-tool bloat threshold (BUG-003)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update spec/05-tools.md §4 to reflect the per-tool bloat threshold resolution now used by the audit tool, matching spec/07 and the shipped behavior after BUG-001 is fixed.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Update spec/05 §4 example line ~196 and clause line ~208 for per-tool resolution",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -76,14 +76,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Fix F-shrink-preventive scenario in scenarios.md (BUG-002)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Rewrite the F-shrink-preventive model-driven path in test/integration/scenarios.md to acknowledge that mulligan_smoke_big is skipped by the bloat reminder (GOTCHA #3) and that bloatHit:true requires a non-mulligan tool whose result exceeds its resolved per-tool threshold.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Rewrite the F-shrink-preventive model-driven path description in scenarios.md",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/bug_analysis.md BUG-002. test/integration/scenarios.md lines ~147-165 (the F-shrink-preventive scenario) has two defects: (a) line ~148 says 'the bloat reminder fires on a >8KB tool result' — stale (P2 raised global to 16384, bash to 32768, read to 20480); (b) lines ~160-164 claim the model-driven command 'Call mulligan_smoke_big and tell me what it returned' triggers the bloat reminder and records bloatHit:true — WRONG because bloatReminderHandler SKIPS any toolName starting with 'mulligan_' (src/nudges.ts GOTCHA #3, see the line `if (event.toolName.startsWith('mulligan_')) return;`). This contradicts smoke.ts itself (lines 14-17, 139-141, 205-211) which explicitly documents that mulligan_smoke_big is skipped and that bloatHit can only come from a real non-mulligan model tool call. The harness registers no non-mulligan tool capable of producing a >threshold result.\n2. INPUT: The correct bloat thresholds are: global 16384 (16 KB); bash 32768 (32 KB); read 20480 (20 KB). The mulligan_* skip behavior is at src/nudges.ts `if (event.toolName.startsWith('mulligan_')) return;`. smoke.ts documents the limitation at its comment block starting line 14 and in the F-shrink-preventive case at lines 205-211.\n3. LOGIC:\n   (a) Fix line ~148: Change 'the bloat reminder fires on a >8KB tool result' to 'the bloat reminder fires on a tool result exceeding its resolved per-tool bloat threshold (bash: 32 KB, read: 20 KB, others: 16 KB global default)'.\n   (b) Rewrite lines ~160-164 (the 'Run (model-driven — the authoritative bloatHit proof)' block): Acknowledge that mulligan_smoke_big is a mulligan_* tool → always skipped by bloatReminderHandler (GOTCHA #3), so it CANNOT trigger the bloat reminder or set bloatHit:true. State that bloatHit:true is only achievable via a real non-mulligan model tool call (e.g., reading a >20 KB file with the read tool, or a >32 KB bash output) whose result exceeds its resolved per-tool threshold. Either provide an alternative model-driven example command or reframe the path as 'not achievable in the smoke harness — see smoke.ts lines 14-17 / 205-211'. Ensure the rewritten text is consistent with smoke.ts's own documentation.\n4. OUTPUT: test/integration/scenarios.md F-shrink-preventive scenario accurately reflects the per-tool thresholds and the mulligan_* skip behavior, consistent with smoke.ts.\n5. MOCKING: None — documentation-only change to a markdown test-plan file.\n6. DOCS: This IS a documentation change. The test-plan scenarios.md is the documentation surface being corrected. Mode A.",

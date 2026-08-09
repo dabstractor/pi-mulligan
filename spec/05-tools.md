@@ -193,7 +193,7 @@ Active markers: 1 rewind (last_tool_call_group), 0 shrink, 2 checkpoints [before
 Protected: will not rewind past system/first-user/latest-user.
 
 Top messages by size:
-  9,412  toolResult  read src/big.log           ⚠ above bloat threshold (8 KB)
+  9,412  toolResult  read src/big.log           ⚠ above bloat threshold (20 KB)
   1,840  assistant   (thinking + toolCall x2)
     612  toolResult  grep "auth"
     ...
@@ -205,7 +205,7 @@ Suggestion: the `read src/big.log` result is the largest contributor. Consider m
 1. Build the **filtered** message list: take the last `event.messages` snapshot (the filter caches its last output in the session runtime map — `@06-context-filter.md` §7) OR, if unavailable (e.g. audit called before any inference this session), estimate over `buildContextEntries()` converted to messages. Apply the same transforms the filter would, so the audit reflects post-rewind/shrink reality.
 2. `estimateTokens` per message; sort desc; take `top`.
 3. Read active markers from `getEntries()`.
-4. Render the report. Include the suggestion heuristic: any message above `config.nudges.bloatThresholdBytes` is flagged; the single largest is named in the suggestion.
+4. Render the report. Include the suggestion heuristic: any message above its resolved threshold is flagged — `toolResult` messages use their tool's per-tool threshold via `bloatThresholdFor` (`bash`: 32 KB, `read`: 20 KB, all other tools: the 16 KB global default); every other message uses the global threshold. Each flagged row displays its own resolved threshold; the single largest message is named in the suggestion.
 5. Return. **Persist nothing.**
 
 **Why audit must use the filtered view (D5):** `ctx.getContextUsage()` reflects Pi's bookkeeping, which still counts messages Mulligan has hidden. Reporting that number would mislead the agent into thinking a rewind "didn't work." The audit's whole value is honesty about what the model sees.
