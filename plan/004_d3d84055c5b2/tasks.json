@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P4",
       "title": "Runaway-loop hard backstops (E22) + drift-nudge bloatHit demotion",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Code-only delta making the implementation match the already-written spec (committed in 3ff35059 + 0bcaa814). Adds two independent hard guards to the rewind tool that refuse BEFORE persisting — a per-prompt retry budget (rewind.maxRetriesPerPrompt, default 5) and an out-of-band context-fraction stop (rewind.abortContextFraction, default 0.9) — plus the drift-nudge bloatHit demotion (delta-only when delta data exists). Neither guard exists in code today (grep confirmed). All 863 existing tests must stay green. D4 (no new model request) and E13 (never throw) hold throughout.",
       "milestones": [
         {
@@ -189,21 +189,21 @@
           "type": "Milestone",
           "id": "P4.M3",
           "title": "Sync README (Mode B; depends on P4.M1)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "README.md reflects the two new config knobs. The spec is already written; only the human-facing README lags. Mode B (changeset-level docs): the config table, the JSON example, and a feature-blurb sentence.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M3.T1",
               "title": "README config table + JSON example + blurb (README.md)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the two new knobs to the README config table, the commented JSON example, and a feature-blurb sentence. Depends on P4.M1.T1 (knob names/defaults) and P4.M1.T2 (the runaway-loop framing).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M3.T1.S1",
                   "title": "Add two rows to config table + JSON example",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M1.T1.S1"
@@ -219,7 +219,7 @@
                   "type": "Subtask",
                   "id": "P4.M3.T1.S2",
                   "title": "Add feature-blurb sentence on the two hard backstops",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M1.T2.S1",

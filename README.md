@@ -82,6 +82,8 @@ All 17 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `rewind.enabled` | `true` | Enable the `mulligan_rewind` tool. |
 | `rewind.protectedRoles` | `["first:user", "latest:user"]` | Message selectors that can never be rewound past (the original task / the current ask). v1 supports these two selectors; unknown entries are dropped. |
 | `rewind.maxDepth` | `5` | Max simultaneous *active* `mulligan:rewind` markers on a branch. Bounds accumulation (markers are permanent). |
+| `rewind.maxRetriesPerPrompt` | `5` | Max *consecutive* rewinds that re-land at the same latest user prompt before refusal — the runaway-loop bound (`spec/08-edge-cases.md` E22). Distinct from `maxDepth` (cumulative markers). |
+| `rewind.abortContextFraction` | `0.9` | Refuse any rewind once the filtered-context estimate reaches this fraction of the window — the zero-marker-loop guard (`spec/08-edge-cases.md` E22). |
 | `rewind.requireMutationWarning` | `true` | Append a ⚠ warning when the hidden span wrote files / ran side-effecting bash (those effects persist on disk). |
 | **shrink** | | |
 | `shrink.enabled` | `true` | Enable the `mulligan_shrink` tool. |
@@ -108,7 +110,7 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
 {
   // "mulligan": {
   //   "enabled": true,
-  //   "rewind": { "maxDepth": 5 },
+  //   "rewind": { "maxDepth": 5, "maxRetriesPerPrompt": 5, "abortContextFraction": 0.9 },
   //   "shrink": { "maxActive": 32, "staleAfterFires": 3 },
   //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "bash": 32768, "read": 20480 }, "driftThresholdTokens": 6000, "driftWindowTurns": 3, "highWaterFraction": 0.7 }
   // }
