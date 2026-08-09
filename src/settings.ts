@@ -6,25 +6,29 @@
  * (validateConfig / setConfig / getConfig / DEFAULT_CONFIG). settings.ts reads raw settings files and hands
  * them to config.ts as `unknown` via `setConfig(raw)` — validation remains config.ts's job.
  *
- * SCOPE (this subtask, P1.M1.T1.S1): the two LEAF helpers the settings pipeline depends on:
- *   - `readSettingsFile(filePath)`  — fail-open synchronous JSON-file reader (node:fs only, no Pi import).
+ * PUBLIC ENTRY POINT (this subtask, P1.M1.T1.S2): `loadMulliganConfig(cwd?)` — the module's ONLY public
+ * export. It reads the global (`~/.pi/agent/settings.json`, via getAgentDir()) + project-local
+ * (`<cwd>/.pi/settings.json`) settings files, deep-merges them (project-local wins; nested objects recurse;
+ * arrays replace — mirroring Pi's deepMergeObjects), and returns the merged `.mulligan` block as raw
+ * `unknown`. The ENTIRE body is fail-open: any error → `undefined` → downstream `validateConfig(undefined)`
+ * → `DEFAULT_CONFIG`, so the extension always boots. It hands raw `unknown` INTO the Pi-free `config.ts`
+ * via `setConfig(raw)` (the setConfig handoff itself lives in src/index.ts, P1.M1.T2 — settings.ts only
+ * reads + merges + extracts; it does NOT validate or call setConfig).
+ *
+ * LEAF HELPERS (built in the prerequisite subtask S1, exported @internal for direct unit testing):
+ *   - `readSettingsFile(filePath)`  — fail-open synchronous JSON-file reader (returns `{}` on any failure).
  *   - `deepMergeSettings(global, project)` — recursive deep-merge mirroring Pi's `deepMergeObjects`
  *     (settings-manager.js:8-34): both-plain-objects → recurse; otherwise project replaces; arrays replace
  *     (never concatenate); keys present in only one side are preserved.
  *
- * PENDING (S2, P1.M1.T1.S2): `loadMulliganConfig(cwd?)` — the PUBLIC entry point. It will add
- * `import { getAgentDir } from "@earendil-works/pi-coding-agent";` + `import { join } from "node:path";`,
- * resolve the global (`~/.pi/agent/settings.json`) + project-local (`<cwd>/.pi/settings.json`) paths via
- * getAgentDir(), call readSettingsFile on each, deepMergeSettings(global, project), then return the merged
- * `.mulligan` block as `unknown` for setConfig. That orchestration does NOT exist yet — this module is
- * intentionally incomplete after S1 (only the tested primitives are here).
- *
- * DESIGN: the helpers are exported with `@internal` tags because S1's contract requires direct unit tests,
- * but loadMulliganConfig (S2) is the only intended runtime caller. This mirrors src/tools/audit.ts, which
- * exports describeMessage/buildCallLookup/listCheckpoints/messageBytes/renderAuditReport purely so tests can
- * assert them directly ("EXPORTED so the test can assert directly"). See Decision D1 in the PRP.
+ * DESIGN: the helpers carry `@internal` tags because their direct unit tests need them exported, but
+ * loadMulliganConfig is the only intended runtime caller. This mirrors src/tools/audit.ts, which exports
+ * describeMessage/buildCallLookup/listCheckpoints/messageBytes/renderAuditReport purely so tests can assert
+ * them directly ("EXPORTED so the test can assert directly"). See Decision D1 in the PRP.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 // ── private helpers (module-local; not exported) ─────────────────────────────
 
@@ -94,4 +98,40 @@ export function deepMergeSettings(
     out[key] = isRecord(g) && isRecord(p) ? deepMergeSettings(g, p) : p; // recurse | replace
   }
   return out;
+}
+
+// ── public entry point (the module's ONLY non-@internal export) ──────────────
+
+/**
+ * loadMulliganConfig — read + merge Pi settings and extract the raw `mulligan` block.
+ *
+ * Reads the GLOBAL settings file at `join(getAgentDir(), "settings.json")` (respects the
+ * PI_CODING_AGENT_DIR env override) and the PROJECT-LOCAL file at
+ * `join(cwd ?? process.cwd(), ".pi", "settings.json")`, deep-merges them (project-local wins; nested
+ * objects recurse; arrays replace — via deepMergeSettings, mirroring Pi's deepMergeObjects), and returns
+ * the merged `mulligan` object.
+ *
+ * @param cwd optional project working directory. Falls back to `process.cwd()` when undefined. At factory
+ *   time (no ctx) pass `process.cwd()` or undefined; at `session_start` pass `ctx.cwd`.
+ * @returns the raw, UNVALIDATED `mulligan` object (`unknown`), or `undefined` when the `mulligan` key is
+ *   absent (the zero-config case → DEFAULT_CONFIG) or when any step fails.
+ *
+ * FAIL-OPEN: the entire body is wrapped in try/catch — a throwing getAgentDir(), an unreadable file, a
+ * process.cwd() failure, etc. all return `undefined`. Callers feed the result to `setConfig(raw)`;
+ * `validateConfig(undefined)` then yields `DEFAULT_CONFIG`, so the extension always boots. NEVER throws.
+ *
+ * The recursive merge of nested `mulligan` sub-objects (e.g. `mulligan.nudges`) is handled BY
+ * deepMergeSettings — loadMulliganConfig does NOT re-merge, it only extracts the top-level `.mulligan` key.
+ * Validation into a typed `MulliganConfig` is config.ts's job (via the P1.M1.T2 `setConfig` handoff), NOT
+ * ours — hence the raw `unknown` return.
+ */
+export function loadMulliganConfig(cwd?: string): unknown {
+  try {
+    const globalSettings = readSettingsFile(join(getAgentDir(), "settings.json"));
+    const projectSettings = readSettingsFile(join(cwd ?? process.cwd(), ".pi", "settings.json"));
+    const merged = deepMergeSettings(globalSettings, projectSettings);
+    return merged.mulligan; // Record<string, unknown>.mulligan → unknown | undefined
+  } catch {
+    return undefined; // fail-open: any error → undefined → validateConfig(undefined) → DEFAULT_CONFIG
+  }
 }

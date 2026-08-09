@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Create settings-loading module (src/settings.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create a new Pi-bound module that reads the mulligan config block from Pi's settings.json files. This module is the bridge between Pi's file-based settings system and config.ts's Pi-free validation engine. It reads global settings (via getAgentDir()) and project-local settings (via cwd), deep-merges them (project-local wins), and returns the raw mulligan object for setConfig() to validate. config.ts stays Pi-free by design.",
               "subtasks": [
                 {
@@ -40,7 +40,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Implement loadMulliganConfig(cwd?) entry point",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -66,7 +66,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Wire loadMulliganConfig into factory body + update code comments",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"

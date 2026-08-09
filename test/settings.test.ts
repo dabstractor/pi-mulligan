@@ -9,11 +9,28 @@
  *
  * Imports use the project's `.js` ESM/Bundler extension convention (../src/settings.js).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSettingsFile, deepMergeSettings } from "../src/settings.js";
+import { readSettingsFile, deepMergeSettings, loadMulliganConfig } from "../src/settings.js";
+
+// getAgentDir is the ONLY symbol settings.ts imports from the Pi package. Mock it so the
+// loadMulliganConfig tests run against temp dirs (not the real ~/.pi/agent) AND so case (g) can make it
+// throw. vi.mock is hoisted above module-scope `let`/`const`, so the factory closes over vi.hoisted()
+// mutable state (a plain `let` would be undefined at call time). File-scoped: does not leak to other
+// test files and does not perturb S1's readSettingsFile/deepMergeSettings tests above (they never call
+// getAgentDir). The minimal factory `{ getAgentDir }` is sufficient (settings.ts imports nothing else).
+const mockAgent = vi.hoisted(() => ({
+  agentDir: "/nonexistent-mulligan-agent",
+  impl: null as null | (() => string),
+}));
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+  getAgentDir: () => {
+    if (mockAgent.impl) return mockAgent.impl();
+    return mockAgent.agentDir;
+  },
+}));
 
 // ── readSettingsFile — real temp-file setup (mirror test/nudges.test.ts) ─────
 
@@ -110,5 +127,78 @@ describe("deepMergeSettings — project wins, Pi deepMergeObjects semantics", ()
     deepMergeSettings(global, project);
     expect(global).toEqual({ n: { x: 1 } });
     expect(project).toEqual({ n: { y: 2 } });
+  });
+});
+
+// ── loadMulliganConfig — global+project merge, fail-open (owns its own temp dirs) ──
+
+describe("loadMulliganConfig — global+project merge, fail-open", () => {
+  let agentDir: string;
+  let projectDir: string;
+
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), "mulligan-agent-"));
+    projectDir = mkdtempSync(join(tmpdir(), "mulligan-project-"));
+    mockAgent.impl = null; // default: getAgentDir() returns mockAgent.agentDir
+    mockAgent.agentDir = agentDir;
+  });
+
+  afterEach(() => {
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  // helpers: write the (mocked) global + project-local settings files
+  function writeGlobal(json: string) {
+    writeFileSync(join(agentDir, "settings.json"), json);
+  }
+  function writeProject(json: string) {
+    mkdirSync(join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(join(projectDir, ".pi", "settings.json"), json);
+  }
+
+  it("no mulligan key → undefined", () => {
+    writeGlobal('{"foo":1}');
+    writeProject('{"bar":2}');
+    expect(loadMulliganConfig(projectDir)).toBeUndefined();
+  });
+
+  it("global-only mulligan → returns global mulligan", () => {
+    writeGlobal('{"mulligan":{"enabled":false}}'); // no project file
+    expect(loadMulliganConfig(projectDir)).toEqual({ enabled: false });
+  });
+
+  it("project-only mulligan → returns project mulligan", () => {
+    writeProject('{"mulligan":{"enabled":true}}'); // no global file
+    expect(loadMulliganConfig(projectDir)).toEqual({ enabled: true });
+  });
+
+  it("both → merged (project wins on nested)", () => {
+    // THE key deep-merge-of-mulligan test: global enabled:true preserved; nested nudges merged with
+    // project bloatReminder:true winning and global perTurnDrift:true preserved. Proves deepMergeSettings
+    // recursed INTO the mulligan block (loadMulliganConfig did NOT re-merge).
+    writeGlobal('{"mulligan":{"enabled":true,"nudges":{"bloatReminder":false,"perTurnDrift":true}}}');
+    writeProject('{"mulligan":{"nudges":{"bloatReminder":true}}}');
+    expect(loadMulliganConfig(projectDir)).toEqual({
+      enabled: true,
+      nudges: { bloatReminder: true, perTurnDrift: true },
+    });
+  });
+
+  it("missing files → undefined", () => {
+    // neither file written → both readSettingsFile fail-open to {} → merged {} → no mulligan key
+    expect(loadMulliganConfig(projectDir)).toBeUndefined();
+  });
+
+  it("invalid JSON → undefined", () => {
+    writeGlobal("{not json"); // readSettingsFile fail-opens to {}; project absent → merged {} → no mulligan
+    expect(loadMulliganConfig(projectDir)).toBeUndefined();
+  });
+
+  it("getAgentDir throws → undefined (fail-open)", () => {
+    mockAgent.impl = () => {
+      throw new Error("boom");
+    };
+    expect(loadMulliganConfig(projectDir)).toBeUndefined();
   });
 });
