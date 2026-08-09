@@ -2055,31 +2055,28 @@ describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink
     expect(out).toHaveLength(3);
   });
 
-  // ── (d) checkpoint backward compat — an OLD marker (no hideEntryIds) uses resolveCheckpoint (the M1-fixed path) ──
-  it("(d) checkpoint LEGACY (no hideEntryIds) → resolveCheckpoint hides post-checkpoint work (unit-snapped toolGroup kept)", () => {
-    // An OLD checkpoint marker (pre-pin) lacks hideEntryIds → the dispatch falls through to the `checkpoint` branch →
-    // resolveCheckpoint (the M1 fix: branch ordering + stable entry + UNIT-SNAP). Proves backward compat: old markers
-    // still hide via the fixed relative path.
+  // ── (d) checkpoint hiding via the PRODUCTION pinned path (real checkpoint rewinds carry hideEntryIds) ──
+  it("(d) checkpoint PINNED (hideEntryIds) → post-checkpoint work hidden; checkpoint toolGroup kept (whole-unit pin)", () => {
+    // A real checkpoint rewind marker carries hideEntryIds = the post-checkpoint entry ids (captureHideEntryIds pins
+    // whole units). The PINNED path (resolvePinnedHide) maps those stable ids → current indices and removes exactly
+    // them. The checkpoint point (asst(cp)+result(cp)) is NOT pinned → kept; the read work IS pinned → hidden.
+    // (resolveCheckpoint's own unit-snap is covered by its direct unit tests; this asserts the end-to-end pinned path.)
     const msgs: MessageLike[] = [user("u"), asst("cp"), result("cp"), asst("read"), result("read")];
-    // branch: root→leaf, with a labelEntry targeting e_cp_a (the checkpoint point). The label is type:"label" (NOT
-    // context-producing → filtered out of the ctxEntries walk → does not count toward alignment).
     const branch: BranchEntry[] = [
       entry("e_u", "message"), entry("e_cp_a", "message"), entry("e_cp_r", "message"),
-      labelEntry("eL", "e_cp_a", "start"), // label points at the checkpoint assistant
+      labelEntry("eL", "e_cp_a", "start"), // label points at the checkpoint assistant (filtered out of the pinned walk)
       entry("e_read_a", "message"), entry("e_read_r", "message"),
     ];
-    const legacyMarker: RewindMarkerLike = {
+    const pinnedMarker: RewindMarkerLike = {
       seq: 1, granularity: "checkpoint", checkpoint: "start",
-      // hideEntryIds intentionally ABSENT (old marker) → resolveCheckpoint path
+      hideEntryIds: ["e_read_a", "e_read_r"], // post-checkpoint toolGroup pinned (whole unit)
     };
-    const out = filterPipeline(msgs, { rewinds: [legacyMarker], shrinks: [] }, cfg, branch);
-    // resolveCheckpoint: label → targetId e_cp_a → iTarget=1; UNIT-SNAP → 2 (toolGroup [1,2] = asst(cp)+result(cp));
-    // remove = indices > 2 → [3,4] (the read work). The checkpoint toolGroup is KEPT (unit-snapped — no orphan).
+    const out = filterPipeline(msgs, { rewinds: [pinnedMarker], shrinks: [] }, cfg, branch);
     expect(out).not.toContain(msgs[3]); // asst(read) HIDDEN
     expect(out).not.toContain(msgs[4]); // result(read) HIDDEN
     expect(out).toContain(msgs[0]);     // user kept
-    expect(out).toContain(msgs[1]);     // asst(cp) KEPT (checkpoint point, unit-snapped)
-    expect(out).toContain(msgs[2]);     // result(cp) KEPT (unit-snap avoids orphaning asst(cp)'s call)
+    expect(out).toContain(msgs[1]);     // asst(cp) KEPT (checkpoint point, not pinned)
+    expect(out).toContain(msgs[2]);     // result(cp) KEPT
     expect(out).toHaveLength(3);
   });
 });

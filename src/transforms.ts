@@ -1141,6 +1141,71 @@ export function protectedOk(
 }
 
 /**
+ * RewindDiag — one entry per rewind marker per context fire, pushed into the OPTIONAL `diag` sink passed to
+ * filterPipeline (BUG: turn-replay-loop invariant log). Pure data; filter.ts reads it to WARN when a rewind hides
+ * the freshest messages (the replay signature). EXPORTED so filter.ts types its sink + tests can assert on it.
+ */
+export interface RewindDiag {
+  /** The marker's seq (monotonic; orders markers oldest-first). Identifies WHICH marker acted. */
+  seq: number;
+  /** The marker's granularity, if readable. */
+  granularity?: string;
+  /** How this rewind was resolved this fire:
+   *  - "pinned"               hideEntryIds present → resolvePinnedHide (the production path; only ever touches the OLD pinned span).
+   *  - "legacy-run"           no pin + creating/resume fire (turnHasAdvanced false) → the relative resolver ran (intended, single fire).
+   *  - "legacy-noop-advanced" no pin + the turn advanced past the rewind's own toolGroup → NO-OP (the replay guard fired).
+   *  - "unknown-noop"         unrecognized granularity → no-op. */
+  mode: "pinned" | "legacy-run" | "legacy-noop-advanced" | "unknown-noop";
+  /** Message indices this rewind removed, resolved against the array of length `resolvedLen` (the already-reduced m at
+   *  dispatch — rewinds run oldest-first, so later rewinds see a shorter array). Empty = no-op this fire. */
+  remove: number[];
+  /** Length of the array `remove` was resolved against (interprets the indices; max(remove) near resolvedLen-1 = the
+   *  freshest work was targeted = the replay signature). */
+  resolvedLen: number;
+}
+
+/**
+ * ownGroupEndIndex — the max message index of the toolGroup that issued `excludeToolCallId` (this rewind's OWN
+ * toolGroup: the assistant message carrying the mulligan_rewind call + its result). Used by `turnHasAdvanced` to anchor
+ * "has the turn advanced past this rewind?". Returns -1 when `excludeToolCallId` is absent/empty/non-string, when
+ * `messages` is not an array, or when no toolGroup issued that id (the rewind's own call isn't present — e.g. it was
+ * itself removed by an earlier rewind in this pass). Pure + defensive (reuses partitionIntoUnits + assistantIssuedCall
+ * + isRecord/readOwn; never throws — E13). Module-private.
+ */
+function ownGroupEndIndex(messages: MessageLike[] | unknown, excludeToolCallId?: string): number {
+  if (!Array.isArray(messages)) return -1;
+  if (typeof excludeToolCallId !== "string" || excludeToolCallId.length === 0) return -1;
+  const units = partitionIntoUnits(messages);
+  let end = -1;
+  for (const unit of units) {
+    if (unit.kind === "toolGroup" && assistantIssuedCall(messages, unit.indices, excludeToolCallId)) {
+      end = Math.max(end, ...unit.indices); // the rewind's own group may have results after the assistant
+    }
+  }
+  return end;
+}
+
+/**
+ * turnHasAdvanced — SAFETY predicate for the legacy relative-resolution fallback (BUG: turn-replay-loop).
+ * Returns true ("the turn has advanced past this rewind; do NOT re-resolve relatively") when EITHER the rewind's own
+ * toolGroup cannot be located (no excludeToolCallId / not present) OR any NON-`mulligan:*` message follows it. Returns
+ * false only when the rewind's own toolGroup is present and the only messages after it are `mulligan:*` notes/nudges —
+ * i.e. this is the creating/resume fire, before the agent appends new work. Pure + defensive; never throws (E13).
+ * Module-private.
+ */
+function turnHasAdvanced(messages: MessageLike[] | unknown, excludeToolCallId?: string): boolean {
+  const end = ownGroupEndIndex(messages, excludeToolCallId);
+  if (end < 0) return false; // can't locate the rewind's own group (absent/no-match excludeToolCallId) → assume the
+  //   creating/resume fire and ALLOW the legacy resolver. Production markers ALWAYS carry excludeToolCallId AND
+  //   hideEntryIds (→ the PINNED branch, never here), so this only affects degenerate/old markers; the replay guard
+  //   below is what protects the realistic legacy case (excludeToolCallId present + new work appended after it).
+  for (let j = end + 1; j < (messages as MessageLike[]).length; j++) {
+    if (!isMulliganCustomMessage((messages as MessageLike[])[j])) return true; // new non-note work appended
+  }
+  return false; // only mulligan:* notes follow → creating/resume fire, safe to resolve relatively
+}
+
+/**
  * filterPipeline — Mulligan's composition core: apply persisted markers to a message list, returning the filtered view
  * the model sees (spec/06-context-filter.md §1, §5, §8, §11, §12; spec/03 §5 ordering/composition/idempotency). The
  * single PURE entry point the context handler (filter.ts, P1.M4.T2) calls: `return { messages: filterPipeline(...) }`.
@@ -1198,6 +1263,10 @@ export function filterPipeline(
   markers: MarkerBundle | undefined,
   config: ProtectedConfig | undefined,
   branchEntries?: BranchEntry[],
+  /** OPTIONAL diagnostics sink (BUG: turn-replay-loop invariant log). When passed, one RewindDiag is pushed per
+   *  rewind marker each fire (mode + remove-index set + the length of the array it resolved against). Pure: the sink
+   *  is only appended to, never read; omit it (the whole unit-test suite does) for zero overhead. */
+  diag?: RewindDiag[],
 ): MessageLike[] {
   // Defensive: a non-array messages → [] (mirrors partitionIntoUnits/applyRewind/applyShrink).
   if (!Array.isArray(messages)) return [];
@@ -1225,30 +1294,61 @@ export function filterPipeline(
     // this fire; it does NOT fall back to the relative branches (that re-introduces the bug). Old markers / K=0 /
     // capture-failure (hideEntryIds absent or []) fall through to the granularity LEGACY branches below.
     const hideEntryIdsRaw = readOwn(rw, "hideEntryIds");
+    const hasPin = Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0;
+    const advanced = !hasPin && turnHasAdvanced(m, excludeId);
     let remove: number[];
-    if (Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0) {
+    let mode: RewindDiag["mode"];
+    if (hasPin) {
       // PINNED PATH: stable anchors → permanent hiding. branchEntries default [] is safe (resolver returns [] on absent).
       remove = resolvePinnedHide(m, Array.isArray(branchEntries) ? branchEntries : [], hideEntryIdsRaw as string[]);
+      mode = "pinned";
+    } else if (advanced) {
+      // SAFETY (BUG: turn-replay-loop, BUG_TURN_REPLAY_LOOP.md): no pinned span AND the turn has advanced past this
+      // rewind's own toolGroup (new non-note work was appended after it). The legacy relative resolvers re-resolve
+      // against the grown list every fire, so they would re-target the agent's NEW (in-progress) work and hide it every
+      // fire → the assistant replays its turn from the top after every tool call. No-op instead. (Production markers
+      // always carry hideEntryIds → take the PINNED branch and never reach here; this guard is the backstop for
+      // old/capture-failed markers with no pin.)
+      remove = [];
+      mode = "legacy-noop-advanced";
     } else if (granularity === "last_tool_call_group") {
-      // LEGACY FALLBACK: relative re-resolution (old markers without hideEntryIds). "Last" = newest toolGroup = the
-      // moving target that caused BUG-001 — present only for backward compat. RE-PARTITION fresh each iteration so
-      // unit.indices index the CURRENT m (GOTCHA #2 — the §12 pseudocode's partition-once is a stale-index bug).
+      // LEGACY (old markers without hideEntryIds), CREATING/RESUME FIRE ONLY (turnHasAdvanced is false): relative
+      // re-resolution. RE-PARTITION fresh each iteration so unit.indices index the CURRENT m.
       const units = partitionIntoUnits(m);
       remove = resolveLastToolCallGroup(units, m, excludeId) ?? [];
+      mode = "legacy-run";
     } else if (granularity === "last_turn") {
-      // options carries to_previous_prompt VERBATIM (GOTCHA #5). resolveLastTurn refuses nuclear when iFirst===iLast.
+      // LEGACY, CREATING/RESUME FIRE ONLY. options carries to_previous_prompt VERBATIM (GOTCHA #5).
       remove = resolveLastTurn(
         m,
         readOwn(rw, "options") as { to_previous_prompt?: boolean } | undefined,
         excludeId,
       ).remove;
+      mode = "legacy-run";
     } else if (granularity === "checkpoint") {
-      // resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6). Absent/empty → null → no-op.
+      // LEGACY, CREATING/RESUME FIRE ONLY. resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6).
       const cpRaw = readOwn(rw, "checkpoint");
       const cpName = typeof cpRaw === "string" ? cpRaw : "";
       remove = resolveCheckpoint(m, Array.isArray(branchEntries) ? branchEntries : [], cpName, excludeId)?.remove ?? [];
+      mode = "legacy-run";
     } else {
       remove = []; // unknown granularity → no-op
+      mode = "unknown-noop";
+    }
+
+    // Per-rewind diagnostics (BUG: turn-replay-loop invariant log). When the caller passes a `diag` sink, record what
+    // each rewind resolved to THIS fire: its mode, the remove-index set, and the length of the array it resolved
+    // against (so the indices are interpretable). filter.ts logs a WARN if any rewind's remove touches the freshest
+    // messages (max(remove) >= resolvedLen-3) — the replay signature. Pure + optional: pushes only when the sink is
+    // present, so callers that omit it (the whole unit-test suite) are unaffected.
+    if (Array.isArray(diag)) {
+      diag.push({
+        seq: readOwnSeq(rw),
+        granularity: typeof granularity === "string" ? granularity : undefined,
+        mode,
+        remove: remove.slice(),
+        resolvedLen: m.length,
+      });
     }
 
     // Defense-in-depth: skip (no-op) rewinds that cross the protected first:user boundary. (filter.ts logs the warn.)

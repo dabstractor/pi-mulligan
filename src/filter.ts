@@ -40,7 +40,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { filterPipeline, resolvePinnedShrink, stableSortBySeq } from "./transforms.js";
-import type { MessageLike, BranchEntry } from "./transforms.js";
+import type { MessageLike, BranchEntry, RewindDiag } from "./transforms.js";
 import { getRuntime } from "./runtime.js";
 import type { AgentMessage } from "./runtime.js"; // local opaque alias (Pi's AgentMessage is NOT exported)
 import { getConfig } from "./config.js";
@@ -247,12 +247,45 @@ export function contextHandler(
     // whether filterPipeline is generic <M> or returns MessageLike[] (GOTCHA #10). event.messages is Pi's
     // AgentMessage[]; cast through unknown to transforms.ts's MessageLike[] at this single call boundary
     // (transforms.ts is Pi-free and names only its own MessageLike).
+    const diag: RewindDiag[] = [];
     let messages: MessageLike[] = filterPipeline(
       event.messages as unknown as MessageLike[],
       markers,
       config,
       branchEntries as unknown as BranchEntry[],
+      diag,
     );
+
+    // BUG: turn-replay-loop invariant log (cheap, never breaks the turn). Record what each rewind hid this fire. A
+    // rewind whose remove set touches the FRESHEST messages (max(remove) >= resolvedLen-3 on a non-trivial array) is the
+    // replay signature — the agent's just-produced work was hidden — and is WARNed. Normal operation logs at debug.
+    // This is the instrument that distinguishes the empty-hideEntryIds legacy vector (fixed) from a pinned-path /
+    // compaction misalignment (not yet reproduced): a live recurrence will show, per marker, its mode + which indices
+    // it removed, pinpointing the culprit unambiguously.
+    try {
+      const inLen = Array.isArray(event.messages) ? event.messages.length : 0;
+      const outLen = messages.length;
+      const tailTouch = diag.filter(
+        (d) => d.remove.length > 0 && d.resolvedLen >= 5 && Math.max(...d.remove) >= d.resolvedLen - 3,
+      );
+      log(tailTouch.length > 0 ? "warn" : "debug", "filter.invariant", sessionId, {
+        inLen,
+        outLen,
+        rewinds: diag.map((d) => ({
+          seq: d.seq,
+          mode: d.mode,
+          granularity: d.granularity,
+          removeCount: d.remove.length,
+          maxIdx: d.remove.length ? Math.max(...d.remove) : -1,
+          resolvedLen: d.resolvedLen,
+        })),
+        ...(tailTouch.length > 0
+          ? { tailTouch: tailTouch.map((d) => ({ seq: d.seq, mode: d.mode, maxIdx: Math.max(...d.remove), resolvedLen: d.resolvedLen })) }
+          : {}),
+      });
+    } catch {
+      /* observability only — never break the turn */
+    }
 
     // Per-turn drift nudge (spec/07 §2; §5.1 windowed drift signaling, REQUIRED). The guard is the contract
     // guard verbatim (P3.M3.T6.S1): gate on a non-empty recentMetrics window FIRST, then call the windowed
