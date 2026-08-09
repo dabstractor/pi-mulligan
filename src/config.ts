@@ -222,6 +222,8 @@ export function validateConfig(raw: unknown): MulliganConfig {
       if (v !== undefined) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
       v = safeGet(nudgesRaw, "driftThresholdTokens");
       if (v !== undefined) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
+      v = safeGet(nudgesRaw, "bloatThresholdBytesByTool");
+      if (v !== undefined) cfg.nudges.bloatThresholdBytesByTool = coerceBloatThresholdByTool(v, cfg.nudges.bloatThresholdBytesByTool);
     }
 
     // audit.*
@@ -291,6 +293,30 @@ function coerceProtectedRoles(value: unknown, fallback: string[]): string[] {
     }
   }
   return known;
+}
+
+/** bloatThresholdBytesByTool: per-tool override map (spec/09 §4). Non-record → fallback + warn.
+ *  Record entries: keep finite numbers > 0, drop invalid (per-entry warn). MERGES over fallback so
+ *  default entries are preserved for tools the user did not mention. Unknown tool names are kept
+ *  (forward-compat). `fallback` is optional only to satisfy the optional interface field's
+ *  `| undefined` type at the call site — at runtime it is always the cloned default map. */
+function coerceBloatThresholdByTool(
+  value: unknown,
+  fallback?: Record<string, number>,
+): Record<string, number> {
+  if (!isRecord(value)) {
+    warnConfig("nudges.bloatThresholdBytesByTool", value);
+    return fallback ?? {};
+  }
+  const result: Record<string, number> = { ...(fallback ?? {}) };
+  for (const [toolName, threshold] of Object.entries(value)) {
+    if (typeof threshold === "number" && Number.isFinite(threshold) && threshold > 0) {
+      result[toolName] = threshold;
+    } else {
+      warnConfig("nudges.bloatThresholdBytesByTool entry", { [toolName]: threshold });
+    }
+  }
+  return result;
 }
 
 /** estimateConfidence: must be one of low|medium|high; else fallback + warn. */

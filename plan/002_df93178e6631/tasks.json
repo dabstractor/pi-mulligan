@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "Config model, defaults, and validation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add the bloatThresholdBytesByTool field to the MulliganConfig interface, raise the bloatThresholdBytes default from 8192 to 16384, add the default per-tool map { bash: 32768, read: 20480 } to DEFAULT_CONFIG, add merge-semantics coercion to validateConfig, and update test/config.test.ts to reflect the new defaults and add map-validation coverage. All changes are in src/config.ts and test/config.test.ts. File is fully Pi-free (no SDK imports).",
               "subtasks": [
                 {
@@ -41,7 +41,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S2",
                   "title": "Add bloatThresholdBytesByTool coercion to validateConfig + validation test coverage",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"
@@ -69,7 +69,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Add + export bloatThresholdFor helper and wire into bloatReminderHandler",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"

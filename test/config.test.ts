@@ -99,6 +99,67 @@ describe("validateConfig", () => {
     expect(validateConfig({ rewind: { maxDepth: -1 } }).rewind.maxDepth).toBe(5); // <0 → default
   });
 
+  it("default bloatThresholdBytesByTool is the per-tool map { bash: 32768, read: 20480 }", () => {
+    expect(validateConfig({}).nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+  });
+
+  it("bloatThresholdBytesByTool: partial override MERGES over defaults (unmentioned tools preserved)", () => {
+    const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: 99999 } } });
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 20480 }); // read preserved
+  });
+
+  it("bloatThresholdBytesByTool: invalid entries dropped with per-entry warn; defaults preserved", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: -1, read: 20480 } } });
+      // bash(-1) dropped+warned → default 32768 preserved by merge; read(20480) valid → kept
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytesByTool entry");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("bloatThresholdBytesByTool: non-record value discarded → default map, one warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: "oops" } });
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytesByTool");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("bloatThresholdBytesByTool: array is not a record → discarded, one warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: [["bash", 5]] } });
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("bloatThresholdBytesByTool: unknown tool names are kept (forward-compat, spec/09 §4)", () => {
+    const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: 99999, custom_tool: 5000 } } });
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 20480, custom_tool: 5000 });
+  });
+
+  it("bloatThresholdBytesByTool: absent field is NOT warned (absent ≠ invalid)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // byTool absent
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("filters protectedRoles to known selectors; drops unknown entries; non-array → default", () => {
     expect(validateConfig({ rewind: { protectedRoles: ["first:user", "bogus"] } }).rewind.protectedRoles).toEqual(["first:user"]);
     expect(validateConfig({ rewind: { protectedRoles: ["bogus", "nope"] } }).rewind.protectedRoles).toEqual([]);
