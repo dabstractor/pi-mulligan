@@ -230,6 +230,59 @@ function countRewindMarkers(ctx: ExtensionContext): number {
 }
 
 /**
+ * countRetriesAtLatestPrompt — the E22 per-prompt retry-budget counter (step 4b). Finds the LAST entry whose
+ * `type === "message"` AND whose `message.role === "user"` (the latest user prompt), then counts entries at
+ * index > that index where `type === "custom" && customType === "mulligan:rewind"` (rewind markers appended
+ * AFTER the latest user message = rewinds during this turn that re-land at the prompt). Returns 0 when there
+ * is no user-message entry (no prompt → no budget consumption). Defensive (never throws; a throwing-Proxy
+ * entry, a non-array, or a throwing getEntries → the entry is skipped / the count is 0). Module-local.
+ *
+ * OVER-APPROXIMATION (v1 entry-position): for `last_tool_call_group`/`checkpoint` rewinds this counts a rewind
+ * issued THIS turn even if its resolved target was a PRIOR turn's group (the marker is appended at the end
+ * regardless). The spec's intent — arrest the same-prompt loop — is met; precise message-list resolution
+ * (excluding a tool-group rewind whose target precedes the latest prompt) is a future refinement. Advancing
+ * to a new user prompt naturally resets the count (the new prompt becomes the latest → prior rewinds are
+ * before it).
+ */
+function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
+  let entries: unknown;
+  try {
+    entries = ctx.sessionManager.getEntries();
+  } catch {
+    return 0; // never let the retry-budget guard throw (E13)
+  }
+  if (!Array.isArray(entries)) return 0;
+
+  // Find the INDEX of the LAST user-prompt entry (type:"message" with message.role:"user").
+  let latestPromptIndex = -1;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; message?: { role?: unknown } };
+      if (ee.type === "message" && ee.message?.role === "user") latestPromptIndex = i;
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+  if (latestPromptIndex === -1) return 0; // no user prompt → no budget consumption
+
+  // Count mulligan:rewind markers appended AFTER the latest user prompt.
+  let count = 0;
+  for (let i = latestPromptIndex + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown };
+      if (ee.type === "custom" && ee.customType === "mulligan:rewind") count++;
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+  return count;
+}
+
+/**
  * checkpointExists — the checkpoint-existence check (step 3, E10). Scan `ctx.sessionManager.getEntries()` for an
  * entry where `type === "label" && label === \`mulligan:checkpoint:${name}\``; return found. Defensive (never
  * throws; a malformed name naturally returns false). Module-local.
@@ -393,6 +446,20 @@ async function rewindExecute(
     if (depth >= config.rewind.maxDepth) {
       return refusal(
         `max rewind depth (${config.rewind.maxDepth}) reached — ${depth} active rewind marker(s). Consider mulligan_shrink or just continuing; if stuck in a loop, the human should intervene`,
+        granularity,
+      );
+    }
+
+    // (4b) per-prompt retry budget (step 4; E22 hard backstop #1). The marker-counting budget: count
+    //     mulligan:rewind markers appended AFTER the latest user-prompt entry (rewinds re-landing at this
+    //     prompt). Refuse BEFORE persisting when the count reaches the budget — a self-authored note can
+    //     re-instruct the loop's cause, so the note cannot self-correct; only a hard count can arrest it.
+    //     Independent of the maxDepth cumulative cap (4) and the context-fraction stop (4c, P4.M1.T2.S2):
+    //     all three apply; first refusal wins. countRetriesAtLatestPrompt is defensive (never throws — E13).
+    const retries = countRetriesAtLatestPrompt(ctx);
+    if (retries >= config.rewind.maxRetriesPerPrompt) {
+      return refusal(
+        `hit the per-prompt retry budget (${retries}/${config.rewind.maxRetriesPerPrompt} rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again`,
         granularity,
       );
     }

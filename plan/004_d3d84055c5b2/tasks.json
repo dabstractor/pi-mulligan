@@ -50,7 +50,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S1",
                   "title": "Per-prompt retry budget guard",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1"
@@ -67,7 +67,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S2",
                   "title": "Out-of-band context-fraction stop guard",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1"
