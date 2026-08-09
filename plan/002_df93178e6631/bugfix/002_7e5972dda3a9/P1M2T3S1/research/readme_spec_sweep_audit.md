@@ -1,0 +1,97 @@
+# Research Note — README & Spec Sweep (P1.M2.T3.S1, bugfix 002_7e5972dda3a9)
+
+> Mode B, documentation-only. This is the FINAL convergence subtask: it VERIFIES the whole changeset's
+> spec/doc surface is consistent with the shipped per-tool bloat threshold + the BUG-001 proto-key guard.
+> **Expected outcome: "verified — no drift" — NO edits.** Pre-research found zero stale references.
+
+## 1. The contract sweep — `8192` / `8 KB` across README + spec (+ docs/, which does not exist)
+
+Command run (comprehensive — catches spaced and unspaced forms):
+`grep -rnE '8192|8 ?KB' README.md spec/`
+
+**Result: exactly 2 hits, BOTH legitimate historical context (the contract's stated exceptions):**
+
+| File:line | Text (paraphrased) | Status |
+|-----------|--------------------|--------|
+| spec/07-preventive-and-nudges.md:52 | "…The previous default was **8192 (8 KB)**; it was raised after observation showed 8 KB nagging on every routine source-file read…" | ✅ LEGITIMATE — deliberate "raised from" rationale |
+| spec/09-configuration.md:66 | "…**Raised from 8 KB** after observation: the 8 KB default nagged on every routine source-file read…" | ✅ LEGITIMATE — deliberate "raised from" rationale |
+
+**Both are intentional design-history explanations of WHY the default was raised. The contract explicitly
+excepts spec/07:52 and spec/09:66.** Do NOT "fix" these — removing them would destroy the calibration rationale.
+
+**ZERO stale references.** No `8192`/`8 KB`/`8KB` appears anywhere else in README.md or spec/.
+
+> NOTE: there is no `docs/` directory in the repo (`ls docs/` → not found). The contract's `docs/` operand is
+> a no-op. The sweep scope is therefore README.md + spec/ (plus a courtesy check of VERIFICATION.md — see §3).
+
+## 2. Per-tool value consistency — `32768` / `20480` / `32 KB` / `20 KB`
+
+`grep -rnE '32768|20480|32 ?KB|20 ?KB' README.md spec/` — **ALL consistent, no drift:**
+
+- README.md:92 — `bloatThresholdBytesByTool = { "bash": 32768, "read": 20480 }` ✅
+- README.md:108 — settings.json example: `{ "bash": 32768, "read": 20480 }` ✅
+- README.md:204 — "`bash`: 32 KB, `read`: 20 KB, others: the 16 KB global default" ✅
+- spec/04-data-model.md:244 — "default { bash: 32768, read: 20480 }" ✅ (P1.M2.T1.S1 COMPLETE)
+- spec/05-tools.md:196,208 — per-tool (20 KB read / 32 KB bash / 16 KB global) ✅
+- spec/07-preventive-and-nudges.md:62 — `{ "bash": 32768, "read": 20480 }` ✅
+- spec/09-configuration.md:37,38,67 — all correct ✅
+- spec/SPEC.md:155 — "16384/16 KB, with `bash` at 32 KB and `read` at 20 KB" ✅
+
+## 3. README.md bloat/threshold/audit landscape — ALL correct (verified 2025-01-23)
+
+`grep -niE 'bloat|mulligan_audit|threshold' README.md` — every mention is accurate:
+
+- L89 `nudges.bloatReminder` "exceeding the byte threshold" — generic brief, fine ✅
+- L91 `bloatThresholdBytes = 16384` + per-tool override note ✅
+- L92 `bloatThresholdBytesByTool = {bash:32768, read:20480}` ✅
+- L108 settings.json example ✅
+- L171 audit "flags results above the **per-tool** bloat threshold" ✅ (ALREADY has "per-tool" — no edit needed)
+- L204 reminder "exceeding the **per-tool** bloat threshold (bash: 32 KB, read: 20 KB, others: 16 KB global default)" ✅
+
+> KEY DIFFERENCE from bugfix 001: in 001, README:171 lacked "per-tool" (a candidate edit). Here in 002,
+> README:171 ALREADY reads "per-tool bloat threshold". So for bugfix 002 there is **no README edit at all**.
+
+## 4. Sibling spec files — all fixed / in-progress (DO NOT touch)
+
+- **spec/01-pi-context-internals.md:197** — already shows `(e.g. 16 KB in-context)`. git status shows `M`
+  (P1.M2.T2.S2 edit applied/in-progress). READ-ONLY for this sweep. ✅
+- **spec/04-data-model.md:243-244** — "default 16384 (16 KB)" + per-tool map. (P1.M2.T1.S1 COMPLETE) ✅
+- **spec/10-testing.md:67** — ">16KB result" (no-space style). (P1.M2.T2.S1 COMPLETE) ✅
+- **spec/07, spec/09** — already correct (source of truth). READ-ONLY. ✅
+
+## 5. BUG-001 shipped behavior (the proto-key guard — for ground-truth reference)
+
+`src/nudges.ts:91-95`:
+```ts
+export function bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number {
+  ...
+  return Object.prototype.hasOwnProperty.call(byTool, toolName) ? byTool[toolName] : global;
+}
+```
+JSDoc (lines 83-89) documents the OWN-PROPERTY guard: `Object.prototype.hasOwnProperty.call` is used (not
+`byTool.hasOwnProperty`) so an adversarial own key named "hasOwnProperty" cannot shadow the method, and a
+toolName colliding with a prototype member correctly resolves to global. **The guard is shipped (BUG-001 COMPLETE).**
+Docs do not need to describe this internal guard (it's an implementation detail); the sweep only verifies the
+threshold VALUES and per-tool behavior are correctly documented.
+
+## 6. VERIFICATION.md (repo root — courtesy check; OUT OF SCOPE but confirmed clean)
+
+`grep -niE '8192|8 ?KB' VERIFICATION.md` → **0 hits.** It is a frozen v1.0 DoD report (header: "Generated by
+P1.M7.T4.S2"); not part of the contract's README/spec/docs sweep scope, and contains no threshold staleness.
+Do NOT edit it (it is a historical record). Listed only for completeness.
+
+## 7. Source-of-truth facts (every README/spec number must agree with these)
+
+- `src/config.ts:62` — JSDoc "Default: 16384 (16 KB)"
+- `src/config.ts:109` — `bloatThresholdBytes: 16384` + `bloatThresholdBytesByTool: { bash: 32768, read: 20480 }`
+- `spec/07-preventive-and-nudges.md:52` — "Default bloatThresholdBytes = 16384 (16 KB)"
+- `spec/09-configuration.md:66-67` — defaults table: 16384 + {bash:32768, read:20480}
+- Full test-suite baseline (pre-fix): **742 tests, all passing** (system_context §Tech Stack).
+
+## 8. Conclusion
+
+**"verified — no drift."** The contract sweep finds only the 2 legitimate historical-context exceptions.
+README + all spec/* are consistent with the shipped 16384 global + {bash:32768, read:20480} per-tool behavior
+and the BUG-001 guard. **No file edits are required.** The implementer RE-RUNS the sweep at implementation
+time to confirm (docs may have shifted), records "verified — no drift", and runs `npx vitest run` + `npx tsc
+--noEmit` as the changeset-level convergence gate.

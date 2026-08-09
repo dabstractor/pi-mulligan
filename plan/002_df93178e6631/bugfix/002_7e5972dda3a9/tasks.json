@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bugfix: bloatThresholdFor Proto-Key Leak & Stale Spec Sync",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix three minor bugs found during the P2 (Per-Tool Bloat Threshold) bug-hunt: (1) a latent prototype-key collision in bloatThresholdFor that returns Object.prototype members instead of the global threshold for tools named 'constructor'/'toString'/etc.; (2) a stale config schema in spec/04-data-model.md still showing default 8192 and missing bloatThresholdBytesByTool; (3) stale '8 KB' prose in spec/10-testing.md:67 and spec/01-pi-context-internals.md:197. All are documentation or lookup defects with low real-world impact (no built-in Pi tool triggers the proto-key path), but they contradict the shipped 16384 + {bash:32768, read:20480} configuration and violate design principle #6 (honest bookkeeping).",
       "milestones": [
         {
@@ -44,7 +44,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Fix BUG-002 + BUG-003: Sync Stale Spec Documentation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Update three companion spec files that the P2 per-tool-threshold sync missed: spec/04-data-model.md (stale config schema showing default 8192 and missing bloatThresholdBytesByTool), spec/10-testing.md (stale '>8KB' in F-shrink-preventive scenario), and spec/01-pi-context-internals.md (stale '8 KB' rationale prose). All three must be brought in line with the already-updated spec/07, spec/09, and src/config.ts (16384 global + {bash:32768, read:20480} per-tool).",
           "tasks": [
             {
@@ -111,14 +111,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Final sweep of README.md and any overview docs to ensure no stale bloat-threshold references remain after the code and spec fixes. Per the PRD overview, README.md was already updated during the P2 changeset (lines 91-92, 108, 204 all show 16384 + bloatThresholdBytesByTool), so this task should verify and confirm that state rather than expect edits.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Verify README.md and overview docs have no stale bloat threshold references",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
