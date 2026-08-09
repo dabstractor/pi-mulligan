@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 13 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 17 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -85,12 +85,16 @@ All 13 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `rewind.requireMutationWarning` | `true` | Append a ⚠ warning when the hidden span wrote files / ran side-effecting bash (those effects persist on disk). |
 | **shrink** | | |
 | `shrink.enabled` | `true` | Enable the `mulligan_shrink` tool. |
+| `shrink.maxActive` | `32` | Cap on simultaneous *active* `mulligan:shrink` markers; the oldest is retired when exceeded. Mirrors `rewind.maxDepth` as a bound on marker accumulation. |
+| `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent for this many consecutive filter fires (`spec/08-edge-cases.md` E15/E21). Stops dead markers being walked every fire. |
 | **nudges** | | |
 | `nudges.bloatReminder` | `true` | Annotate a `tool_result` exceeding the byte threshold with a rewind reminder. |
 | `nudges.perTurnDrift` | `true` | Inject a one-line drift nudge when a turn grew past the token threshold. |
 | `nudges.bloatThresholdBytes` | `16384` | Global catch-all: in-context byte size of a single tool result above which the bloat reminder fires (16 KB — below Pi's ~50 KB cap). A tool listed in `bloatThresholdBytesByTool` uses its own value instead; tools not listed fall back to this. |
 | `nudges.bloatThresholdBytesByTool` | `{ "bash": 32768, "read": 20480 }` | Per-tool byte thresholds (keyed by Pi `toolName`). A tool listed here uses its own value instead of the global `bloatThresholdBytes`; tools not listed fall back to the global. Defaults raise the bar for `bash` (builds, test runs, `git log` legitimately produce tens of KB) and `read` (large source-file reads are routine). |
-| `nudges.driftThresholdTokens` | `3000` | Per-turn token delta above which the drift nudge fires. |
+| `nudges.driftThresholdTokens` | `6000` | Windowed (`spec/07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from the previous 3k default after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
+| `nudges.driftWindowTurns` | `3` | Rolling window (in turns) over which the per-turn token delta is smoothed before thresholding (`spec/07-preventive-and-nudges.md` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
+| `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered — fires once on crossing, clears when the total drops back below). Catches slow, steady accumulation the delta nudge misses. |
 | **audit** | | |
 | `audit.estimateConfidence` | `"medium"` | Honesty label reported with token estimates (`low` \| `medium` \| `high`). |
 | **log** | | |
@@ -105,7 +109,8 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
   // "mulligan": {
   //   "enabled": true,
   //   "rewind": { "maxDepth": 5 },
-  //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "bash": 32768, "read": 20480 }, "driftThresholdTokens": 3000 }
+  //   "shrink": { "maxActive": 32, "staleAfterFires": 3 },
+  //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "bash": 32768, "read": 20480 }, "driftThresholdTokens": 6000, "driftWindowTurns": 3, "highWaterFraction": 0.7 }
   // }
 }
 ```
