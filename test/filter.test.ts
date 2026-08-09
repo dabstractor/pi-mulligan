@@ -79,7 +79,7 @@ function pinnedShrinkData(seq: number, id: string, pinnedEntryId: string): Recor
     replacement: "<shrunk>", pinnedEntryId, seq, ts: 1 };
 }
 function metricData(seq: number, grew = false, bloat = false): Record<string, unknown> {
-  return { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq, ts: 1, deltaTokens: grew ? 5000 : 100,
+  return { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq, ts: 1, deltaTokens: grew ? 7000 : 100,
     bloatHit: bloat, bloatHits: [], grewOverThreshold: grew, turnIndex: seq };
 }
 /** A custom entry (marker). type 'custom' → NOT in context. */

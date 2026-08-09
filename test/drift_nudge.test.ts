@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { shouldNudge, injectNudge, suppressCheck, NUDGE_TURN_WINDOW_MS } from "../src/nudges.js";
 import type { TurnMetric, RewindMarker, ShrinkMarker } from "../src/markers.js";
 import type { MessageLike } from "../src/transforms.js";
+import type { MulliganConfig } from "../src/config.js";
 
 // ── pure-function unit tests for Nudge B Phase 2 (spec/07 §2). NO Pi fakes, NO clearAll, NO setConfig. ──
 // shouldNudge / injectNudge / suppressCheck are pure helpers (spec/07 §3); these tests exercise them directly
@@ -57,22 +58,53 @@ function shrink(seq: number, ts: number): ShrinkMarker {
 
 // ── shouldNudge ─────────────────────────────────────────────────────────────────────────────
 
-describe("shouldNudge — pure gate (spec/07 §2)", () => {
-  it("returns true when grewOverThreshold is true", () => {
-    expect(shouldNudge(metric({ grewOverThreshold: true, bloatHit: false }), {} as never)).toBe(true);
+describe("shouldNudge — windowed drift gate (spec/07 §5.1)", () => {
+  // Build a minimal turn-metric with explicit deltaTokens + bloatHit (windowed tests need delta control).
+  // seq is provided so callers can express newest-first ordering; default grewOverThreshold:false (unused by
+  // the gate — the windowed average replaces the single-turn check).
+  const m = (deltaTokens: number | null, bloatHit = false, seq = 1): TurnMetric =>
+    ({ schema: "pi-mulligan", v: 1, kind: "turn-metric", seq, ts: seq, deltaTokens, bloatHit,
+       bloatHits: [], grewOverThreshold: false, turnIndex: seq } as TurnMetric);
+  // shouldNudge reads nudges.driftWindowTurns + nudges.driftThresholdTokens; cast a partial literal.
+  const cfg = (windowTurns = 3, threshold = 6000): MulliganConfig =>
+    ({ nudges: { driftWindowTurns: windowTurns, driftThresholdTokens: threshold } } as MulliganConfig);
+
+  it("does NOT fire on a single heavy turn amid small turns (window smoothing) — [8k,0.5k,0.5k]", () => {
+    // newest-first (highest seq at index 0); threshold 6000, window 3 → MA 3000 < 6000 → false.
+    expect(shouldNudge([m(8000, false, 3), m(500, false, 2), m(500, false, 1)], cfg())).toBe(false);
   });
 
-  it("returns true when bloatHit is true (even if grewOverThreshold is false)", () => {
-    expect(shouldNudge(metric({ grewOverThreshold: false, bloatHit: true }), {} as never)).toBe(true);
+  it("fires on sustained growth whose windowed average exceeds threshold — [7k,7k,7k]", () => {
+    expect(shouldNudge([m(7000, false, 3), m(7000, false, 2), m(7000, false, 1)], cfg())).toBe(true);
   });
 
-  it("returns false when both grewOverThreshold and bloatHit are false", () => {
-    expect(shouldNudge(metric({ grewOverThreshold: false, bloatHit: false }), {} as never)).toBe(false);
+  it("fires when ANY window metric has bloatHit (independent of the windowed delta) — bloat-only", () => {
+    // all deltas null (first turn / post-reload), one bloatHit → true.
+    expect(shouldNudge([m(null, true, 1)], cfg())).toBe(true);
   });
 
-  it("returns a real boolean (false) for a malformed metric — === true robustness", () => {
-    // readMarkers casts raw session data; a field could be undefined. === true yields a boolean, not undefined.
-    const result = shouldNudge({} as TurnMetric, {} as never);
+  it("fires on bloatHit even when the windowed average is below threshold", () => {
+    expect(shouldNudge([m(500, true, 1)], cfg())).toBe(true);
+  });
+
+  it("returns false for an empty window (no metrics)", () => {
+    expect(shouldNudge([], cfg())).toBe(false);
+  });
+
+  it("returns false when all window deltas are null and no bloatHit (first turn / post-reload, no bloat)", () => {
+    expect(shouldNudge([m(null, false, 1)], cfg())).toBe(false);
+  });
+
+  it("slices only the first driftWindowTurns metrics (newest-first)", () => {
+    // window 2 over [7k,7k,0] → MA of [7k,7k]=7k > 6k → fire; window 1 over [7k,0,0] → only newest (7k) → fire.
+    expect(shouldNudge([m(7000, false, 3), m(7000, false, 2), m(0, false, 1)], cfg(2))).toBe(true);
+    expect(shouldNudge([m(7000, false, 3), m(0, false, 2), m(0, false, 1)], cfg(1))).toBe(true);
+  });
+
+  it("defensive: a malformed deltaTokens (non-number) is dropped; returns a real boolean", () => {
+    const bad = { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq: 1, ts: 1, deltaTokens: "oops",
+      bloatHit: false, bloatHits: [], grewOverThreshold: false, turnIndex: 1 } as unknown as TurnMetric;
+    const result = shouldNudge([bad], cfg());
     expect(result).toBe(false);
     expect(typeof result).toBe("boolean");
   });

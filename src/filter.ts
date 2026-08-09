@@ -254,13 +254,15 @@ export function contextHandler(
       branchEntries as unknown as BranchEntry[],
     );
 
-    // Per-turn drift nudge (spec/07 §2). shouldNudge/injectNudge/suppressCheck are imported from nudges.ts
-    // (P1.M6.T2.S2). Suppress avoids nagging when the agent already acted that turn (a rewind/shrink marker
-    // within the turn's time window — spec/07 §2 "Edge cases").
+    // Per-turn drift nudge (spec/07 §2; §5.1 windowed drift signaling, REQUIRED). shouldNudge now takes the
+    // FULL recentMetrics window (P3.M3.T3.S1 — sorted newest-first) and slices driftWindowTurns internally,
+    // firing on sustained growth (moving average > threshold) or any window bloatHit. injectNudge/suppressCheck
+    // still take the single LATEST metric (markers.metric). P3.M3.T6.S1 completes the broader contextHandler
+    // integration (high-water signal).
     if (
       config.nudges.perTurnDrift &&
       markers.metric &&
-      shouldNudge(markers.metric, config) &&
+      shouldNudge(markers.recentMetrics, config) &&
       !suppressCheck(markers.metric, markers)
     ) {
       messages = injectNudge(messages, markers.metric);

@@ -267,26 +267,59 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
 export const NUDGE_TURN_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
- * shouldNudge — Nudge B Phase 2 gate (spec/07 §2; spec/06 §1/§12). Pure boolean: fire the drift nudge iff the
- * latest turn-metric grew context over threshold OR recorded a bloated result. Both fields are computed by Phase 1
- * (turnEndMetricHandler, P1.M6.T2.S1) at turn_end from the FILTERED view (design principle #6) — no recomputation,
- * no tokenization, no Pi call here.
+ * shouldNudge — Nudge B Phase 2 gate (spec/07 §2; spec/07 §5.1 Windowed drift signaling, REQUIRED). PURE boolean
+ * (no Pi calls, no tokenization). Fires the drift nudge iff the per-turn token delta, SMOOTHED over a rolling
+ * window of the last `config.nudges.driftWindowTurns` turns, exceeds `config.nudges.driftThresholdTokens`, OR any
+ * metric in that window recorded a bloated result.
  *
- * The `_config` arg is the spec/contract signature's second parameter but is UNUSED in v1: the drift threshold was
- * already applied when the metric's grewOverThreshold was computed at turn_end. Named `_config` per the
- * accepted-but-unused convention (renderBloatReminder(_toolName, …); estimateTokens(messages, _model?)).
+ * ALGORITHM — moving average (spec/07 §5.1 "moving-average, or M-of-N"; the item contract + architecture
+ * implementation_patterns.md Pattern 8 both RECOMMEND moving average). The window is the first `driftWindowTurns`
+ * entries of `recentMetrics` (P3.M3.T3.S1 sorts them NEWEST-FIRST — highest seq at index 0). From that window we
+ * collect the `deltaTokens` values that are finite numbers (null/non-number/NaN/±Infinity deltas — first turn /
+ * post-reload / a malformed cast — are dropped). If NO window metric has a usable delta, the delta path is skipped
+ * and we fall back to the bloat path alone. Otherwise the AVERAGE of the window's usable deltas is compared
+ * (strictly greater) to `driftThresholdTokens`. Bloat is INDEPENDENT of the windowed delta: if ANY window metric
+ * has `bloatHit === true`, the nudge fires regardless (a bloated result is actionable even on the first turn / amid
+ * small deltas).
  *
- * `=== true` (not just truthy) so a malformed metric — readMarkers casts raw session data, so a field could be
- * undefined/non-boolean — yields a real `boolean` (never `undefined`), satisfying the `: boolean` return and
- * failing safe to "no nudge".
+ * SPEC-AMBIGUITY RESOLUTION (architecture implementation_patterns.md Pattern 8): spec/07 §5.1 gives two acceptance
+ * criteria — (1) a single 8k-token turn amid small turns does NOT fire; (2) three ~4k turns in a row DO — and
+ * offers "moving-average, OR M-of-N" with threshold 6000, window 3. Neither pure algorithm satisfies BOTH literally
+ * at threshold 6000: moving-average [8k,0.5k,0.5k]=3k<6k→no fire ✓ but [4k,4k,4k]=4k<6k→no fire ✗; sum
+ * [8k,0.5k,0.5k]=9k>6k→fire ✗ but [4k,4k,4k]=12k>6k→fire ✓. The PRIMARY intent of §5.1 (and the reason it exists)
+ * is to SUPPRESS SINGLE SPIKES — a single heavy turn is routinely legitimate (reading files, pasting docs). Moving
+ * average is the algorithm that satisfies that primary intent (criterion 1). Criterion 2 ("three ~4k turns fire")
+ * is ILLUSTRATIVE of "sustained growth fires"; with the §5.1-windowing-justified raised threshold of 6000
+ * (config.ts: "the §5.1 windowing makes 6000 a quiet, accurate trip point"), three 4k turns averaging 4k correctly
+ * do NOT fire — sustained growth whose windowed AVERAGE exceeds 6000 (e.g. three ~7k turns) DOES. Chosen algorithm:
+ * MOVING AVERAGE vs threshold, with bloat OR'd in. (Matches the item contract recommendation + Pattern 8 FINAL
+ * ANSWER.)
  *
- * @param metric  the latest mulligan:turn-metric (readMarkers keeps the highest-seq one; null is filtered by the
- *                caller's `markers.metric` check before this is called).
- * @param _config the MulliganConfig (ACCEPTED for signature parity; NOT used in v1).
- * @returns true iff metric.grewOverThreshold || metric.bloatHit.
+ * The bloat path uses `=== true` (not truthy) so a malformed metric — readMarkers casts raw session data, so
+ * `bloatHit` could be undefined/non-boolean — fails safe to "no bloat". Delta values are guarded with
+ * `typeof === "number" && Number.isFinite(d)` so a malformed `deltaTokens` (string/NaN/Infinity) is dropped rather
+ * than poisoning the average with NaN. An empty window (no metrics) → no usable deltas → bloat path over an empty
+ * window → false (no nudge).
+ *
+ * `grewOverThreshold` (the per-turn precomputation from turnEndMetricHandler) is NOT consulted here — the windowed
+ * average replaces the single-turn comparison. It is still computed and persisted by turnEndMetricHandler (for
+ * audit/back-compat) but is deliberately unused by this gate.
+ *
+ * @param recentMetrics ALL mulligan:turn-metric entries on the branch, sorted NEWEST-FIRST
+ *                       (MarkersBundle.recentMetrics from P3.M3.T3.S1). This function slices the first
+ *                       `driftWindowTurns` itself; the caller passes the full array.
+ * @param config        the MulliganConfig (reads nudges.driftWindowTurns + nudges.driftThresholdTokens).
+ * @returns true iff the windowed moving-average delta > driftThresholdTokens OR any window metric has
+ *          bloatHit === true.
  */
-export function shouldNudge(metric: TurnMetric, _config: MulliganConfig): boolean {
-  return metric.grewOverThreshold === true || metric.bloatHit === true;
+export function shouldNudge(recentMetrics: TurnMetric[], config: MulliganConfig): boolean {
+  const window = recentMetrics.slice(0, config.nudges.driftWindowTurns);
+  const deltas = window
+    .map((m) => m.deltaTokens)
+    .filter((d): d is number => typeof d === "number" && Number.isFinite(d));
+  if (deltas.length === 0) return window.some((m) => m.bloatHit === true);
+  const avg = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+  return avg > config.nudges.driftThresholdTokens || window.some((m) => m.bloatHit === true);
 }
 
 /**
