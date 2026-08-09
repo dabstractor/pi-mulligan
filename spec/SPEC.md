@@ -191,18 +191,18 @@ Full glossary in `@12-glossary.md`. Key terms: **marker** (a persisted `CustomEn
 
 Read in order for a complete specification. The omnibus = this master + every linked file below.
 
-1. Prerequisite knowledge — how Pi's context actually works — `@01-pi-context-internals.md`
-2. Proven constraints from the feasibility spike (do not repeat these dead-ends) — `@02-proven-constraints.md`
-3. Architecture — the unified marker + context-event design — `@03-architecture.md`
-4. Data model — markers, notes, ledgers, schemas — `@04-data-model.md`
-5. Tools — the agent-callable API — `@05-tools.md`
-6. The context filter — the core algorithm (granularities, pairing, composition) — `@06-context-filter.md`
-7. Preventive layer & nudges — bloated-result reminder + per-turn drift nudge — `@07-preventive-and-nudges.md`
-8. Edge cases & failure modes — `@08-edge-cases.md`
-9. Configuration — settings schema & defaults — `@09-configuration.md`
-10. Testing & verification — `@10-testing.md`
-11. File layout & build order — `@11-build-order.md`
-12. Glossary & references — `@12-glossary.md`
+1. Prerequisite knowledge — how Pi's context actually works — @01-pi-context-internals.md
+2. Proven constraints from the feasibility spike (do not repeat these dead-ends) — @02-proven-constraints.md
+3. Architecture — the unified marker + context-event design — @03-architecture.md
+4. Data model — markers, notes, ledgers, schemas — @04-data-model.md
+5. Tools — the agent-callable API — @05-tools.md
+6. The context filter — the core algorithm (granularities, pairing, composition) — @06-context-filter.md
+7. Preventive layer & nudges — bloated-result reminder + per-turn drift nudge — @07-preventive-and-nudges.md
+8. Edge cases & failure modes — @08-edge-cases.md
+9. Configuration — settings schema & defaults — @09-configuration.md
+10. Testing & verification — @10-testing.md
+11. File layout & build order — @11-build-order.md
+12. Glossary & references — @12-glossary.md
 
 Reference artifacts (not part of the narrative, but proven and authoritative):
 
