@@ -89,6 +89,16 @@ export interface SessionRuntime {
    *  resetRuntime (entry deleted on session_start) and clearAll (shutdown). Default: `false`. In-memory,
    *  non-persisted (spec/04 §8). Consumed by shouldHighWater (P3.M3.T5.S1) via the rt parameter. */
   aboveHighWater: boolean;
+  /** The turnIndex of a turn in which a `mulligan_rewind` was just REFUSED (P4.M1.T2.S3 / spec/08 E23).
+   *  Latched by the rewind tool's `refuse()` wrapper to `readMarkers(ctx).metric?.turnIndex ?? rt.lastTurnIndex`
+   *  on EVERY refusal path (all 9 sites). filter.ts's drift-nudge block reads it to MUTE Nudge B (the drift
+   *  nudge) for the remainder of that same turn — a rewind refusal already surfaced the same root-cause
+   *  signal, so re-nagging would be noise. Cleared to `null` on the next context fire once
+   *  `markers.metric.turnIndex` differs from the latched value (the turn has advanced) — so a FUTURE turn's
+   *  genuine drift still nudges. null = no refused rewind this turn (the default; fail-open — drift nudge
+   *  proceeds). Mirrors aboveHighWater: in-memory, non-persisted; auto-reset to `null` by resetRuntime
+   *  (entry deleted on session_start) and clearAll (shutdown). Consumed by filter.ts's drift-nudge guard. */
+  rewindRefusedTurnIndex: number | null;
 }
 
 /**
@@ -114,6 +124,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     pendingBloatHits: [],
     shrinkMissCounts: new Map(),
     aboveHighWater: false,
+    rewindRefusedTurnIndex: null,
   };
 }
 

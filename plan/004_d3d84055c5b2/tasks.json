@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P4.M1",
           "title": "E22 retry budget + context-fraction stop (the main feature)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The rewind tool refuses before persisting when (a) >= maxRetriesPerPrompt rewinds have re-landed at the latest user message, or (b) the filtered-context estimate is >= abortContextFraction of the window. Both guards run independently of the existing maxDepth guard and never throw (E13). Acceptance = spec/10 §1.10 (a)-(g) and spec/08 E22.",
           "tasks": [
             {
@@ -43,7 +43,7 @@
               "type": "Task",
               "id": "P4.M1.T2",
               "title": "Rewind tool guards (src/tools/rewind.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add two hard guards to rewindExecute step 4, AFTER the existing maxDepth guard (~line 399) and BEFORE step 5 (resolvePreview). All three guards (maxDepth, retry-budget, context-fraction) apply INDEPENDENTLY (first refusal wins). Both new guards refuse BEFORE persisting and never throw (E13). T2.S3 (nudge suppression) is a SHOULD/advisory that may be deferred.",
               "subtasks": [
                 {
@@ -87,7 +87,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S3",
                   "title": "Suppress drift nudge for a turn in which a rewind was refused (SHOULD/advisory)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T2.S1",
@@ -108,14 +108,14 @@
               "type": "Task",
               "id": "P4.M1.T3",
               "title": "Tests (test/tools/rewind.test.ts, test/config.test.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Mirror spec/10 §1.10 (a)-(g) and spec/08 E22 acceptance. Extend the existing rewind-test fakes (makePi/makeCtx) and add config-knob validation cases. Integration scenarios F-retrycap / F-abortfraction are documented-only (test/integration/scenarios.md).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M1.T3.S1",
                   "title": "Retry-cap + context-fraction + config-knob unit tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1",

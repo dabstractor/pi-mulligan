@@ -287,6 +287,22 @@ export function contextHandler(
       /* observability only — never break the turn */
     }
 
+    // [P4.M1.T2.S3] clear the refused-rewind flag once the turn has advanced past it (fail-open, E13).
+    // Runs on EVERY context fire, independent of config.nudges.perTurnDrift. The drift-nudge block below
+    // mutes Nudge B when rt.rewindRefusedTurnIndex === markers.metric.turnIndex; once the latest metric's
+    // turnIndex DIFFERS (turn_end fired → new turn), the refusal no longer applies → clear so future drift
+    // nudges. Defensive (never throws — a flag clear must never take down the whole contextHandler).
+    try {
+      if (
+        rt.rewindRefusedTurnIndex !== null &&
+        markers.metric != null &&
+        rt.rewindRefusedTurnIndex !== markers.metric.turnIndex
+      ) {
+        rt.rewindRefusedTurnIndex = null;
+      }
+    } catch {
+      /* E13 — never let a flag clear take down the whole contextHandler */
+    }
     // Per-turn drift nudge (spec/07 §2; §5.1 windowed drift signaling, REQUIRED). The guard is the contract
     // guard verbatim (P3.M3.T6.S1): gate on a non-empty recentMetrics window FIRST, then call the windowed
     // shouldNudge(recentMetrics, config) (it slices driftWindowTurns internally — firing on sustained growth:
@@ -300,7 +316,8 @@ export function contextHandler(
       markers.recentMetrics.length > 0 &&
       shouldNudge(markers.recentMetrics, config) &&
       markers.metric &&
-      !suppressCheck(markers.metric, markers)
+      !suppressCheck(markers.metric, markers) &&
+      rt.rewindRefusedTurnIndex !== markers.metric.turnIndex   // [P4.M1.T2.S3] mute on a refused rewind this turn
     ) {
       messages = injectNudge(messages, markers.metric);
     }

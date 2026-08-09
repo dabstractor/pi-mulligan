@@ -487,6 +487,30 @@ describe("contextHandler — disabled pass-through, transform+cache, fail-open (
     expect(result.messages).toHaveLength(1); // no nudge
   });
 
+  it("does NOT inject the drift nudge for the remainder of a turn in which a rewind was refused (P4.M1.T2.S3)", () => {
+    // A rewind was refused THIS turn (turnIndex 1, matching the latest metric) → filter must mute Nudge B
+    // for the rest of the turn. shouldNudge would fire (grew=true) but the refused-rewind flag wins.
+    const { pi } = makePi();
+    pipelineReturn = [{ role: "user", content: "P" }];
+    const sessionId = "s5d";
+    const ctx = makeCtx({ sessionId, entries: [customEntry("mulligan:turn-metric", metricData(1, true))] });
+    getRuntime(sessionId).rewindRefusedTurnIndex = 1; // latch: a rewind was refused at turnIndex 1
+    const result = contextHandler(pi, { type: "context", messages: [] }, ctx) as { messages: unknown[] };
+    expect(result.messages).toHaveLength(1); // no nudge — muted by the refused-rewind flag
+  });
+
+  it("clears the flag and re-enables the nudge once the turn advances (P4.M1.T2.S3)", () => {
+    // Flag latched to an OLD turnIndex (7); latest metric is now turnIndex 8 (advanced) → clear + nudge fires.
+    const { pi } = makePi();
+    pipelineReturn = [{ role: "user", content: "P" }];
+    const sessionId = "s5e";
+    const ctx = makeCtx({ sessionId, entries: [customEntry("mulligan:turn-metric", metricData(8, true))] });
+    getRuntime(sessionId).rewindRefusedTurnIndex = 7; // stale: refused at a PRIOR turn
+    const result = contextHandler(pi, { type: "context", messages: [] }, ctx) as { messages: unknown[] };
+    expect(result.messages).toHaveLength(2); // nudge re-enabled (flag cleared: 7 !== 8)
+    expect(getRuntime(sessionId).rewindRefusedTurnIndex).toBeNull(); // cleared on turn advance
+  });
+
   it("fail-open: a throwing filterPipeline is caught, logged, and returns undefined (pass-through)", () => {
     const { pi } = makePi();
     pipelineReturn = () => { throw new Error("pipeline boom"); };

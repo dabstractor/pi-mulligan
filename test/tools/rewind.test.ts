@@ -23,7 +23,7 @@ import {
   type RewindDetails,
 } from "../../src/tools/rewind.js";
 import { NOTE_INVALID_REASON, renderNote } from "../../src/notes.js";
-import { clearAll } from "../../src/runtime.js";
+import { clearAll, getRuntime } from "../../src/runtime.js";
 import { setConfig } from "../../src/config.js";
 import type { RewindMarker, RewindMarkerInput } from "../../src/markers.js";
 import type {
@@ -167,6 +167,17 @@ function firstText(res: AgentToolResult<RewindDetails>): string {
 /** A rewind marker entry (customType "mulligan:rewind") for the depth guard. */
 function rewindEntry(seq = 1): { type: "custom"; customType: "mulligan:rewind"; data: { seq: number } } {
   return { type: "custom", customType: "mulligan:rewind", data: { seq } };
+}
+
+/** A turn-metric marker entry (customType "mulligan:turn-metric") with the given turnIndex + seq, for the
+ *  P4.M1.T2.S3 refused-rewind flag tests (rewind.ts reads readMarkers(ctx).metric?.turnIndex). */
+function metricEntry(turnIndex: number, seq = turnIndex): { type: "custom"; customType: "mulligan:turn-metric"; data: Record<string, unknown> } {
+  return {
+    type: "custom",
+    customType: "mulligan:turn-metric",
+    data: { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq, ts: 1, turnIndex, deltaTokens: 100,
+      bloatHit: false, bloatHits: [], grewOverThreshold: false },
+  };
 }
 
 /** A checkpoint label entry. */
@@ -373,6 +384,45 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
     const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
     expect(firstText(res)).toContain("max rewind depth (1) reached");
     expect(appended).toHaveLength(0);
+  });
+});
+
+// ── P4.M1.T2.S3: refused-rewind flag (rt.rewindRefusedTurnIndex) ────────────
+
+describe("mulligan_rewind — refusal latches rt.rewindRefusedTurnIndex (P4.M1.T2.S3)", () => {
+  it("a refused rewind latches rt.rewindRefusedTurnIndex to the latest metric turnIndex (P4.M1.T2.S3)", async () => {
+    // Trigger a refusal via an invalid note (E9 path). The latest turn-metric has turnIndex 7 → flag = 7.
+    const { pi } = makePi();
+    const { ctx } = makeCtx({ sessionId: "s1", entries: [metricEntry(7)] });
+    const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_tool_call_group" });
+    expect(firstText(res)).toContain("Mulligan: refused —");
+    expect(getRuntime("s1").rewindRefusedTurnIndex).toBe(7); // latched to the latest metric turnIndex
+  });
+
+  it("a SUCCESSFUL rewind does NOT set the flag (P4.M1.T2.S3)", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      sessionId: "s1",
+      entries: [metricEntry(3)],
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    expect(firstText(res)).toContain("Mulligan: rewound"); // success
+    expect(getRuntime("s1").rewindRefusedTurnIndex).toBeNull(); // success never sets the flag
+  });
+
+  it("a refusal when no turn-metric exists leaves the flag null and never throws (E13)", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({ sessionId: "s1", entries: [] }); // NO metric entries → currentTurnIndex null
+    const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_tool_call_group" });
+    expect(firstText(res)).toContain("Mulligan: refused —");
+    expect(getRuntime("s1").rewindRefusedTurnIndex).toBeNull(); // no metric → flag stays null
   });
 });
 

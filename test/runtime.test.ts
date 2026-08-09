@@ -32,6 +32,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       pendingBloatHits: [],
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
+      rewindRefusedTurnIndex: null,
     });
   });
 
@@ -55,6 +56,15 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
     expect(a.shrinkMissCounts).not.toBe(b.shrinkMissCounts);
     a.shrinkMissCounts.set("shrink-1", 1);
     expect(b.shrinkMissCounts.get("shrink-1")).toBeUndefined(); // b unaffected
+  });
+
+  it("rewindRefusedTurnIndex is mutable and isolated per session (P4.M1.T2.S3)", () => {
+    const a = getRuntime("A");
+    const b = getRuntime("B");
+    a.rewindRefusedTurnIndex = 7;
+    expect(a.rewindRefusedTurnIndex).toBe(7);
+    expect(b.rewindRefusedTurnIndex).toBeNull(); // B untouched
+    expect(getRuntime("A").rewindRefusedTurnIndex).toBe(7); // live ref reflects the write
   });
 });
 
@@ -122,6 +132,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       pendingBloatHits: [],
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
+      rewindRefusedTurnIndex: null,
     });
   });
 

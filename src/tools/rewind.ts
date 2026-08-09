@@ -57,6 +57,8 @@ import { appendRewindMarker, leaveNote, type RewindMarkerInput } from "../marker
 import { validateNote, renderNote, NOTE_INVALID_REASON, type NoteInput } from "../notes.js";
 import { extractFileLedger, type FileLedger } from "../ledger.js";
 import { getConfig, type Granularity } from "../config.js"; // GOTCHA #14: read ONCE at the top of execute
+import { getRuntime, type SessionRuntime } from "../runtime.js"; // [P4.M1.T2.S3] latch rewindRefusedTurnIndex
+import { readMarkers } from "../filter.js"; // [P4.M1.T2.S3] readMarkers(ctx).metric?.turnIndex (precedent: audit.ts L51)
 import {
   partitionIntoUnits,
   resolveLastToolCallGroup,
@@ -418,34 +420,60 @@ async function rewindExecute(
     params && (params.granularity === "last_tool_call_group" || params.granularity === "last_turn" || params.granularity === "checkpoint")
       ? params.granularity
       : "last_tool_call_group";
+  // [P4.M1.T2.S3] latch the turn index so filter.ts can mute the drift nudge (Nudge B) for the rest of this
+  // turn on a refusal. Declared OUTSIDE the main try so the catch (site 9) can also set the flag. The metric
+  // is the FILTER's source of truth (the exact value filter.ts will compare against), so read it FROM the
+  // same readMarkers(ctx).metric?.turnIndex; rt.lastTurnIndex is the in-memory fallback (same value mid-turn,
+  // null post-reload before the first turn_end → metric-first is more robust). E13: any throw leaves nulls
+  // → the flag is never set this turn (nudge behaves as before; fail-open).
+  let rt: SessionRuntime | null = null;
+  let currentTurnIndex: number | null = null;
   try {
+    rt = getRuntime(ctx.sessionManager.getSessionId());
+    currentTurnIndex = readMarkers(ctx).metric?.turnIndex ?? rt.lastTurnIndex ?? null;
+  } catch {
+    // E13: leave nulls → flag never set this turn (nudge behaves as before; fail-open).
+  }
+  try {
+    // [P4.M1.T2.S3] DRY: every in-try refusal routes through `refuse()` so the flag is set in ONE place
+    // (no site missed). The pure refusal() builder is UNCHANGED (adds the prefix + trailing dot). A
+    // SUCCESSFUL rewind never calls refuse() → the flag is left whatever it was. The catch (site 9) sets
+    // the flag inline (this closure is out of scope there).
+    const refuse = (reason: string, gran: Granularity): AgentToolResult<RewindDetails> => {
+      try {
+        if (rt !== null && currentTurnIndex !== null) rt.rewindRefusedTurnIndex = currentTurnIndex;
+      } catch {
+        /* E13 — never throw on the flag-set */
+      }
+      return refusal(reason, gran);
+    };
     // (1) config gate (step 1; E14). GOTCHA #14: read ONCE. Master switch FIRST (E14 master-disable),
     //     then the sub-feature gate. The master `enabled:false` makes the WHOLE extension a no-op
     //     (context pass-through + nudges no-op + tools refuse "Mulligan is disabled").
     const config = getConfig();
-    if (!config.enabled) return refusal("Mulligan is disabled", granularity); // E14 master switch
-    if (!config.rewind.enabled) return refusal("rewind is disabled", granularity);
+    if (!config.enabled) return refuse("Mulligan is disabled", granularity); // E14 master switch
+    if (!config.rewind.enabled) return refuse("rewind is disabled", granularity);
 
     // (2) note validation (step 2; E9). validateNote never throws; NOTE_INVALID_REASON has NO trailing period
     //     (refusal() adds the ".").
     const nv = validateNote((params?.note ?? {}) as NoteInput);
-    if (!nv.valid) return refusal(NOTE_INVALID_REASON, granularity);
+    if (!nv.valid) return refuse(NOTE_INVALID_REASON, granularity);
 
     // (3) checkpoint existence (step 3; E10). last_tool_call_group / last_turn are always valid.
     if (granularity === "checkpoint") {
       const name = params.checkpoint;
       if (!name || name.length === 0) {
-        return refusal("checkpoint granularity requires a checkpoint name", "checkpoint");
+        return refuse("checkpoint granularity requires a checkpoint name", "checkpoint");
       }
       if (!checkpointExists(ctx, name)) {
-        return refusal(`checkpoint '${name}' not found on this branch`, "checkpoint");
+        return refuse(`checkpoint '${name}' not found on this branch`, "checkpoint");
       }
     }
 
     // (4) depth guard (step 4; E4). Markers are permanent → ALL persisted rewind markers count toward maxDepth.
     const depth = countRewindMarkers(ctx);
     if (depth >= config.rewind.maxDepth) {
-      return refusal(
+      return refuse(
         `max rewind depth (${config.rewind.maxDepth}) reached — ${depth} active rewind marker(s). Consider mulligan_shrink or just continuing; if stuck in a loop, the human should intervene`,
         granularity,
       );
@@ -459,7 +487,7 @@ async function rewindExecute(
     //     all three apply; first refusal wins. countRetriesAtLatestPrompt is defensive (never throws — E13).
     const retries = countRetriesAtLatestPrompt(ctx);
     if (retries >= config.rewind.maxRetriesPerPrompt) {
-      return refusal(
+      return refuse(
         `hit the per-prompt retry budget (${retries}/${config.rewind.maxRetriesPerPrompt} rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again`,
         granularity,
       );
@@ -477,7 +505,7 @@ async function rewindExecute(
     const { totalTokens, windowTokens } = computeFilteredTotal(ctx);
     if (windowTokens > 0 && totalTokens / windowTokens >= config.rewind.abortContextFraction) {
       const pct = Math.round((totalTokens / windowTokens) * 100);
-      return refusal(
+      return refuse(
         `context is at ${pct}% of the window; rewinding will not help. Run mulligan_audit and shrink the largest result`,
         granularity,
       );
@@ -532,6 +560,12 @@ async function rewindExecute(
     };
   } catch (e) {
     // Shared tool convention (E13): never throw — return a text result describing the failure.
+    // [P4.M1.T2.S3] the refuse() closure is OUT OF SCOPE in this catch → set the flag inline (mirrors refuse()).
+    try {
+      if (rt !== null && currentTurnIndex !== null) rt.rewindRefusedTurnIndex = currentTurnIndex;
+    } catch {
+      /* E13 — never throw on the flag-set */
+    }
     return refusal(`unexpected error: ${e instanceof Error ? e.message : String(e)}`, granularity);
   }
 }
