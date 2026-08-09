@@ -174,6 +174,20 @@ describe("bloatThresholdFor — per-tool resolution (spec/07 §1; DEFAULT_CONFIG
     expect(bloatThresholdFor("bash", customConfig)).toBe(99999);
     expect(bloatThresholdFor("read", customConfig)).toBe(16384); // read not in map → global (NOT 20480)
   });
+
+  it("does not leak inherited Object.prototype members for tools named 'constructor'/'toString'/etc. (BUG-001)", () => {
+    // A tool whose name collides with an inherited Object.prototype member (constructor/toString/...)
+    // must fall back to the global — NOT return the inherited function. Pre-fix, byTool[toolName]
+    // returns the inherited function and `?? global` does not trigger, so the helper leaks a non-number.
+    const config = getConfig(); // DEFAULT_CONFIG: global 16384, byTool {bash:32768, read:20480}
+    const global = config.nudges.bloatThresholdBytes; // 16384
+    for (const protoKey of ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "toLocaleString"]) {
+      const t = bloatThresholdFor(protoKey, config);
+      expect(t).toBe(global); // returns the global number, NOT the inherited Object.prototype function
+      expect(typeof t).toBe("number"); // belt-and-suspenders: never a function
+      expect(Number.isFinite(t)).toBe(true); // never NaN downstream
+    }
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════════════════

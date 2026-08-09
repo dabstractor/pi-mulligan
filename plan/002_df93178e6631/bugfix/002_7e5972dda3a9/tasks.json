@@ -11,25 +11,30 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Fix BUG-001: Prototype-Key Leak in bloatThresholdFor",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Guard the per-tool threshold lookup in src/nudges.ts so that inherited Object.prototype properties cannot masquerade as a threshold value. This is a single-function code fix with a regression test, and it transitively fixes the same defect in src/tools/audit.ts which imports bloatThresholdFor.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Guard bloatThresholdFor against Object.prototype key collisions",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Add a regression test asserting bloatThresholdFor returns the global for prototype-key collision tool names ('constructor', 'toString', 'valueOf', 'hasOwnProperty'), then fix the lookup to use Object.prototype.hasOwnProperty.call before reading the value. This is TDD: write the failing test first, then implement the one-line guard.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Write failing regression test + fix bloatThresholdFor hasOwnProperty guard",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h2.3/h3.0", "h2.5", "h2.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-001. The function bloatThresholdFor lives at src/nudges.ts:86-91. The bug is on line ~90: `return byTool[toolName] ?? global;` — the `??` operator only catches null/undefined, not inherited Object.prototype functions. For toolName='constructor', byTool['constructor'] returns the Object constructor function, so `?? global` does NOT fall back. Downstream: `bytes < function` is always false (reminder fires on every result), and `Math.round(function/1024)` is NaN (renders '(threshold NaN KB)'). This same defect reaches src/tools/audit.ts:528 transitively — no code change needed there.\n2. INPUT: The existing function signature is `bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number`. The config param is a validated MulliganConfig where config.nudges.bloatThresholdBytesByTool is a Record<string, number> (or undefined → default {}). config.nudges.bloatThresholdBytes is the global fallback (16384 in DEFAULT_CONFIG).\n3. LOGIC: (A) TEST FIRST — Open test/nudges.test.ts. Find the describe block 'bloatThresholdFor — per-tool resolution' (starts ~line 136). Add a new `it(...)` test case AFTER the existing tests (after the 'respects an explicit custom override' test, before the closing `});` of the describe block). The test should: use `getConfig()` to get DEFAULT_CONFIG; assert `bloatThresholdFor('constructor', config)` returns the global `config.nudges.bloatThresholdBytes` (16384); assert the same for 'toString', 'valueOf', and 'hasOwnProperty'. The test will FAIL before the fix (returns a function, not a number). (B) FIX — In src/nudges.ts, replace the return statement `return byTool[toolName] ?? global;` with `return Object.prototype.hasOwnProperty.call(byTool, toolName) ? byTool[toolName] : global;`. Update the JSDoc comment above the function (the paragraph starting with '``byTool[toolName] ?? global`` is correct at runtime') to explain the hasOwnProperty guard prevents inherited Object.prototype members from masquerading as thresholds. Do NOT change the function signature, the `if (!toolName) return global;` early return, or the `?? {}` fallback — those are correct.\n4. OUTPUT: bloatThresholdFor returns `number` for ALL string inputs (never an inherited function). The regression test passes. Run `npx vitest run test/nudges.test.ts` to verify the test passes. Run `npx vitest run test/tools/audit.test.ts` to verify no transitive regression. Run `npx tsc --noEmit` for type safety.\n5. DOCS: [Mode A] Update the JSDoc on `bloatThresholdFor` in src/nudges.ts to document the hasOwnProperty guard and why it is necessary (prototype-key collision protection). No spec docs or README changes in this subtask — those are handled in P1.M2."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-001. The function bloatThresholdFor lives at src/nudges.ts:86-91. The bug is on line ~90: `return byTool[toolName] ?? global;` — the `??` operator only catches null/undefined, not inherited Object.prototype functions. For toolName='constructor', byTool['constructor'] returns the Object constructor function, so `?? global` does NOT fall back. Downstream: `bytes < function` is always false (reminder fires on every result), and `Math.round(function/1024)` is NaN (renders '(threshold NaN KB)'). This same defect reaches src/tools/audit.ts:528 transitively — no code change needed there.\n2. INPUT: The existing function signature is `bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number`. The config param is a validated MulliganConfig where config.nudges.bloatThresholdBytesByTool is a Record<string, number> (or undefined → default {}). config.nudges.bloatThresholdBytes is the global fallback (16384 in DEFAULT_CONFIG).\n3. LOGIC: (A) TEST FIRST — Open test/nudges.test.ts. Find the describe block 'bloatThresholdFor — per-tool resolution' (starts ~line 136). Add a new `it(...)` test case AFTER the existing tests (after the 'respects an explicit custom override' test, before the closing `});` of the describe block). The test should: use `getConfig()` to get DEFAULT_CONFIG; assert `bloatThresholdFor('constructor', config)` returns the global `config.nudges.bloatThresholdBytes` (16384); assert the same for 'toString', 'valueOf', and 'hasOwnProperty'. The test will FAIL before the fix (returns a function, not a number). (B) FIX — In src/nudges.ts, replace the return statement `return byTool[toolName] ?? global;` with `return Object.prototype.hasOwnProperty.call(byTool, toolName) ? byTool[toolName] : global;`. Update the JSDoc comment above the function (the paragraph starting with '``byTool[toolName] ?? global`` is correct at runtime') to explain the hasOwnProperty guard prevents inherited Object.prototype members from masquerading as thresholds. Do NOT change the function signature, the `if (!toolName) return global;` early return, or the `?? {}` fallback — those are correct.\n4. OUTPUT: bloatThresholdFor returns `number` for ALL string inputs (never an inherited function). The regression test passes. Run `npx vitest run test/nudges.test.ts` to verify the test passes. Run `npx vitest run test/tools/audit.test.ts` to verify no transitive regression. Run `npx tsc --noEmit` for type safety.\n5. DOCS: [Mode A] Update the JSDoc on `bloatThresholdFor` in src/nudges.ts to document the hasOwnProperty guard and why it is necessary (prototype-key collision protection). No spec docs or README changes in this subtask — those are handled in P1.M2.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h2.3/h3.0",
+                    "h2.5",
+                    "h2.0"
+                  ]
                 }
               ]
             }
@@ -46,18 +51,22 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Update spec/04-data-model.md config schema to match shipped defaults (BUG-002)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The MulliganConfig nudges block in spec/04-data-model.md:238-244 still shows bloatThresholdBytes default 8192 and is missing the bloatThresholdBytesByTool field. Update it to match src/config.ts DEFAULT_CONFIG and spec/09-configuration.md.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Fix nudges config block: default 8192→16384 + add bloatThresholdBytesByTool field",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h2.3/h3.1", "h2.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-002. The stale block is at spec/04-data-model.md lines 238-244. The source of truth is src/config.ts DEFAULT_CONFIG (bloatThresholdBytes: 16384, bloatThresholdBytesByTool: { bash: 32768, read: 20480 }) and spec/09-configuration.md:66-67. spec/07-preventive-and-nudges.md:52 also has the correct values.\n2. INPUT: The current nudges block in spec/04-data-model.md reads:\n```\n  nudges: {\n    bloatReminder: boolean;          // tool_result annotation; default true\n    perTurnDrift: boolean;           // context nudge; default true\n    bloatThresholdBytes: number;     // default 8192 (in-context bytes of a single result)\n    driftThresholdTokens: number;    // default 3000 (turn delta that triggers the nudge)\n  };\n```\n3. LOGIC: Edit spec/04-data-model.md. (A) Change the bloatThresholdBytes line comment from `// default 8192 (in-context bytes of a single result)` to `// default 16384 (in-context bytes of a single result; 16 KB)`. (B) Add a new line AFTER bloatThresholdBytes and BEFORE driftThresholdTokens:\n```\n    bloatThresholdBytesByTool?: Record<string, number>; // per-tool overrides; default { bash: 32768, read: 20480 }\n```\nMatch the formatting (alignment, comment style) of the surrounding lines. The `?` makes it optional (matching src/config.ts where the interface field is `bloatThresholdBytesByTool?: Record<string, number>`).\n4. OUTPUT: The nudges block in spec/04-data-model.md matches the shipped config shape and defaults. Verify by cross-checking against spec/09-configuration.md:66-67 and src/config.ts:109-110.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated. No further doc action needed within this subtask."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-002. The stale block is at spec/04-data-model.md lines 238-244. The source of truth is src/config.ts DEFAULT_CONFIG (bloatThresholdBytes: 16384, bloatThresholdBytesByTool: { bash: 32768, read: 20480 }) and spec/09-configuration.md:66-67. spec/07-preventive-and-nudges.md:52 also has the correct values.\n2. INPUT: The current nudges block in spec/04-data-model.md reads:\n```\n  nudges: {\n    bloatReminder: boolean;          // tool_result annotation; default true\n    perTurnDrift: boolean;           // context nudge; default true\n    bloatThresholdBytes: number;     // default 8192 (in-context bytes of a single result)\n    driftThresholdTokens: number;    // default 3000 (turn delta that triggers the nudge)\n  };\n```\n3. LOGIC: Edit spec/04-data-model.md. (A) Change the bloatThresholdBytes line comment from `// default 8192 (in-context bytes of a single result)` to `// default 16384 (in-context bytes of a single result; 16 KB)`. (B) Add a new line AFTER bloatThresholdBytes and BEFORE driftThresholdTokens:\n```\n    bloatThresholdBytesByTool?: Record<string, number>; // per-tool overrides; default { bash: 32768, read: 20480 }\n```\nMatch the formatting (alignment, comment style) of the surrounding lines. The `?` makes it optional (matching src/config.ts where the interface field is `bloatThresholdBytesByTool?: Record<string, number>`).\n4. OUTPUT: The nudges block in spec/04-data-model.md matches the shipped config shape and defaults. Verify by cross-checking against spec/09-configuration.md:66-67 and src/config.ts:109-110.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated. No further doc action needed within this subtask.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h2.3/h3.1",
+                    "h2.0"
+                  ]
                 }
               ]
             },
@@ -75,8 +84,12 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h2.3/h3.2", "h2.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-003. The stale line is spec/10-testing.md:67 in the F-shrink-preventive scenario table row. The correct threshold is 16384 (16 KB) for the global default — this is what an unlisted tool would trigger. spec/07:52 and spec/09:66 both confirm 16 KB.\n2. INPUT: The current table row at spec/10-testing.md:67 reads:\n```\n| **F-shrink-preventive** | `tool_result` hook annotates a >8KB result | result content has the appended `[mulligan]` reminder; `turn-metric` records `bloatHit:true` |\n```\n3. LOGIC: Edit spec/10-testing.md line 67. Change `>8KB` to `>16KB` in the scenario description column. The rest of the row (pass criteria column) is correct and should NOT change. This is a single-character-scale edit: `>8KB` → `>16KB`.\n4. OUTPUT: spec/10-testing.md:67 reads `>16KB result` consistent with the 16384 default. Verify by cross-checking against spec/07:52 and spec/09:66.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-003. The stale line is spec/10-testing.md:67 in the F-shrink-preventive scenario table row. The correct threshold is 16384 (16 KB) for the global default — this is what an unlisted tool would trigger. spec/07:52 and spec/09:66 both confirm 16 KB.\n2. INPUT: The current table row at spec/10-testing.md:67 reads:\n```\n| **F-shrink-preventive** | `tool_result` hook annotates a >8KB result | result content has the appended `[mulligan]` reminder; `turn-metric` records `bloatHit:true` |\n```\n3. LOGIC: Edit spec/10-testing.md line 67. Change `>8KB` to `>16KB` in the scenario description column. The rest of the row (pass criteria column) is correct and should NOT change. This is a single-character-scale edit: `>8KB` → `>16KB`.\n4. OUTPUT: spec/10-testing.md:67 reads `>16KB result` consistent with the 16384 default. Verify by cross-checking against spec/07:52 and spec/09:66.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h2.3/h3.2",
+                    "h2.0"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -85,8 +98,12 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h2.3/h3.2", "h2.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-003. The stale text is in spec/01-pi-context-internals.md:197 within §9 'Built-in tool truncation'. The sentence presents 8 KB as the default example, contradicting the actual 16 KB default.\n2. INPUT: The current sentence at spec/01-pi-context-internals.md:197 reads:\n```\nMulligan's bloat threshold should default comfortably below the built-in 50 KB cap (e.g. 8 KB in-context) so it catches meaningful-but-not-catastrophic bloat.\n```\n3. LOGIC: Edit spec/01-pi-context-internals.md line 197. Change `(e.g. 8 KB in-context)` to `(e.g. 16 KB in-context)`. Do NOT change any other part of the sentence or paragraph. This is a targeted text replacement: `8 KB` → `16 KB` within the parenthetical example.\n4. OUTPUT: spec/01-pi-context-internals.md:197 reads `(e.g. 16 KB in-context)` consistent with the 16384 default. Verify against spec/07:52 and spec/09:66.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §BUG-003. The stale text is in spec/01-pi-context-internals.md:197 within §9 'Built-in tool truncation'. The sentence presents 8 KB as the default example, contradicting the actual 16 KB default.\n2. INPUT: The current sentence at spec/01-pi-context-internals.md:197 reads:\n```\nMulligan's bloat threshold should default comfortably below the built-in 50 KB cap (e.g. 8 KB in-context) so it catches meaningful-but-not-catastrophic bloat.\n```\n3. LOGIC: Edit spec/01-pi-context-internals.md line 197. Change `(e.g. 8 KB in-context)` to `(e.g. 16 KB in-context)`. Do NOT change any other part of the sentence or paragraph. This is a targeted text replacement: `8 KB` → `16 KB` within the parenthetical example.\n4. OUTPUT: spec/01-pi-context-internals.md:197 reads `(e.g. 16 KB in-context)` consistent with the 16384 default. Verify against spec/07:52 and spec/09:66.\n5. DOCS: This IS a documentation fix — the spec file is the documentation being updated.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h2.3/h3.2",
+                    "h2.0"
+                  ]
                 }
               ]
             },
@@ -103,9 +120,17 @@
                   "title": "Verify README.md and overview docs have no stale bloat threshold references",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M2.T1.S1", "P1.M2.T2.S1", "P1.M2.T2.S2"],
-                  "prd_selectors": ["h2.0", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §Already-Correct References. README.md lines 91-92 (config table), 108 (JSON example), and 204 (How-It-Works) all already show 16384 + bloatThresholdBytesByTool — they were updated during the P2 changeset. This subtask verifies that state still holds after the bugfix changes and performs a final repo-wide grep sweep.\n2. INPUT: All prior subtasks (P1.M1.T1.S1, P1.M2.T1.S1, P1.M2.T2.S1, P1.M2.T2.S2) are complete. The code fix in nudges.ts and the three spec fixes are applied.\n3. LOGIC: (A) Run `grep -rn '8192\\|8 KB\\b' README.md spec/ docs/` to confirm zero remaining stale references (the only legitimate '8 KB' mentions should be historical context in spec/07:52 and spec/09:66 which explain why the default was RAISED FROM 8 KB — those are correct and should NOT be changed). (B) Verify README.md:91-92 shows `16384` and `{ \"bash\": 32768, \"read\": 20480 }`. (C) Verify README.md:204 mentions per-tool thresholds correctly. (D) Run `npx vitest run` to confirm the full suite (742+ tests) still passes. (E) Run `npx tsc --noEmit` for type safety. If any stale reference is found, fix it; if README is already correct (expected), no edits are needed — just confirm.\n4. OUTPUT: Confirmation (or fixes) that all documentation — README.md, all spec/*.md — is consistent with the shipped config (16384 global + {bash:32768, read:20480} per-tool + hasOwnProperty guard). Full test suite passes. tsc is clean.\n5. DOCS: This IS the changeset-level documentation sync task (Mode B). It depends on all implementing subtasks."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/002_7e5972dda3a9/architecture/system_context.md §Already-Correct References. README.md lines 91-92 (config table), 108 (JSON example), and 204 (How-It-Works) all already show 16384 + bloatThresholdBytesByTool — they were updated during the P2 changeset. This subtask verifies that state still holds after the bugfix changes and performs a final repo-wide grep sweep.\n2. INPUT: All prior subtasks (P1.M1.T1.S1, P1.M2.T1.S1, P1.M2.T2.S1, P1.M2.T2.S2) are complete. The code fix in nudges.ts and the three spec fixes are applied.\n3. LOGIC: (A) Run `grep -rn '8192\\|8 KB\\b' README.md spec/ docs/` to confirm zero remaining stale references (the only legitimate '8 KB' mentions should be historical context in spec/07:52 and spec/09:66 which explain why the default was RAISED FROM 8 KB — those are correct and should NOT be changed). (B) Verify README.md:91-92 shows `16384` and `{ \"bash\": 32768, \"read\": 20480 }`. (C) Verify README.md:204 mentions per-tool thresholds correctly. (D) Run `npx vitest run` to confirm the full suite (742+ tests) still passes. (E) Run `npx tsc --noEmit` for type safety. If any stale reference is found, fix it; if README is already correct (expected), no edits are needed — just confirm.\n4. OUTPUT: Confirmation (or fixes) that all documentation — README.md, all spec/*.md — is consistent with the shipped config (16384 global + {bash:32768, read:20480} per-tool + hasOwnProperty guard). Full test suite passes. tsc is clean.\n5. DOCS: This IS the changeset-level documentation sync task (Mode B). It depends on all implementing subtasks.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.5"
+                  ]
                 }
               ]
             }

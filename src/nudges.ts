@@ -80,14 +80,19 @@ interface BloatReminderResult {
  *
  * `?? {}` is a defensive fallback for a hand-built MulliganConfig: the interface field is optional
  * (`?:`), but validateConfig guarantees it is always a valid Record<string, number> after validation
- * (S2). `byTool[toolName] ?? global` is correct at runtime (a missing key yields undefined → global)
- * even though noUncheckedIndexedAccess is off and byTool[toolName] is statically typed `number`.
+ * (S2). The lookup is OWN-PROPERTY-guarded: `Object.prototype.hasOwnProperty.call(byTool, toolName)`
+ * is used (NOT bare `byTool[toolName] ?? global`), because a bare index read returns INHERITED
+ * Object.prototype members (constructor/toString/valueOf/...) as non-null values that `??` would
+ * pass through instead of falling back to the global. The own-property guard means a tool whose
+ * name collides with a prototype member correctly resolves to the global threshold (BUG-001 fix).
+ * `Object.prototype.hasOwnProperty.call` is used rather than `byTool.hasOwnProperty(...)` so an
+ * adversarial own key named "hasOwnProperty" cannot shadow the method.
  */
 export function bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number {
   const global = config.nudges.bloatThresholdBytes;
   if (!toolName) return global;
   const byTool = config.nudges.bloatThresholdBytesByTool ?? {};
-  return byTool[toolName] ?? global;
+  return Object.prototype.hasOwnProperty.call(byTool, toolName) ? byTool[toolName] : global;
 }
 
 /**
