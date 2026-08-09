@@ -73,6 +73,24 @@ interface BloatReminderResult {
 }
 
 /**
+ * bloatThresholdFor — resolve Nudge A's bloat threshold per tool (spec/07 §1). PURE: two reads, no I/O,
+ * no Pi runtime (so it is unit-testable directly). Priority: if toolName is in
+ * config.nudges.bloatThresholdBytesByTool, use that entry; otherwise fall back to the global
+ * config.nudges.bloatThresholdBytes. A falsy toolName (undefined / "") also returns the global.
+ *
+ * `?? {}` is a defensive fallback for a hand-built MulliganConfig: the interface field is optional
+ * (`?:`), but validateConfig guarantees it is always a valid Record<string, number> after validation
+ * (S2). `byTool[toolName] ?? global` is correct at runtime (a missing key yields undefined → global)
+ * even though noUncheckedIndexedAccess is off and byTool[toolName] is statically typed `number`.
+ */
+export function bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number {
+  const global = config.nudges.bloatThresholdBytes;
+  if (!toolName) return global;
+  const byTool = config.nudges.bloatThresholdBytesByTool ?? {};
+  return byTool[toolName] ?? global;
+}
+
+/**
  * bloatReminderHandler — Nudge A (spec/07 §1). Fires after every tool execution; if the result's
  * in-context byte size exceeds config.nudges.bloatThresholdBytes, APPENDS a short reminder to the
  * result's content (advisory; the agent may need the data now) and records a bloat hit for the per-turn
@@ -103,7 +121,7 @@ export function bloatReminderHandler(
     // signature); the narrow Pi type does not assign in to the broader one without a cast. Cast through
     // unknown at this single boundary — mirrors filter.ts's MessageLike boundary (never throws either way).
     const bytes = resultBytes(event.content as unknown as ResultContentBlock[]);
-    const threshold = config.nudges.bloatThresholdBytes;
+    const threshold = bloatThresholdFor(event.toolName, config);
     if (bytes < threshold) return; // under threshold → pass-through, NO recording
 
     const reminder = renderBloatReminder(event.toolName, bytes, threshold);

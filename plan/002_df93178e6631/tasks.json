@@ -69,7 +69,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Add + export bloatThresholdFor helper and wire into bloatReminderHandler",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"
@@ -87,7 +87,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S2",
                   "title": "Update nudges tests: resize fixtures, per-tool scenarios, bloatThresholdFor unit test",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",
