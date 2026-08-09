@@ -194,7 +194,7 @@ Auto-compaction triggers when `contextTokens > contextWindow - reserveTokens` (d
 
 ## 9. Built-in tool truncation (calibrates the "bloat" problem)
 
-Pi's built-in tools (`read`, `grep`, `bash`, ...) truncate individual results at **50 KB / 2000 lines** (whichever first) and spill full output to a temp file. So a naive command does **not** dump megabytes into context — it dumps ≤~10k tokens plus a pointer. The real accumulation problems Mulligan addresses are: (a) several medium results in one turn, (b) `read` on large files, (c) custom tools the user writes that forget to truncate. Mulligan's bloat threshold should default comfortably below the built-in 50 KB cap (e.g. 8 KB in-context) so it catches meaningful-but-not-catastrophic bloat. See `@09-configuration.md`.
+Pi's built-in tools (`read`, `grep`, `bash`, ...) truncate individual results at **50 KB / 2000 lines** (whichever first) and spill full output to a temp file. So a naive command does **not** dump megabytes into context — it dumps ≤~10k tokens plus a pointer. The real accumulation problems Mulligan addresses are: (a) several medium results in one turn, (b) `read` on large files, (c) custom tools the user writes that forget to truncate. Mulligan's bloat threshold should default comfortably below the built-in 50 KB cap (e.g. 16 KB in-context) so it catches meaningful-but-not-catastrophic bloat. See `@09-configuration.md`.
 
 ## 10. Modes (`ctx.mode`)
 
