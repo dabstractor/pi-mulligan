@@ -231,14 +231,14 @@
               "type": "Task",
               "id": "P3.M3.T1",
               "title": "Config knobs + threshold raise (config.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add nudges.driftWindowTurns (3), nudges.highWaterFraction (0.7), and raise nudges.driftThresholdTokens from 3000 to 6000.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T1.S1",
                   "title": "Add driftWindowTurns, highWaterFraction; raise driftThresholdTokens 3000→6000",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §config.ts and external_deps.md (config validation pattern). DEFAULT_CONFIG.nudges.driftThresholdTokens is currently 3000 — the on-disk spec/09 specifies 6000 with rationale: 'Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point.' This is a drift to fix. The existing coerceNumber(field, value, fallback, mustBePositive) handles finite >0. For driftWindowTurns it should be a positive integer. For highWaterFraction it must be finite in the open interval (0, 1) — coerceNumber does NOT enforce the <1 upper bound, so a dedicated inline check is needed.\n2. INPUT: The existing MulliganConfig.nudges block, DEFAULT_CONFIG.nudges, validateConfig's nudges block in src/config.ts.\n3. LOGIC: (a) Add to MulliganConfig.nudges: driftWindowTurns: number (rolling window for §5.1 windowed drift signaling) and highWaterFraction: number (§5.2 edge-triggered high-water signal — fraction of context window). (b) In DEFAULT_CONFIG.nudges: driftWindowTurns: 3, highWaterFraction: 0.7, and CHANGE driftThresholdTokens: 6000 (from 3000). (c) In validateConfig's nudges block: v = safeGet(nudgesRaw, 'driftWindowTurns'); if (v !== undefined) { const n = coerceNumber('nudges.driftWindowTurns', v, cfg.nudges.driftWindowTurns, true); cfg.nudges.driftWindowTurns = Number.isFinite(n) ? Math.floor(n) : cfg.nudges.driftWindowTurns; } — floor to integer. For highWaterFraction: v = safeGet(nudgesRaw, 'highWaterFraction'); if (v !== undefined) { if (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1) cfg.nudges.highWaterFraction = v; else warnConfig('nudges.highWaterFraction', v); } — dedicated check for the (0,1) interval. (d) Update any existing test asserting driftThresholdTokens === 3000 to assert 6000.\n4. OUTPUT: MulliganConfig.nudges now has driftWindowTurns (default 3) and highWaterFraction (default 0.7); driftThresholdTokens default is 6000. Consumed by shouldNudge (P3.M3.T4.S1), shouldHighWater (P3.M3.T5.S1), readMarkers (P3.M3.T3.S1), and contextHandler (P3.M3.T6.S1).\n5. MOCKING: In tests, validateConfig({ nudges: { driftWindowTurns: 5, highWaterFraction: 0.8, driftThresholdTokens: 10000 } }) → assert all three set correctly. Assert defaults (3, 0.7, 6000) when absent. Assert highWaterFraction invalid (0, 1, -0.5, 1.5, NaN) → default 0.7. Assert driftWindowTurns floored (5.7 → 5). Assert existing nudges knobs unchanged.\n6. DOCS: none — spec/09 already specifies these knobs (the source of this delta). The 3000→6000 change is already in spec/09's rationale table. No additional Mode A docs needed.",
@@ -258,14 +258,14 @@
               "type": "Task",
               "id": "P3.M3.T2",
               "title": "Runtime high-water state (runtime.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add aboveHighWater boolean to SessionRuntime for the edge-triggered high-water signal.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T2.S1",
                   "title": "Add aboveHighWater boolean to SessionRuntime",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime is Pi-free. freshRuntime constructs defaults. resetRuntime deletes the entry (session_start resets automatically).\n2. INPUT: The existing SessionRuntime interface + freshRuntime in src/runtime.ts.\n3. LOGIC: (a) Add `aboveHighWater: boolean` to SessionRuntime interface — tracks whether the total filtered context is currently above the high-water fraction (edge-triggered: set true when the annotation fires, cleared only when the total drops back below the fraction). (b) In freshRuntime, add `aboveHighWater: false`. (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll.\n4. OUTPUT: SessionRuntime.aboveHighWater available via getRuntime. Consumed by shouldHighWater (P3.M3.T5.S1) via the rt parameter.\n5. MOCKING: In tests, getRuntime('s1').aboveHighWater === false initially. Set it true, assert it persists until explicitly cleared.\n6. DOCS: none — internal in-memory state (spec/04 §8).",

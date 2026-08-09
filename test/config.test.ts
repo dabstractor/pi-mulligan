@@ -25,7 +25,9 @@ describe("DEFAULT_CONFIG", () => {
         perTurnDrift: true,
         bloatThresholdBytes: 16384,
         bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
-        driftThresholdTokens: 3000,
+        driftThresholdTokens: 6000,
+        driftWindowTurns: 3,
+        highWaterFraction: 0.7,
       },
       audit: { estimateConfidence: "medium" },
       log: { file: null },
@@ -56,7 +58,7 @@ describe("validateConfig", () => {
   it("deep-merges partial valid overrides over defaults", () => {
     const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } });
     expect(cfg.nudges.bloatThresholdBytes).toBe(100);
-    expect(cfg.nudges.driftThresholdTokens).toBe(3000); // unchanged default
+    expect(cfg.nudges.driftThresholdTokens).toBe(6000); // unchanged default
     expect(cfg.enabled).toBe(true); // unchanged
   });
 
@@ -73,7 +75,7 @@ describe("validateConfig", () => {
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, requireMutationWarning: false },
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
-      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 } },
+      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
     });
@@ -213,7 +215,7 @@ describe("validateConfig", () => {
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // driftThresholdTokens absent
       expect(cfg.nudges.bloatThresholdBytes).toBe(100);
-      expect(cfg.nudges.driftThresholdTokens).toBe(3000); // absent → default, silently
+      expect(cfg.nudges.driftThresholdTokens).toBe(6000); // absent → default, silently
       expect(warn).not.toHaveBeenCalled(); // ZERO warns for a fully-valid partial override
       // …but a present-but-INVALID value DOES warn (exactly once, naming the field):
       warn.mockClear();
@@ -305,6 +307,111 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 §2-�
   it("(type) shrink.maxActive / shrink.staleAfterFires are required numbers (type-level)", () => {
     expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("maxActive").toEqualTypeOf<number>();
     expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("staleAfterFires").toEqualTypeOf<number>();
+  });
+});
+
+describe("nudges.driftWindowTurns & nudges.highWaterFraction + driftThresholdTokens 6000 (P3.M3.T1.S1 / spec/09 §2-§4)", () => {
+  it("(a) defaults: driftWindowTurns 3, highWaterFraction 0.7, driftThresholdTokens 6000 — NO warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({});
+      expect(cfg.nudges.driftWindowTurns).toBe(3);
+      expect(cfg.nudges.highWaterFraction).toBe(0.7);
+      expect(cfg.nudges.driftThresholdTokens).toBe(6000);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(b) passes through all three valid values together", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { driftWindowTurns: 5, highWaterFraction: 0.8, driftThresholdTokens: 10000 } });
+      expect(cfg.nudges.driftWindowTurns).toBe(5);
+      expect(cfg.nudges.highWaterFraction).toBe(0.8);
+      expect(cfg.nudges.driftThresholdTokens).toBe(10000);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) driftWindowTurns is FLOORED to an integer (5.7 → 5)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { driftWindowTurns: 5.7 } });
+      expect(cfg.nudges.driftWindowTurns).toBe(5); // 5.7 finite>0 → coerceNumber returns 5.7 → floor 5
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(d) driftWindowTurns invalid ∈ {0,-1,NaN,'abc',Infinity} → 3 + exactly 1 warn naming nudges.driftWindowTurns", () => {
+    for (const bad of [0, -1, NaN, "abc", Infinity]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cfg = validateConfig({ nudges: { driftWindowTurns: bad } });
+        expect(cfg.nudges.driftWindowTurns).toBe(3);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("nudges.driftWindowTurns");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(e) highWaterFraction invalid ∈ {0, 1, -0.5, 1.5, NaN} → 0.7 + exactly 1 warn naming nudges.highWaterFraction", () => {
+    for (const bad of [0, 1, -0.5, 1.5, NaN]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cfg = validateConfig({ nudges: { highWaterFraction: bad } });
+        expect(cfg.nudges.highWaterFraction).toBe(0.7);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("nudges.highWaterFraction");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(f) highWaterFraction is NOT string-coerced ('0.7' → 0.7 default + warn)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { highWaterFraction: "0.7" } });
+      expect(cfg.nudges.highWaterFraction).toBe(0.7);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nudges.highWaterFraction");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(g) highWaterFraction valid near-boundary values 0.01 and 0.99 are KEPT", () => {
+    expect(validateConfig({ nudges: { highWaterFraction: 0.01 } }).nudges.highWaterFraction).toBe(0.01);
+    expect(validateConfig({ nudges: { highWaterFraction: 0.99 } }).nudges.highWaterFraction).toBe(0.99);
+  });
+
+  it("(h) existing nudges knobs UNCHANGED when new knobs are set", () => {
+    const cfg = validateConfig({ nudges: { driftWindowTurns: 5, highWaterFraction: 0.8 } });
+    expect(cfg.nudges.bloatReminder).toBe(true);
+    expect(cfg.nudges.perTurnDrift).toBe(true);
+    expect(cfg.nudges.bloatThresholdBytes).toBe(16384);
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+  });
+
+  it("(i) round-trip via setConfig/getConfig", () => {
+    setConfig({ nudges: { driftWindowTurns: 5, highWaterFraction: 0.8, driftThresholdTokens: 10000 } });
+    const cfg = getConfig();
+    expect(cfg.nudges.driftWindowTurns).toBe(5);
+    expect(cfg.nudges.highWaterFraction).toBe(0.8);
+    expect(cfg.nudges.driftThresholdTokens).toBe(10000);
+  });
+
+  it("(type) driftWindowTurns / highWaterFraction are required numbers (type-level)", () => {
+    expectTypeOf<MulliganConfig["nudges"]>().toHaveProperty("driftWindowTurns").toEqualTypeOf<number>();
+    expectTypeOf<MulliganConfig["nudges"]>().toHaveProperty("highWaterFraction").toEqualTypeOf<number>();
   });
 });
 

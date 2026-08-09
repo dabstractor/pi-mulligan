@@ -75,8 +75,18 @@ export interface MulliganConfig {
      *  { bash: 32768, read: 20480 }. */
     bloatThresholdBytesByTool?: Record<string, number>;
     /** Turn token-delta above which the per-turn drift nudge fires. Must be > 0.
-     *  Default: 3000. */
+     *  Default: 6000 (raised from 3000; spec/09 §3: the §5.1 windowing makes 6000
+     *  a quiet, accurate trip point). */
     driftThresholdTokens: number;
+    /** Rolling window (in turns) over which the per-turn token delta is smoothed
+     *  before thresholding (spec/07 §5.1). Positive integer. Default: 3. Consumed
+     *  by shouldNudge (P3.M3.T4) + readMarkers recent-metrics window (P3.M3.T3). */
+    driftWindowTurns: number;
+    /** Fraction of the context window at which the §5.2 high-water annotation
+     *  fires (edge-triggered — once on crossing, cleared when total drops back
+     *  below). Must be in the open interval (0,1). Default: 0.7. Consumed by
+     *  shouldHighWater (P3.M3.T5) + contextHandler (P3.M3.T6). */
+    highWaterFraction: number;
   };
 
   /** Audit tool (`mulligan_audit`) settings. */
@@ -118,7 +128,9 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     perTurnDrift: true,
     bloatThresholdBytes: 16384,
     bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
-    driftThresholdTokens: 3000,
+    driftThresholdTokens: 6000,
+    driftWindowTurns: 3,
+    highWaterFraction: 0.7,
   },
   audit: {
     estimateConfidence: "medium",
@@ -236,6 +248,16 @@ export function validateConfig(raw: unknown): MulliganConfig {
       if (v !== undefined) cfg.nudges.bloatThresholdBytes = coerceNumber("nudges.bloatThresholdBytes", v, cfg.nudges.bloatThresholdBytes, true);
       v = safeGet(nudgesRaw, "driftThresholdTokens");
       if (v !== undefined) cfg.nudges.driftThresholdTokens = coerceNumber("nudges.driftThresholdTokens", v, cfg.nudges.driftThresholdTokens, true);
+      v = safeGet(nudgesRaw, "driftWindowTurns");
+      if (v !== undefined) {
+        const n = coerceNumber("nudges.driftWindowTurns", v, cfg.nudges.driftWindowTurns, true);
+        cfg.nudges.driftWindowTurns = Number.isFinite(n) ? Math.floor(n) : cfg.nudges.driftWindowTurns;
+      }
+      v = safeGet(nudgesRaw, "highWaterFraction");
+      if (v !== undefined) {
+        if (typeof v === "number" && Number.isFinite(v) && v > 0 && v < 1) cfg.nudges.highWaterFraction = v;
+        else warnConfig("nudges.highWaterFraction", v);
+      }
       v = safeGet(nudgesRaw, "bloatThresholdBytesByTool");
       if (v !== undefined) cfg.nudges.bloatThresholdBytesByTool = coerceBloatThresholdByTool(v, cfg.nudges.bloatThresholdBytesByTool);
     }

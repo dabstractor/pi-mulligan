@@ -188,6 +188,7 @@ describe("turnEndMetricHandler — first turn (baseline null → deltaTokens nul
 
 describe("turnEndMetricHandler — normal growth (delta > driftThresholdTokens → grewOverThreshold) (spec/07 §2)", () => {
   it("records grewOverThreshold true + deltaTokens = now - baseline", () => {
+    setConfig({ nudges: { driftThresholdTokens: 3000 } }); // pin: delta 3001 must exceed the threshold
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1" });
     const rt = getRuntime("s1");
@@ -204,6 +205,7 @@ describe("turnEndMetricHandler — normal growth (delta > driftThresholdTokens �
   });
 
   it("records grewOverThreshold false when delta == threshold (strict >, not >=)", () => {
+    setConfig({ nudges: { driftThresholdTokens: 3000 } }); // pin: delta 3000 == threshold (strict > → false)
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1" });
     const rt = getRuntime("s1");
@@ -326,6 +328,7 @@ describe("turnEndMetricHandler — lastFiltered (filtered view) preferred over g
 
 describe("turnEndMetricHandler — rolls baseline forward + records lastTurnIndex (happy path)", () => {
   it("two consecutive turns: baseline rolls, deltas are against the prior turn's now", () => {
+    setConfig({ nudges: { driftThresholdTokens: 3000 } }); // pin: turn-2 delta 4000 must exceed the threshold
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1" });
     const rt = getRuntime("s1");
