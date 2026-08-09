@@ -224,7 +224,7 @@
           "type": "Milestone",
           "id": "P3.M3",
           "title": "Drift-nudge refinements (G1; windowed signaling + high-water)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Cut drift-nudge false positives (§5.1 windowed signaling) and catch slow accumulation (§5.2 edge-triggered high-water signal). Both ride the existing context event (D4 — zero extra requests). Per spec/07 §5.1/§5.2 and spec/09.",
           "tasks": [
             {
@@ -360,14 +360,14 @@
               "type": "Task",
               "id": "P3.M3.T6",
               "title": "contextHandler nudge integration (filter.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Wire the windowed drift signal and the high-water annotation into contextHandler. Replace the old shouldNudge call with the windowed version, and add the high-water check after the drift nudge.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T6.S1",
                   "title": "Wire windowed drift + high-water signal into contextHandler",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M3.T3.S1",
@@ -406,7 +406,7 @@
                   "type": "Subtask",
                   "id": "P3.M4.T1.S1",
                   "title": "Update README config table + JSON example (new knobs + threshold change)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M2.T1.S1",

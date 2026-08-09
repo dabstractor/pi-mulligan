@@ -48,7 +48,7 @@ import { log } from "./log.js";
 import { estimateTokens } from "./tokens.js";
 import type { RewindMarker, ShrinkMarker, TurnMetric } from "./markers.js";
 import { appendCancelMarker } from "./markers.js";
-import { shouldNudge, injectNudge, suppressCheck } from "./nudges.js";
+import { shouldHighWater, injectHighWaterNudge, injectNudge, shouldNudge, suppressCheck } from "./nudges.js";
 
 // ── module-private defensive helpers (mirror transforms.ts/notes.ts — never throw) ───
 
@@ -254,18 +254,48 @@ export function contextHandler(
       branchEntries as unknown as BranchEntry[],
     );
 
-    // Per-turn drift nudge (spec/07 §2; §5.1 windowed drift signaling, REQUIRED). shouldNudge now takes the
-    // FULL recentMetrics window (P3.M3.T3.S1 — sorted newest-first) and slices driftWindowTurns internally,
-    // firing on sustained growth (moving average > threshold) or any window bloatHit. injectNudge/suppressCheck
-    // still take the single LATEST metric (markers.metric). P3.M3.T6.S1 completes the broader contextHandler
-    // integration (high-water signal).
+    // Per-turn drift nudge (spec/07 §2; §5.1 windowed drift signaling, REQUIRED). The guard is the contract
+    // guard verbatim (P3.M3.T6.S1): gate on a non-empty recentMetrics window FIRST, then call the windowed
+    // shouldNudge(recentMetrics, config) (it slices driftWindowTurns internally — firing on sustained growth:
+    // moving average > threshold, or any window bloatHit; a single heavy turn amid small turns does NOT fire).
+    // injectNudge/suppressCheck still take the single LATEST metric (markers.metric) for the text + the
+    // time-window suppress heuristic. markers.metric !== null ⟺ recentMetrics.length > 0, so the reorder is
+    // logically equivalent EXCEPT shouldNudge is never called on an empty window (cleaner, defensive).
     if (
       config.nudges.perTurnDrift &&
-      markers.metric &&
+      markers.recentMetrics &&
+      markers.recentMetrics.length > 0 &&
       shouldNudge(markers.recentMetrics, config) &&
+      markers.metric &&
       !suppressCheck(markers.metric, markers)
     ) {
       messages = injectNudge(messages, markers.metric);
+    }
+
+    // Edge-triggered high-water signal (spec/07 §5.2, REQUIRED). Fires ONCE when the total FILTERED context
+    // first crosses config.nudges.highWaterFraction of the window, latched via rt.aboveHighWater (set on fire,
+    // cleared when the total drops back below — re-arms for the next upward crossing). totalFilteredTokens is
+    // computed on the FILTERED view (D5: exactly what mulligan_audit reports — NEVER getContextUsage().tokens,
+    // which counts hidden/rewound tokens). windowTokens is the window SIZE from ctx.getContextUsage()?.contextWindow
+    // (E12: undefined / 0 / no model / pre-first-inference → shouldHighWater fail-opens to false, NO rt mutation).
+    // NEVER throws: the estimateTokens + getContextUsage read is wrapped defensively in its OWN inner try/catch
+    // (mirrors the observability-log pattern) — a throw leaves both totals at 0 → shouldHighWater(_, 0, …) → false.
+    // Belt-and-suspenders (estimateTokens never throws; getContextUsage?.() is optional-chained) but the contract
+    // mandates it (never break the turn over an annotation). Computed AFTER the drift nudge ("post-nudge") and
+    // BEFORE the cache (rt.lastFiltered + the audit baseline should reflect the final filtered view the model
+    // sees, INCLUDING both nudges — consistent with how the drift nudge is already cached).
+    let totalFilteredTokens = 0;
+    let windowTokens = 0;
+    try {
+      type TokenMessages = Parameters<typeof estimateTokens>[0];
+      totalFilteredTokens = estimateTokens(messages as unknown as TokenMessages).tokens;
+      const usage = ctx.getContextUsage?.();
+      windowTokens = usage?.contextWindow ?? 0;
+    } catch {
+      // defensive — leave both at 0; shouldHighWater(_, 0, …) → false (fail-open, never break the turn)
+    }
+    if (shouldHighWater(totalFilteredTokens, windowTokens, rt, config)) {
+      messages = injectHighWaterNudge(messages, totalFilteredTokens, windowTokens);
     }
 
     // Cache the filtered view for mulligan_audit (spec/06 §7). MessageLike[] is assignable to runtime's

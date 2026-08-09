@@ -97,7 +97,10 @@ function makeCancelEntry(targetId: string): SessionEntry {
   return customEntry("mulligan:cancel", cancelData(targetId));
 }
 
-/** Minimal fake ExtensionContext: scripts getSessionId + getEntries + getBranch (all read FRESH — C12). */
+/** Minimal fake ExtensionContext: scripts getSessionId + getEntries + getBranch (all read FRESH — C12).
+ *  OPTIONAL getContextUsage override (default ABSENT) for the high-water tests (P3.M3.T6.S1): the default has
+ *  NO such method, so filter.ts's `ctx.getContextUsage?.()` is undefined → windowTokens=0 → shouldHighWater
+ *  fail-opens to false → the high-water block is a no-op in every pre-existing test (keeps the suite green). */
 function makeCtx(opts: {
   sessionId?: string;
   entries?: SessionEntry[];
@@ -105,6 +108,7 @@ function makeCtx(opts: {
   throwOnGetEntries?: boolean;
   throwOnGetBranch?: boolean;
   throwOnGetSessionId?: boolean;
+  getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
 } = {}) {
   const sessionId = opts.sessionId ?? "s1";
   const sessionManager = {
@@ -121,7 +125,11 @@ function makeCtx(opts: {
       return opts.branch ?? [];
     },
   };
-  return { sessionManager: sessionManager as unknown as ExtensionContext["sessionManager"] } as ExtensionContext;
+  // Build the ctx WITHOUT getContextUsage by default (the optional chain in filter.ts handles its absence).
+  // Attach getContextUsage ONLY when the opt is provided so the default behavior is byte-identical to before.
+  const ctx: { sessionManager: unknown; getContextUsage?: () => unknown } = { sessionManager };
+  if (opts.getContextUsage !== undefined) ctx.getContextUsage = opts.getContextUsage;
+  return ctx as unknown as ExtensionContext;
 }
 
 /** Minimal fake ExtensionAPI capturing `.on` registrations + `.appendEntry` calls. */
@@ -801,5 +809,150 @@ describe("contextHandler — soft cap (spec/08 E15)", () => {
     expect(result?.messages).toEqual([{ role: "user", content: "OK" }]);
     expect(appendCalls).toHaveLength(0); // appendEntry threw before push
     setConfig({}); // restore defaults
+  });
+});
+
+// ── P3.M3.T6.S1: edge-triggered high-water signal wiring (spec/07 §5.2, REQUIRED) ────────────────
+// The edge-trigger latch lives in the PER-SESSION rt.aboveHighWater. clearAll() in beforeEach wipes rt, so a
+// TRUE end-to-end lifecycle (cross → latch → no-refire → drop → clear → re-cross → fire) MUST reuse ONE
+// sessionId across sequential contextHandler fires INSIDE ONE it(). control totalFilteredTokens via
+// pipelineReturn (a message whose content is 4*tokens 'x' chars → estimateTokens === tokens, since
+// estimateTokens = ceil(chars/4)). control windowTokens via makeCtx({getContextUsage}). These assert the
+// WIRING (contextHandler calls shouldHighWater/injectHighWaterNudge correctly); shouldHighWater's OWN behavior
+// is unit-tested in test/drift_nudge.test.ts (P3.M3.T5.S1).
+describe("contextHandler — edge-triggered high-water signal (P3.M3.T6.S1 / spec/07 §5.2)", () => {
+  // A single user message whose content is 4*tokens 'x' chars → estimateTokens === tokens (ceil(4t/4)=t).
+  const msgTokens = (tokens: number): unknown[] => [{ role: "user", content: "x".repeat(4 * tokens) }];
+  // A getContextUsage fake returning the given contextWindow (window SIZE, the denominator). tokens/percent
+  // are irrelevant to the high-water math (filter.ts reads ONLY .contextWindow) — set them to null/0 defensively.
+  const usage = (contextWindow: number) =>
+    () => ({ tokens: null, contextWindow, percent: null });
+
+  it("full lifecycle on one session: cross→latch→no-refire→drop→clear→re-cross→fire", () => {
+    const sid = "hw-life";
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    // fire 1: cross 0.7 (700/1000) → fire + latch rt.aboveHighWater=true
+    pipelineReturn = msgTokens(700);
+    let r = contextHandler(pi, event, makeCtx({ sessionId: sid, getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(2); // filtered + high-water nudge
+    expect((r.messages[1] as Record<string, unknown>).customType).toBe("mulligan:high-water");
+    expect(getRuntime(sid).aboveHighWater).toBe(true); // latched
+
+    // fire 2: same total, already above → edge-triggered, NO re-fire (latch still true)
+    r = contextHandler(pi, event, makeCtx({ sessionId: sid, getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(1); // no high-water nudge
+    expect(getRuntime(sid).aboveHighWater).toBe(true); // unchanged
+
+    // fire 3: drop below (0.5) → clear latch, no fire
+    pipelineReturn = msgTokens(500);
+    r = contextHandler(pi, event, makeCtx({ sessionId: sid, getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(1); // no high-water nudge
+    expect(getRuntime(sid).aboveHighWater).toBe(false); // cleared (re-armed)
+
+    // fire 4: re-cross 0.7 → fire AGAIN (re-armed)
+    pipelineReturn = msgTokens(700);
+    r = contextHandler(pi, event, makeCtx({ sessionId: sid, getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(2); // high-water nudge appended again
+    expect((r.messages[1] as Record<string, unknown>).customType).toBe("mulligan:high-water");
+    expect(getRuntime(sid).aboveHighWater).toBe(true); // latched again
+  });
+
+  it("the high-water nudge text reports ~70% (Math.round(700/1000*100)=70)", () => {
+    pipelineReturn = msgTokens(700); // 0.7 of 1000
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const r = contextHandler(pi, event, makeCtx({ sessionId: "hw-text", getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    const last = r.messages[1] as Record<string, unknown>;
+    expect(last.customType).toBe("mulligan:high-water");
+    expect(typeof last.content).toBe("string");
+    expect(last.content).toContain("~70%");
+    expect(last.display).toBe(false); // ephemeral CustomMessage (never shown in the transcript)
+  });
+
+  it("fail-open: getContextUsage undefined (default makeCtx) → no high-water nudge AND aboveHighWater unchanged", () => {
+    // default makeCtx has NO getContextUsage → ctx.getContextUsage?.() === undefined → windowTokens=0
+    pipelineReturn = msgTokens(700);
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const r = contextHandler(pi, event, makeCtx({ sessionId: "hw-undef" })) as { messages: unknown[] };
+    expect(r.messages).toHaveLength(1); // no high-water nudge
+    expect(getRuntime("hw-undef").aboveHighWater).toBe(false); // unchanged (fail-open does NOT mutate rt)
+  });
+
+  it("fail-open: contextWindow === 0 → no high-water nudge (shouldHighWater returns false, no rt mutation)", () => {
+    pipelineReturn = msgTokens(700);
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const r = contextHandler(pi, event, makeCtx({ sessionId: "hw-zero", getContextUsage: usage(0) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(1); // no high-water nudge
+    expect(getRuntime("hw-zero").aboveHighWater).toBe(false); // unchanged
+  });
+
+  it("does NOT fire high-water when well below the fraction (0.3 → 300/1000)", () => {
+    pipelineReturn = msgTokens(300);
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const r = contextHandler(pi, event, makeCtx({ sessionId: "hw-low", getContextUsage: usage(1000) })) as {
+      messages: unknown[];
+    };
+    expect(r.messages).toHaveLength(1); // no high-water nudge
+    expect(getRuntime("hw-low").aboveHighWater).toBe(false);
+  });
+});
+
+// ── P3.M3.T6.S1: windowed drift-nudge wiring (spec/07 §5.1, REQUIRED) ───────────────────────────
+// Thin wiring asserts: contextHandler passes the FULL recentMetrics window (NOT the single metric) to
+// shouldNudge. shouldNudge's OWN windowed behavior (moving average > threshold, or any window bloatHit) is
+// unit-tested in test/drift_nudge.test.ts (P3.M3.T4.S1). These use the DEFAULT makeCtx (no getContextUsage)
+// so the high-water block is a no-op (the single "P"-content message is ~1 token, far below any fraction).
+describe("contextHandler — windowed drift-nudge wiring (P3.M3.T6.S1 / spec/07 §5.1)", () => {
+  it("does NOT inject the drift nudge for a single heavy-turn window (windowed: moving-avg 2400 < 6000)", () => {
+    // window = [heavy(7000), small(100), small(100)] → moving-avg = 2400 < 6000 → no fire (a single 8k turn
+    // amid small turns does NOT fire — spec/07 §5.1). metricData(grew=true) ⇒ deltaTokens=7000.
+    pipelineReturn = [{ role: "user", content: "P" }];
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const ctx = makeCtx({
+      sessionId: "wd-single",
+      entries: [
+        customEntry("mulligan:turn-metric", metricData(3, true)), // 7000 (heavy, latest)
+        customEntry("mulligan:turn-metric", metricData(2, false)), // 100
+        customEntry("mulligan:turn-metric", metricData(1, false)), // 100
+      ],
+    });
+    const r = contextHandler(pi, event, ctx) as { messages: unknown[] };
+    expect(r.messages).toHaveLength(1); // no drift nudge (avg 2400 < 6000); no markers → no high-water either
+  });
+
+  it("injects the drift nudge for a sustained-growth window (windowed: moving-avg 7000 > 6000)", () => {
+    // window = [7000, 7000, 7000] → moving-avg = 7000 > 6000 → fire (sustained growth fires — spec/07 §5.1).
+    pipelineReturn = [{ role: "user", content: "P" }];
+    const { pi } = makePi();
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    const ctx = makeCtx({
+      sessionId: "wd-sustained",
+      entries: [
+        customEntry("mulligan:turn-metric", metricData(3, true)),
+        customEntry("mulligan:turn-metric", metricData(2, true)),
+        customEntry("mulligan:turn-metric", metricData(1, true)),
+      ],
+    });
+    const r = contextHandler(pi, event, ctx) as { messages: unknown[] };
+    expect(r.messages).toHaveLength(2); // drift nudge appended
+    expect((r.messages[1] as Record<string, unknown>).customType).toBe("mulligan:nudge");
   });
 });
