@@ -7,6 +7,7 @@
 ## 1. Where config is read
 
 - **Source:** the merged Pi settings object. Mulligan reads `settings.mulligan` (project-local wins over global via Pi's normal merge).
+  - _Implementation note:_ Pi's extension API (v0.84.x) does not expose a settings accessor to extensions. Mulligan therefore reads the `settings.json` files directly from disk — the global file via `getAgentDir()` and the project-local file from the session `cwd` (`.pi/settings.json`) — deep-merges them internally (matching Pi's own `deepMergeObjects` semantics), and extracts `settings.mulligan`. The user-visible merge behavior is identical to Pi's normal merge.
 - **When:** loaded lazily on first use and cached for the session; re-read on `/reload`. `getConfig()` returns the validated, defaulted config.
 - **Validation:** unknown keys are ignored (forward-compat). Type-mismatched values fall back to the default with a warn log. This must never throw.
 
