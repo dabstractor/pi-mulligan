@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 12 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 13 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -88,7 +88,8 @@ All 12 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | **nudges** | | |
 | `nudges.bloatReminder` | `true` | Annotate a `tool_result` exceeding the byte threshold with a rewind reminder. |
 | `nudges.perTurnDrift` | `true` | Inject a one-line drift nudge when a turn grew past the token threshold. |
-| `nudges.bloatThresholdBytes` | `8192` | In-context byte size of a single tool result above which the bloat reminder fires (8 KB — below Pi's ~50 KB cap). |
+| `nudges.bloatThresholdBytes` | `16384` | Global catch-all: in-context byte size of a single tool result above which the bloat reminder fires (16 KB — below Pi's ~50 KB cap). A tool listed in `bloatThresholdBytesByTool` uses its own value instead; tools not listed fall back to this. |
+| `nudges.bloatThresholdBytesByTool` | `{ "bash": 32768, "read": 20480 }` | Per-tool byte thresholds (keyed by Pi `toolName`). A tool listed here uses its own value instead of the global `bloatThresholdBytes`; tools not listed fall back to the global. Defaults raise the bar for `bash` (builds, test runs, `git log` legitimately produce tens of KB) and `read` (large source-file reads are routine). |
 | `nudges.driftThresholdTokens` | `3000` | Per-turn token delta above which the drift nudge fires. |
 | **audit** | | |
 | `audit.estimateConfidence` | `"medium"` | Honesty label reported with token estimates (`low` \| `medium` \| `high`). |
@@ -104,7 +105,7 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
   // "mulligan": {
   //   "enabled": true,
   //   "rewind": { "maxDepth": 5 },
-  //   "nudges": { "bloatThresholdBytes": 8192, "driftThresholdTokens": 3000 }
+  //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "bash": 32768, "read": 20480 }, "driftThresholdTokens": 3000 }
   // }
 }
 ```
@@ -200,7 +201,7 @@ model sees [kept prefix] + [your note] + [confirmation], resumes — no resume c
 
 **Two ride-along nudges (zero extra model requests):**
 
-1. **Bloated-result reminder** — a `tool_result` hook appends a short reminder to any result exceeding `bloatThresholdBytes`.
+1. **Bloated-result reminder** — a `tool_result` hook appends a short reminder to any result exceeding the per-tool bloat threshold (`bash`: 32 KB, `read`: 20 KB, others: the 16 KB global default).
 2. **Per-turn drift nudge** — at `turn_end` Mulligan records the token delta; on the *next* inference it injects a one-line annotation (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). The `mulligan:nudge` annotation is **never persisted**.
 
 **`/tree` is the audit trail.** Every rewind, shrink, and checkpoint is a persisted entry — the human can inspect the full un-filtered history (including every hidden span) via Pi's native `/tree`. Mulligan adds no human-facing command of its own, because `/tree` already serves that need.
