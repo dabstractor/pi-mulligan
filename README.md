@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 17 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 19 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -119,7 +119,7 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
 
 #### Disabling
 
-`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and the tools refuse cleanly with `Mulligan: refused — Mulligan is disabled.`. The human can disable Mulligan without uninstalling it.
+`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and the state-changing tools refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (the three mutating tools — `rewind`, `shrink`, `cancel` — gate on the master switch; `checkpoint` and `audit` remain available as always-on read-only diagnostics). The human can disable Mulligan without uninstalling it.
 
 ---
 

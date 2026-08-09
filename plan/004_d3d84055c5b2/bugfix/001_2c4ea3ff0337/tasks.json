@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Configuration Surface Repair + Type-Safety Gate",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix two defects identified in end-to-end validation: BUG-001 (the documented settings.json configuration surface is never read — the master enabled off-switch and all 17 knobs are silently ignored because src/index.ts:30 hard-codes setConfig(undefined)) and BUG-002 (the project fails tsc --noEmit due to one stale SessionRuntime test fixture). Core rewind/shrink/checkpoint/audit/cancel functionality, nudges, transforms, filter, and the E22 runaway-loop backstops all work correctly out of the box via defaults; the gap is configurability and type-check cleanliness.",
       "milestones": [
         {
@@ -151,21 +151,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final documentation sweep across the whole changeset. The README already documents the correct configuration behavior (it was the code that was broken, not the docs). After BUG-001 is fixed, the README's Configuration section, Disabling subsection, and settings.json example become accurate. Verify they are coherent with the implementation. Add an implementation note to spec/09 explaining that Mulligan reads settings.json files directly from disk (since Pi 0.84.1's ExtensionAPI does not expose a settings accessor).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Sweep README.md and spec/09-configuration.md for coherence with the implemented changeset. The README's Configuration + Disabling sections were already accurate (the bug was in the code). Verify they are consistent with the new direct-file-read implementation. Add an implementation note to spec/09 §1 about the direct file-read approach. Run full validation: typecheck + test suite + smoke harness.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Verify README Configuration + Disabling sections are accurate post-fix",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2",
@@ -183,7 +183,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Update spec/09-configuration.md with implementation note",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"
