@@ -124,8 +124,10 @@ Key helpers:
 1. turn_end fires. Handler computes delta = estimateTokens(event? ) ...
    (turn_end does not receive messages; see §4 of this doc for the metric source.)
    Appends mulligan:turn-metric { deltaTokens, grewOverThreshold, bloatHit }.
-2. Next inference → context filter: if the latest mulligan:turn-metric has
-   grewOverThreshold OR bloatHit, append a one-line annotation to the message
+2. Next inference → context filter: shouldNudge (windowed; @07 §5.1) fires on
+   SUSTAINED total-context growth (windowed deltaTokens > driftThresholdTokens).
+   bloatHit is NOT a firing condition when delta data exists (redundant with Nudge A;
+   reserved for the no-delta fallback). Append a one-line annotation to the message
    copy: "[mulligan: last turn +4.2k tokens; rewind/shrink available]".
    (Rides the existing inference — zero extra requests.)
 ```
