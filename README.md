@@ -168,7 +168,7 @@ The `name` must match `/^[a-z0-9_-]{1,40}$/` (lowercase, digits, hyphen, undersc
 
 > Show a token breakdown of the context you're currently carrying (what the model actually sees), flag the biggest contributors, and list active Mulligan markers. Use this to decide whether to rewind or shrink.
 
-**When to use it:** when you suspect context is bloated and want to decide between rewind (mistake) and shrink (fine-but-big). The report ranks the top messages by size (`top`, default `8`), flags results above the bloat threshold, and lists active rewind/shrink markers + checkpoints — closing the feedback loop ("that one read is 9.4k → shrink it").
+**When to use it:** when you suspect context is bloated and want to decide between rewind (mistake) and shrink (fine-but-big). The report ranks the top messages by size (`top`, default `8`), flags results above the per-tool bloat threshold, and lists active rewind/shrink markers + checkpoints — closing the feedback loop ("that one read is 9.4k → shrink it").
 
 The token total is computed from the **filtered view** (what the model actually sees after Mulligan's transforms) — *not* Pi's `getContextUsage()`, which would count already-hidden tokens. The audit is **read-only** and persists nothing.
 

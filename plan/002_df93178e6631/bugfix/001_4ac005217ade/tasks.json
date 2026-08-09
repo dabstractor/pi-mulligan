@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Per-Tool Bloat Threshold Consistency Fix",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix the integration gap where P2 propagated per-tool bloat threshold resolution to the bloat reminder (bloatReminderHandler in nudges.ts) but NOT to the mulligan_audit tool (audit.ts). The audit flags results as bloated using the global threshold (16384) even when the per-tool threshold (bash: 32768, read: 20480) would not consider them bloated. This violates PRD design principle #6 (honest bookkeeping). Also resolve the related spec/test-plan/comment staleness (BUG-002, BUG-003, BUG-004) left over from raising the default.",
       "milestones": [
         {
@@ -69,7 +69,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Test Plan Staleness + Comment Fixes + Doc Sync (BUG-002 + BUG-004 + Mode B)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the remaining three minor findings: the broken F-shrink-preventive bloatHit scenario in scenarios.md (BUG-002), the stale '8 KB default' test comments (BUG-004), and perform the final changeset-level documentation sweep (Mode B).",
           "tasks": [
             {
@@ -122,14 +122,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Final Mode B documentation sweep. Verify README.md and any overview docs are consistent with the per-tool bloat threshold changes introduced by this changeset (BUG-001 fix + BUG-002/003/004 fixes). The README was synced during P2 but this task confirms no drift remains after the audit tool fix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Sweep README.md and overview docs for per-tool bloat threshold consistency after all fixes",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
