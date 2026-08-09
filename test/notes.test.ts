@@ -408,7 +408,7 @@ const DRIFT_TAIL = [
 ];
 
 describe("renderBloatReminder — spec/07 §1 pinned format", () => {
-  it("8 KB result at the 8 KB default threshold → '~8 KB … (threshold 8 KB)'; leading \\n---\\n; no trailing newline", () => {
+  it("8 KB result at an 8 KB threshold → '~8 KB … (threshold 8 KB)'; leading \\n---\\n; no trailing newline", () => {
     const out = renderBloatReminder("read", 8192, 8192);
     expect(out).toBe(
       "\n---\n" +
@@ -471,7 +471,7 @@ describe("renderBloatReminder — defensive (NEVER throws / bad numbers → 0 KB
 describe("renderBloatReminder — snapshot-style (spec/10 §1.8-style)", () => {
   // toMatchInlineSnapshot() with no argument: vitest AUTO-WRITES the snapshot on first run (GOTCHA #12).
   // If your vitest version requires it, run `npx vitest run -u` once, then `npx vitest run`.
-  it("representative 30 KB read at the 8 KB default threshold", () => {
+  it("representative 30 KB read at an 8 KB threshold", () => {
     expect(renderBloatReminder("read", 30720, 8192)).toMatchInlineSnapshot(`
       "
       ---

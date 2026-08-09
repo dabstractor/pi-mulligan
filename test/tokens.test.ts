@@ -331,7 +331,7 @@ describe("approxTokens — byte→token conversion (spec/04 §5, spec/07 §1 '8 
   });
 
   it("reproduces spec/07 §1's '8 KB ≈ 2k tokens' equivalence EXACTLY (load-bearing — GOTCHA #4)", () => {
-    expect(approxTokens(8192)).toBe(2048); // the default bloatThresholdBytes → ~2k tokens
+    expect(approxTokens(8192)).toBe(2048); // explicit 8 KB → ~2k tokens
   });
 
   it("negative bytes → 0 (defensive — tokens can't be negative)", () => {

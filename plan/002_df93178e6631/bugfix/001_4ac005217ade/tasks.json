@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Per-Tool Bloat Threshold Consistency Fix",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix the integration gap where P2 propagated per-tool bloat threshold resolution to the bloat reminder (bloatReminderHandler in nudges.ts) but NOT to the mulligan_audit tool (audit.ts). The audit flags results as bloated using the global threshold (16384) even when the per-tool threshold (bash: 32768, read: 20480) would not consider them bloated. This violates PRD design principle #6 (honest bookkeeping). Also resolve the related spec/test-plan/comment staleness (BUG-002, BUG-003, BUG-004) left over from raising the default.",
       "milestones": [
         {
@@ -69,7 +69,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Test Plan Staleness + Comment Fixes + Doc Sync (BUG-002 + BUG-004 + Mode B)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Fix the remaining three minor findings: the broken F-shrink-preventive bloatHit scenario in scenarios.md (BUG-002), the stale '8 KB default' test comments (BUG-004), and perform the final changeset-level documentation sweep (Mode B).",
           "tasks": [
             {
@@ -99,14 +99,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Fix stale '8 KB default' test comments (BUG-004)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update three test comment/title sites that incorrectly describe 8192 / '8 KB' as 'the default threshold' after P2 raised the global default to 16384 (16 KB). The test CODE is correct (passes 8192 as explicit args to pure helpers); only the COMMENTS are wrong.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Update stale '8 KB default' comments/titles in test/tokens.test.ts and test/notes.test.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/bug_analysis.md BUG-004. After P2 raised the global default from 8192 to 16384, three test comment sites still reference 8192 / '8 KB' as 'the default'. The test CODE is correct (passes 8192 as an explicit argument to pure helpers like approxTokens and renderBloatReminder — this is valid). Only the COMMENTS/TITLES are factually wrong. Affected sites: (1) test/tokens.test.ts:334 — comment '// the default bloatThresholdBytes → ~2k tokens' next to approxTokens(8192); (2) test/notes.test.ts:411 — test title '8 KB result at the 8 KB default threshold'; (3) test/notes.test.ts:474 — test title 'representative 30 KB read at the 8 KB default threshold'. NOTE: PRD references 'test/notes.ts:474' but the actual file is test/notes.test.ts:474 (there is no test/notes.ts).\n2. INPUT: The pure helpers being tested (approxTokens, renderBloatReminder) take explicit numeric arguments. 8192 is a valid test input — it just is no longer 'the default'. The current global default is 16384 (16 KB).\n3. LOGIC:\n   (a) test/tokens.test.ts:334: Change comment from '// the default bloatThresholdBytes → ~2k tokens' to something like '// 8192 bytes (old default) → ~2k tokens' or '// explicit 8 KB → ~2k tokens' — drop the 'default' claim.\n   (b) test/notes.test.ts:411: Change test title from '8 KB result at the 8 KB default threshold' to '8 KB result at an 8 KB threshold' — drop 'default'.\n   (c) test/notes.test.ts:474: Change test title from 'representative 30 KB read at the 8 KB default threshold' to 'representative 30 KB read at an 8 KB threshold' — drop 'default'.\n   (d) DO NOT change any test assertions or code logic — only comments and test titles. The tests pass 8192 as an explicit arg, which is correct behavior.\n4. OUTPUT: All three sites no longer claim 8192/8 KB is the default threshold. Test suite still passes unchanged (no behavioral change).\n5. MOCKING: None.\n6. DOCS: This IS a documentation fix (test comments are documentation for future readers). Mode A. No code logic changes — run `npx vitest run test/tokens.test.ts test/notes.test.ts` to confirm no breakage.",
@@ -122,14 +122,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Final Mode B documentation sweep. Verify README.md and any overview docs are consistent with the per-tool bloat threshold changes introduced by this changeset (BUG-001 fix + BUG-002/003/004 fixes). The README was synced during P2 but this task confirms no drift remains after the audit tool fix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Sweep README.md and overview docs for per-tool bloat threshold consistency after all fixes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
