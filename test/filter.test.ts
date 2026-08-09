@@ -62,6 +62,15 @@ function customEntry(customType: string, data: unknown): SessionEntry {
     timestamp: new Date().toISOString(), customType, data } as unknown as SessionEntry;
 }
 
+/** A cancel marker `data` payload (kind 'cancel'; customType 'mulligan:cancel'). */
+function cancelData(targetId: string): Record<string, unknown> {
+  return { schema: "pi-mulligan", v: 1, kind: "cancel", targetId, seq: 0, ts: 1 };
+}
+/** Convenience: a mulligan:cancel custom entry targeting the given marker uuid id. */
+function makeCancelEntry(targetId: string): SessionEntry {
+  return customEntry("mulligan:cancel", cancelData(targetId));
+}
+
 /** Minimal fake ExtensionContext: scripts getSessionId + getEntries + getBranch (all read FRESH — C12). */
 function makeCtx(opts: {
   sessionId?: string;
@@ -149,12 +158,14 @@ describe("readMarkers — fresh read, bucket, latest metric (spec/06 §1, api_ve
       customEntry("mulligan:future", { kind: "x" }),             // unknown customType → skip
       customEntry("mulligan:rewind", null),                       // non-record data → skip
       customEntry("mulligan:rewind", rewindData(5)),             // valid → kept
+      customEntry("mulligan:cancel", { kind: "shrink" }),        // cancel w/ wrong kind → skip (P3.M1.T2.S1)
       { type: "other", customType: "mulligan:rewind", id: "x", parentId: null, timestamp: "" } as unknown as SessionEntry,
     ];
     expect(() => readMarkers(makeCtx({ entries }))).not.toThrow();
     const bundle = readMarkers(makeCtx({ entries }));
     expect(bundle.rewinds).toHaveLength(1);
     expect((bundle.rewinds[0] as { seq: number }).seq).toBe(5);
+    expect(bundle.cancelledIds.size).toBe(0); // wrong-kind cancel not collected
   });
 
   it("never throws when getEntries throws (fail-open → empty bundle)", () => {
@@ -162,6 +173,106 @@ describe("readMarkers — fresh read, bucket, latest metric (spec/06 §1, api_ve
     const bundle = readMarkers(makeCtx({ throwOnGetEntries: true }));
     expect(bundle.rewinds).toEqual([]);
     expect(bundle.metric).toBeNull();
+    expect(bundle.cancelledIds).toBeInstanceOf(Set); // cancelledIds always present (catch path)
+    expect(bundle.cancelledIds.size).toBe(0);
+  });
+});
+
+// ── readMarkers — cancel-drop (marker retraction, spec/08 E21) ──────────────────────────────
+
+describe("readMarkers — cancel-drop (marker retraction, spec/08 E21)", () => {
+  it("cancelling a shrink drops it from shrinks and records its id in cancelledIds", () => {
+    const entries = [
+      customEntry("mulligan:shrink", shrinkData(1, "sh-1")),
+      makeCancelEntry("sh-1"),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.shrinks).toHaveLength(0);
+    expect(bundle.cancelledIds).toEqual(new Set(["sh-1"]));
+  });
+
+  it("cancelling a rewind drops it from rewinds and records its id", () => {
+    const entries = [
+      customEntry("mulligan:rewind", rewindData(1, "rw-1")),
+      makeCancelEntry("rw-1"),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.rewinds).toHaveLength(0);
+    expect(bundle.cancelledIds).toEqual(new Set(["rw-1"]));
+  });
+
+  it("cancelling a non-existent id drops no markers (safe no-op)", () => {
+    const entries = [
+      customEntry("mulligan:rewind", rewindData(1, "rw-1")),
+      customEntry("mulligan:shrink", shrinkData(2, "sh-2")),
+      makeCancelEntry("nope"),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.rewinds).toHaveLength(1);
+    expect(bundle.shrinks).toHaveLength(1);
+    expect(bundle.cancelledIds).toEqual(new Set(["nope"])); // id still recorded
+  });
+
+  it("multiple cancels drop all targeted markers; untargeted markers survive", () => {
+    const entries = [
+      customEntry("mulligan:rewind", rewindData(1, "rw-1")),
+      customEntry("mulligan:rewind", rewindData(2, "rw-2")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-keep")),
+      makeCancelEntry("rw-1"),
+      makeCancelEntry("sh-3"),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.rewinds.map(m => (m as { id: string }).id)).toEqual(["rw-2"]);
+    expect(bundle.shrinks.map(m => (m as { id: string }).id)).toEqual(["sh-keep"]);
+    expect(bundle.cancelledIds).toEqual(new Set(["rw-1", "sh-3"]));
+  });
+
+  it("drop is order-independent: a cancel BEFORE its target still drops it", () => {
+    const entries = [
+      makeCancelEntry("sh-1"),
+      customEntry("mulligan:shrink", shrinkData(1, "sh-1")),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.shrinks).toHaveLength(0);
+    expect(bundle.cancelledIds).toEqual(new Set(["sh-1"]));
+  });
+
+  it("skips malformed cancel entries (non-string/empty/missing targetId) without throwing", () => {
+    const entries = [
+      customEntry("mulligan:cancel", { schema: "pi-mulligan", v: 1, kind: "cancel", targetId: 123, seq: 0, ts: 1 }), // non-string
+      customEntry("mulligan:cancel", { schema: "pi-mulligan", v: 1, kind: "cancel", targetId: "", seq: 0, ts: 1 }),   // empty
+      customEntry("mulligan:cancel", { schema: "pi-mulligan", v: 1, kind: "cancel", seq: 0, ts: 1 }),                  // missing
+    ];
+    expect(() => readMarkers(makeCtx({ entries }))).not.toThrow();
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.cancelledIds.size).toBe(0);
+    expect(bundle.rewinds).toHaveLength(0); // malformed cancels never pushed into marker arrays
+    expect(bundle.shrinks).toHaveLength(0);
+  });
+
+  it("cancelledIds is always a (possibly empty) Set on the bundle", () => {
+    const bundle = readMarkers(makeCtx({ entries: [] }));
+    expect(bundle.cancelledIds).toBeInstanceOf(Set);
+    expect(bundle.cancelledIds.size).toBe(0);
+    // also covers the getEntries-threw catch path
+    const thrownBundle = readMarkers(makeCtx({ throwOnGetEntries: true }));
+    expect(thrownBundle.cancelledIds).toBeInstanceOf(Set);
+    expect(thrownBundle.cancelledIds.size).toBe(0);
+  });
+
+  it("does NOT drop a marker lacking a readable id field (defensive — keep on bad data)", () => {
+    // rewind `data` with NO id field + a cancel targeting an unrelated id → kept (id unreadable)
+    const noIdRewind = { schema: "pi-mulligan", v: 1, kind: "rewind",
+      granularity: "last_tool_call_group", options: {}, seq: 1,
+      note: { problem: "p", hypothesis: "h", nextStep: "n", evidence: "e" }, ledger: {}, ts: 1 };
+    const entries = [
+      customEntry("mulligan:rewind", noIdRewind),
+      makeCancelEntry("anything"),
+    ];
+    const bundle = readMarkers(makeCtx({ entries }));
+    expect(bundle.rewinds).toHaveLength(1); // kept — id unreadable, never dropped on bad data
+    expect(bundle.cancelledIds).toEqual(new Set(["anything"]));
   });
 });
 

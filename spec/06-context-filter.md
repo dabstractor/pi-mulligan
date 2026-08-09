@@ -41,6 +41,8 @@ pi.on("context", async (event, ctx) => {
 
 `stableSortBySeq` orders markers by their `seq` (monotonic per-session counter); ties impossible by construction. Ordering oldest-first means earlier decisions are applied first, so a later rewind resolves against an already-reduced list (correct composition).
 
+**Marker retraction (cancel-drop).** `readMarkers` also scans `mulligan:cancel` control entries. Each carries a `targetId` naming the uuid `id` of a rewind/shrink marker being retired (the value returned as the marker's `id` at creation). After the scan, `readMarkers` drops any rewind/shrink whose `id` is in the collected `cancelledIds` set, so the retired marker no longer applies on subsequent `context` fires (spec/08 E21; amends D6). The drop is order-independent (a full scan precedes the filter), cancels with a non-string/empty `targetId` are skipped, and a marker whose `id` is unreadable is kept (defensive). Cancelled markers stay on disk (audit trail) — they are simply skipped going forward; the returned `MarkersBundle` exposes `cancelledIds: Set<string>` so the pipeline only ever sees the *active* markers, and `mulligan_audit` (§7) / stale-retirement can report or count them.
+
 ---
 
 ## 2. Pairing: the cardinal rule

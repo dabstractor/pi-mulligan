@@ -43,14 +43,14 @@
               "type": "Task",
               "id": "P3.M1.T2",
               "title": "readMarkers cancel-drop + MarkersBundle extension (filter.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Extend readMarkers to collect mulligan:cancel entries, build a cancelledIds set, drop cancelled rewinds/shrinks before returning, and expose cancelledIds on MarkersBundle.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T2.S1",
                   "title": "Collect cancel entries, build cancelledIds, drop cancelled markers, expose on MarkersBundle",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S1"
@@ -69,14 +69,14 @@
               "type": "Task",
               "id": "P3.M1.T3",
               "title": "mulligan_cancel tool (tools/cancel.ts + index.ts registration)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Create the mulligan_cancel agent-callable tool following the makeShrinkTool(pi) factory pattern. Takes a markerId (the entry id from details.markerId), validates, appends a cancel marker, returns confirmation. Safe no-op for non-existent/already-cancelled. Never throws.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T3.S1",
                   "title": "Create mulligan_cancel tool + register in index.ts",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M1.T1.S1",

@@ -96,6 +96,10 @@ export interface MarkersBundle {
   rewinds: RewindMarker[];
   shrinks: ShrinkMarker[];
   metric: TurnMetric | null;
+  /** uuid `id`s of rewind/shrink markers retired by a mulligan:cancel entry (P3.M1.T2.S1 / E21).
+   *  readMarkers drops any marker whose data.id ∈ this set BEFORE returning, so the pipeline only sees the
+   *  active markers. Always present (empty Set when there are no cancels on the branch). */
+  cancelledIds: Set<string>;
 }
 
 /**
@@ -114,18 +118,20 @@ export interface MarkersBundle {
  * Proxy-trap throws too.
  *
  * @param ctx the Pi ExtensionContext (sessionManager.getEntries read FRESH — C12)
- * @returns { rewinds, shrinks, metric } — metric is the latest turn-metric or null
+ * @returns { rewinds, shrinks, metric, cancelledIds } — metric is the latest turn-metric or null;
+ *          cancelledIds holds the uuid ids of cancelled rewind/shrink markers (dropped from the arrays).
  */
 export function readMarkers(ctx: ExtensionContext): MarkersBundle {
   const rewinds: RewindMarker[] = [];
   const shrinks: ShrinkMarker[] = [];
   let metric: TurnMetric | null = null;
+  const cancelledIds = new Set<string>();
 
   let entries: SessionEntry[];
   try {
     entries = ctx.sessionManager.getEntries(); // read FRESH (C12)
   } catch {
-    return { rewinds, shrinks, metric }; // a throwing getEntries → empty bundle (fail-open)
+    return { rewinds, shrinks, metric, cancelledIds }; // a throwing getEntries → empty bundle (fail-open)
   }
 
   for (const entry of entries) {
@@ -147,11 +153,29 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
       const cSeq = typeof candidate.seq === "number" ? candidate.seq : -Infinity;
       const mSeq = metric && typeof metric.seq === "number" ? metric.seq : -Infinity;
       if (metric === null || cSeq > mSeq) metric = candidate; // keep the LATEST (highest seq)
+    } else if (customType === "mulligan:cancel" && kind === "cancel") {
+      // P3.M1.T2.S1 / E21: collect the uuid id of the rewind/shrink being retired. readMarkers drops
+      // any marker whose data.id ∈ cancelledIds AFTER the scan (order-independent: full scan, then filter).
+      const targetId = readOwn(data, "targetId");
+      if (typeof targetId === "string" && targetId.length > 0) cancelledIds.add(targetId);
+      // else: malformed cancel (non-string / empty / missing targetId) → skip (fail-open, never throw)
     }
     // else: future/unknown mulligan:* custom entry → skip defensively (forward-compat)
   }
 
-  return { rewinds, shrinks, metric };
+  // P3.M1.T2.S1 / E21: drop any marker retired by a mulligan:cancel (by its uuid id). A marker whose
+  // id is unreadable (defensive) is KEPT — never drop on bad data. Cancelled markers stay on disk
+  // (audit trail); they are simply skipped going forward.
+  const activeRewinds = rewinds.filter(r => {
+    const id = readOwn(r, "id");
+    return typeof id !== "string" || !cancelledIds.has(id);
+  });
+  const activeShrinks = shrinks.filter(s => {
+    const id = readOwn(s, "id");
+    return typeof id !== "string" || !cancelledIds.has(id);
+  });
+
+  return { rewinds: activeRewinds, shrinks: activeShrinks, metric, cancelledIds };
 }
 
 // ── contextHandler — the heart of the extension (spec/03 §7, spec/06 §1) ─────────────────────
