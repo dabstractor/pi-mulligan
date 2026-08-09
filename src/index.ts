@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setConfig, getConfig } from "./config.js";
+import { loadMulliganConfig } from "./settings.js";
 import { setLogFile } from "./log.js";
 import { resetRuntime, clearAll } from "./runtime.js";
 import { registerFilterHandler } from "./filter.js";
@@ -15,19 +16,27 @@ import { makeCancelTool } from "./tools/cancel.js"; // 5th agent-callable tool (
  *
  * The single entry point (package.json `main` + `pi.extensions`). Wires all 5 agent-callable tools,
  * the 3 event-driven handlers (context filter + 2 nudges), and the session lifecycle (runtime reset /
- * full cleanup). Zero-config: setConfig(undefined) → validated DEFAULT_CONFIG (enabled:true, log off).
+ * full cleanup). Config loads from merged Pi settings (global ~/.pi/agent + project-local <cwd>/.pi)
+ * via loadMulliganConfig → setConfig; absent/invalid settings fail-open to validated DEFAULT_CONFIG
+ * (enabled:true, log off).
  *
  * SYNC (no async work; spec/01 §1 allows async but it is unnecessary). Does NOT start long-lived
  * resources (spec/01 §1; Mulligan has none). Does NOT wrap in try/catch — fail-FAST on wiring errors at
  * bootstrap; the individual handlers (contextHandler/bloatReminderHandler/turnEndMetricHandler) already
- * self-protect for fail-open (spec/03 #4).
+ * self-protect for fail-open (spec/03 #4), and config loading is fail-open inside loadMulliganConfig +
+ * setConfig (absent/invalid settings → DEFAULT_CONFIG, never a throw).
  *
  * @param pi the Pi ExtensionAPI passed by the host at load time
  */
 export default function (pi: ExtensionAPI): void {
-  // 1. Load + cache config at factory time (v1: validated defaults — no Pi settings accessor in v1;
-  //    setConfig(undefined) → DEFAULT_CONFIG; reading real settings.mulligan is v1.1). Never throws.
-  setConfig(undefined);
+  // 1. Load + cache config at factory time. loadMulliganConfig reads + deep-merges the GLOBAL
+  //    (~/.pi/agent/settings.json, via getAgentDir) and PROJECT-LOCAL (<cwd>/.pi/settings.json)
+  //    Pi settings and returns the raw `mulligan` block; setConfig validates + caches it (→
+  //    validateConfig). cwd is process.cwd() here because the factory has NO ctx (lifecycle asymmetry,
+  //    D4); the session_start handler below re-reads with the authoritative ctx.cwd (P1.M1.T2.S2).
+  //    Never throws: loadMulliganConfig is fail-open (→ undefined) and setConfig is fail-open (→
+  //    DEFAULT_CONFIG), so an absent/corrupt settings file always boots to validated defaults.
+  setConfig(loadMulliganConfig(process.cwd()));
 
   // 2. Point the logger at the configured destination (after the cache is populated). null = off (default).
   setLogFile(getConfig().log.file);

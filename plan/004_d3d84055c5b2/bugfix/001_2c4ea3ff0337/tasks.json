@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "BUG-001: Wire settings.json configuration surface",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Make the entire documented configuration surface functional: read the mulligan block from Pi's settings.json (global ~/.pi/agent/settings.json + project-local <cwd>/.pi/settings.json), deep-merge them (project-local wins), and feed the result to setConfig() instead of setConfig(undefined). The downstream consumers (filter.ts, nudges.ts, all five tools) already gate on getConfig().enabled — they need zero changes. The fix is a new src/settings.ts module (Pi-bound, reads files from disk) wired into the index.ts factory and session_start handler.",
           "tasks": [
             {
@@ -59,14 +59,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Wire settings loading into extension lifecycle (src/index.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Replace the hard-coded setConfig(undefined) at index.ts:30 with real settings loading via loadMulliganConfig(). Wire it at two seams: (1) the factory body (best-effort global + project-local via process.cwd()), and (2) the session_start handler (authoritative project-local via ctx.cwd, re-reads on /reload). After each setConfig() call, re-fire setLogFile(getConfig().log.file) so logging respects the config. Update the stale code comments that admit the gap. Update index.test.ts assertions for the new behavior.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Wire loadMulliganConfig into factory body + update code comments",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -83,7 +83,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Add config re-read in session_start handler + re-fire setLogFile",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",

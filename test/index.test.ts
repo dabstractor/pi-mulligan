@@ -1,12 +1,20 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import indexFactory from "../src/index.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
 
+// Deterministic factory test: mock settings.js so loadMulliganConfig's return is controllable
+// (a real ~/.pi or repo .pi settings.json would make this machine-dependent). vi.mock is file-scoped
+// → does not leak to test/settings.test.ts or others. The hand-rolled Pi fakes (makePi/makeCtx) stay.
+vi.mock("../src/settings.js", () => ({ loadMulliganConfig: vi.fn() }));
+import { loadMulliganConfig } from "../src/settings.js"; // the mocked binding (assert/program it)
+import { getConfig } from "../src/config.js"; // to assert the return flowed to the cache
+
 // ── module-level state reset (GOTCHA #12: runtime map is module-scoped) ───────────────────
 beforeEach(() => {
   clearAll();
+  vi.mocked(loadMulliganConfig).mockReset(); // default vi.fn() → returns undefined → DEFAULT_CONFIG
 });
 
 // ── fakes (hand-rolled, no vi.fn for Pi objects — mirror nudges.test.ts / filter.test.ts) ──
@@ -138,5 +146,33 @@ describe("index.ts extension factory", () => {
     const { pi } = makePi();
     const result = indexFactory(pi);
     expect(result).toBeUndefined();
+  });
+});
+
+describe("index.ts config loading (factory)", () => {
+  it("calls loadMulliganConfig(process.cwd()) and feeds its return to setConfig", () => {
+    vi.mocked(loadMulliganConfig).mockReturnValue({ enabled: false });
+    const { pi } = makePi();
+    indexFactory(pi);
+    expect(loadMulliganConfig).toHaveBeenCalledTimes(1);
+    expect(loadMulliganConfig).toHaveBeenCalledWith(process.cwd());
+    // the mock's return value flowed through to the config cache (proves the wiring end-to-end):
+    expect(getConfig().enabled).toBe(false);
+  });
+
+  it("is fail-open to DEFAULT_CONFIG when loadMulliganConfig returns undefined", () => {
+    vi.mocked(loadMulliganConfig).mockReturnValue(undefined); // absent/invalid/no-mulligan-key
+    const { pi } = makePi();
+    indexFactory(pi);
+    expect(loadMulliganConfig).toHaveBeenCalledTimes(1);
+    expect(getConfig().enabled).toBe(true); // DEFAULT_CONFIG.enabled === true
+  });
+
+  it("never calls loadMulliganConfig from the session_start handler (that re-read is T2.S2)", () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    const callsBefore = vi.mocked(loadMulliganConfig).mock.calls.length;
+    handlers["session_start"]!(makeStartEvent("new"), makeCtx("s1"));
+    expect(vi.mocked(loadMulliganConfig).mock.calls.length).toBe(callsBefore); // unchanged
   });
 });
