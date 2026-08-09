@@ -258,14 +258,14 @@
               "type": "Task",
               "id": "P3.M3.T2",
               "title": "Runtime high-water state (runtime.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add aboveHighWater boolean to SessionRuntime for the edge-triggered high-water signal.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T2.S1",
                   "title": "Add aboveHighWater boolean to SessionRuntime",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_2c3b19ff6a7b/architecture/system_context.md §runtime.ts. SessionRuntime is Pi-free. freshRuntime constructs defaults. resetRuntime deletes the entry (session_start resets automatically).\n2. INPUT: The existing SessionRuntime interface + freshRuntime in src/runtime.ts.\n3. LOGIC: (a) Add `aboveHighWater: boolean` to SessionRuntime interface — tracks whether the total filtered context is currently above the high-water fraction (edge-triggered: set true when the annotation fires, cleared only when the total drops back below the fraction). (b) In freshRuntime, add `aboveHighWater: false`. (c) No changes to getRuntime/nextSeq/resetRuntime/clearAll.\n4. OUTPUT: SessionRuntime.aboveHighWater available via getRuntime. Consumed by shouldHighWater (P3.M3.T5.S1) via the rt parameter.\n5. MOCKING: In tests, getRuntime('s1').aboveHighWater === false initially. Set it true, assert it persists until explicitly cleared.\n6. DOCS: none — internal in-memory state (spec/04 §8).",
@@ -280,14 +280,14 @@
               "type": "Task",
               "id": "P3.M3.T3",
               "title": "readMarkers recent-metrics window (filter.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Expose the last N turn-metrics (newest-first) on MarkersBundle so the contextHandler can compute the windowed drift signal.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M3.T3.S1",
                   "title": "Expose recentMetrics: TurnMetric[] on MarkersBundle (sorted newest-first)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T2.S1"

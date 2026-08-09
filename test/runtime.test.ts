@@ -31,6 +31,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       lastFilterTs: null,
       pendingBloatHits: [],
       shrinkMissCounts: new Map(),
+      aboveHighWater: false,
     });
   });
 
@@ -120,6 +121,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       lastFilterTs: null,
       pendingBloatHits: [],
       shrinkMissCounts: new Map(),
+      aboveHighWater: false,
     });
   });
 
@@ -157,6 +159,15 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
     expect(fresh.shrinkMissCounts).not.toBe(a.shrinkMissCounts); // new Map instance (C12: stale ref abandoned)
     expect(fresh.shrinkMissCounts.size).toBe(0);
   });
+
+  it("aboveHighWater resets to false after resetRuntime", () => {
+    const a = getRuntime("s1");
+    a.aboveHighWater = true;
+    resetRuntime("s1");
+    const fresh = getRuntime("s1");
+    expect(fresh.aboveHighWater).toBe(false); // entry was deleted → fresh runtime → default false
+    expect(fresh).not.toBe(a); // new reference (C12: stale ref abandoned) — same as the shrinkMissCounts test
+  });
 });
 
 describe("clearAll — shutdown cleanup", () => {
@@ -179,6 +190,12 @@ describe("clearAll — shutdown cleanup", () => {
     getRuntime("A").shrinkMissCounts.set("s", 3);
     clearAll();
     expect(getRuntime("A").shrinkMissCounts.size).toBe(0);
+  });
+
+  it("clearAll resets aboveHighWater for all sessions", () => {
+    getRuntime("A").aboveHighWater = true;
+    clearAll();
+    expect(getRuntime("A").aboveHighWater).toBe(false); // map wiped → fresh runtime → default false
   });
 });
 
@@ -220,6 +237,14 @@ describe("in-place mutation contract (consumers mutate the live object)", () => 
     getRuntime("s1").shrinkMissCounts.delete("shrink-7"); // hit/retire resets
     expect(getRuntime("s1").shrinkMissCounts.has("shrink-7")).toBe(false);
   });
+
+  it("shouldHighWater-style set of aboveHighWater persists across getRuntime calls (edge latches, not per-turn)", () => {
+    // Documents the P3.M3.T5.S1 consumption contract: set true on rising edge, persists until cleared.
+    const rt = getRuntime("s1");
+    expect(rt.aboveHighWater).toBe(false); // fresh default
+    rt.aboveHighWater = true; // shouldHighWater sets it on the rising edge
+    expect(getRuntime("s1").aboveHighWater).toBe(true); // persists (same live reference)
+  });
 });
 
 describe("types", () => {
@@ -233,6 +258,7 @@ describe("types", () => {
     expectTypeOf(rt.lastFilterTs).toEqualTypeOf<number | null>();
     expectTypeOf(rt.pendingBloatHits).toEqualTypeOf<BloatHit[]>();
     expectTypeOf(rt.shrinkMissCounts).toEqualTypeOf<Map<string, number>>();
+    expectTypeOf(rt.aboveHighWater).toEqualTypeOf<boolean>();
     expectTypeOf<BloatHit>().toEqualTypeOf<{ toolName: string; approxTokens: number }>();
   });
 });

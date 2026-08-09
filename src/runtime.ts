@@ -81,6 +81,14 @@ export interface SessionRuntime {
    *  absent on a given fire; reset/deleted on a hit or retirement. Each fresh runtime gets its OWN Map
    *  (GOTCHA #5 — never a module-level shared Map). Consumed by P3.M2.T3.S1. */
   shrinkMissCounts: Map<string, number>;
+  /** Whether the total filtered context is currently ABOVE the high-water fraction of the window
+   *  (config.nudges.highWaterFraction, default 0.7). Latches the §5.2 edge-triggered high-water signal:
+   *  set `true` when the high-water annotation fires (total crosses above the fraction); cleared (`false`)
+   *  only when the total drops back below the fraction. Edge-triggered — prevents the annotation from
+   *  nagging every turn while above. Persists across turns within a session; auto-reset to `false` by
+   *  resetRuntime (entry deleted on session_start) and clearAll (shutdown). Default: `false`. In-memory,
+   *  non-persisted (spec/04 §8). Consumed by shouldHighWater (P3.M3.T5.S1) via the rt parameter. */
+  aboveHighWater: boolean;
 }
 
 /**
@@ -105,6 +113,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     lastFilterTs: null,
     pendingBloatHits: [],
     shrinkMissCounts: new Map(),
+    aboveHighWater: false,
   };
 }
 
