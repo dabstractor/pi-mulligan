@@ -4,14 +4,14 @@
       "type": "Phase",
       "id": "P2",
       "title": "Per-Tool Bloat Threshold",
-      "status": "Researching",
+      "status": "Ready",
       "description": "Surgical refinement of Nudge A (bloated-result reminder): resolve the bloat byte threshold per tool instead of using one global value. Raise the global default from 8192 to 16384, add a per-tool override map (bash: 32768, read: 20480), wire the resolution into bloatReminderHandler, and sync all tests and docs. No architecture change, no new module, no new event.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P2.M1",
           "title": "Implement per-tool bloat threshold",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Single milestone: extend the config surface (interface, defaults, validation) with bloatThresholdBytesByTool, add the bloatThresholdFor resolution helper and wire it into bloatReminderHandler, update all affected tests and README documentation.",
           "tasks": [
             {
@@ -62,7 +62,7 @@
               "type": "Task",
               "id": "P2.M1.T2",
               "title": "Per-tool resolution + tests + README",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Add the pure bloatThresholdFor(toolName, config) helper to src/nudges.ts and wire it into bloatReminderHandler (replacing the direct global read). Update all affected tests (nudges.test.ts fixture resizing, bloatThresholdFor unit test, per-tool scenario tests, smoke.ts comment updates). Sync changeset-level documentation in README.md (Mode B).",
               "subtasks": [
                 {
@@ -123,7 +123,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T2.S4",
                   "title": "Sync changeset-level documentation — README.md (Mode B)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",
