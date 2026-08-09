@@ -25,6 +25,17 @@ vi.mock("../src/transforms.js", () => ({
     if (resolvePinnedShrinkReturn === null) return null; // default: target ABSENT (stale)
     return resolvePinnedShrinkReturn(...args);
   },
+  // stableSortBySeq — faithful fake of the real transforms.js export (ascending by seq, missing/non-finite
+  // → 0, stable). Needed by the soft-cap path (P3.M2.T3.S2) which calls stableSortBySeq to find the oldest
+  // (lowest seq) shrink. Mocked here so filter.ts's VALUE import resolves (the factory replaces the module).
+  stableSortBySeq: <T extends { seq?: unknown }>(markers: T[]): T[] => {
+    if (!Array.isArray(markers)) return [];
+    const seqOf = (m: unknown): number => {
+      const s = (m as { seq?: unknown })?.seq;
+      return typeof s === "number" && Number.isFinite(s) ? s : 0;
+    };
+    return [...markers].sort((a, b) => seqOf(a) - seqOf(b));
+  },
 }));
 
 import { setConfig } from "../src/config.js";
@@ -565,5 +576,162 @@ describe("contextHandler — stale-marker retirement (P3.M2.T3.S1 / spec/08 E15)
     expect(result).toBeDefined(); // transform preserved — NOT pass-through
     expect(result?.messages).toEqual([{ role: "user", content: "F" }]);
     expect(getRuntime("retire6").shrinkMissCounts.get("sh-append-throw")).toBe(3); // count still climbed
+  });
+});
+
+// ── soft cap on active shrinks (P3.M2.T3.S2 / spec/08 E15) ───────────────────────────────────
+// The soft cap retires the OLDEST active shrink (lowest seq) when the active count exceeds
+// config.shrink.maxActive — exactly ONE per fire (bounded, eventual), taking effect NEXT fire.
+// Uses LIVE shrinks (shrinkData — no pinnedEntryId) so the stale-retirement for-loop skips them,
+// isolating the cap path. setConfig({ shrink: { maxActive: N } }) deep-merges (keeps staleAfterFires
+// default). Restored to defaults via setConfig({}) at the end of each test (module-level cache).
+describe("contextHandler — soft cap (spec/08 E15)", () => {
+  it("retires the OLDEST shrink (lowest seq) when active count exceeds maxActive", () => {
+    // maxActive=2, 3 LIVE shrinks (seq 5,3,4) → cap fires → retire oldest = seq 3 ("sh-3").
+    setConfig({ shrink: { maxActive: 2 } });
+    const { pi, appendCalls } = makePi();
+    pipelineReturn = [{ role: "user", content: "F" }];
+    const entries = [
+      customEntry("mulligan:shrink", shrinkData(5, "sh-5")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-4")),
+    ];
+    const ctx = makeCtx({ sessionId: "cap1", entries });
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    contextHandler(pi, event, ctx);
+
+    expect(appendCalls).toHaveLength(1);
+    expect(appendCalls[0].customType).toBe("mulligan:cancel");
+    expect((appendCalls[0].data as { targetId: string }).targetId).toBe("sh-3");
+    setConfig({}); // restore defaults
+  });
+
+  it("boundary equal does NOT exceed → no cancel (maxActive=3, 3 shrinks → 0; also 2 shrinks → 0)", () => {
+    // STRICT `>`: count == maxActive is NOT a retirement. Both 3-of-3 and 2-of-3 stay put.
+    setConfig({ shrink: { maxActive: 3 } });
+    const { pi, appendCalls } = makePi();
+    pipelineReturn = [{ role: "user", content: "F" }];
+    const ctxA = makeCtx({
+      sessionId: "cap2a",
+      entries: [
+        customEntry("mulligan:shrink", shrinkData(1, "sh-1")),
+        customEntry("mulligan:shrink", shrinkData(2, "sh-2")),
+        customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      ],
+    });
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+    contextHandler(pi, event, ctxA);
+    expect(appendCalls).toHaveLength(0); // 3 == maxActive 3 → not > → no retire
+
+    const ctxB = makeCtx({
+      sessionId: "cap2b",
+      entries: [
+        customEntry("mulligan:shrink", shrinkData(1, "sh-1")),
+        customEntry("mulligan:shrink", shrinkData(2, "sh-2")),
+      ],
+    });
+    contextHandler(pi, event, ctxB);
+    expect(appendCalls).toHaveLength(0); // 2 < maxActive 3 → no retire
+    setConfig({}); // restore defaults
+  });
+
+  it("retires exactly ONE per fire (not all-over, not a loop)", () => {
+    // maxActive=1, 3 shrinks → ONE fire retires exactly ONE (the oldest), never two.
+    setConfig({ shrink: { maxActive: 1 } });
+    const { pi, appendCalls } = makePi();
+    pipelineReturn = [{ role: "user", content: "F" }];
+    const entries = [
+      customEntry("mulligan:shrink", shrinkData(5, "sh-5")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-4")),
+    ];
+    const ctx = makeCtx({ sessionId: "cap3", entries });
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    contextHandler(pi, event, ctx);
+
+    expect(appendCalls).toHaveLength(1); // exactly ONE, not 2 (count - maxActive)
+    expect((appendCalls[0].data as { targetId: string }).targetId).toBe("sh-3"); // oldest first
+    setConfig({}); // restore defaults
+  });
+
+  it("over N fires retires oldest-first, one per fire (bounded, eventual)", () => {
+    // maxActive=1; start [sh-5,sh-3,sh-4]. fake pi.appendEntry does NOT feed back into makeCtx, so we
+    // MANUALLY append a makeCancelEntry(id) between fires (readMarkers cancel-drops it next fire).
+    setConfig({ shrink: { maxActive: 1 } });
+    const { pi, appendCalls } = makePi();
+    pipelineReturn = [{ role: "user", content: "F" }];
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    // Fire 1: [sh-5,sh-3,sh-4] → oldest = sh-3.
+    let entries = [
+      customEntry("mulligan:shrink", shrinkData(5, "sh-5")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-4")),
+    ];
+    contextHandler(pi, event, makeCtx({ sessionId: "cap4", entries }));
+    expect(appendCalls).toHaveLength(1);
+    expect((appendCalls[0].data as { targetId: string }).targetId).toBe("sh-3");
+
+    // Fire 2: append cancel for sh-3 → readMarkers drops it → active [sh-5,sh-4] (len 2 > 1) → oldest = sh-4.
+    entries = [...entries, makeCancelEntry("sh-3")];
+    contextHandler(pi, event, makeCtx({ sessionId: "cap4", entries }));
+    expect(appendCalls).toHaveLength(2);
+    expect((appendCalls[1].data as { targetId: string }).targetId).toBe("sh-4");
+
+    // Fire 3: append cancel for sh-4 → active [sh-5] (len 1, NOT > 1) → no new cancel.
+    entries = [...entries, makeCancelEntry("sh-4")];
+    contextHandler(pi, event, makeCtx({ sessionId: "cap4", entries }));
+    expect(appendCalls).toHaveLength(2); // unchanged — back under the cap
+    setConfig({}); // restore defaults
+  });
+
+  it("operates on the ACTIVE set (cancel-dropped shrinks don't count toward the cap)", () => {
+    // maxActive=2; 3 shrinks BUT one (sh-3) already has a mulligan:cancel on the branch → readMarkers
+    // drops sh-3 → active len = 2 → NOT > 2 → no new cancel.
+    setConfig({ shrink: { maxActive: 2 } });
+    const { pi, appendCalls } = makePi();
+    pipelineReturn = [{ role: "user", content: "F" }];
+    const entries = [
+      customEntry("mulligan:shrink", shrinkData(5, "sh-5")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-4")),
+      makeCancelEntry("sh-3"), // sh-3 is already retired on-disk → active set is [sh-5,sh-4]
+    ];
+    const ctx = makeCtx({ sessionId: "cap5", entries });
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    contextHandler(pi, event, ctx);
+
+    expect(appendCalls).toHaveLength(0); // active len 2 == maxActive 2 → not > → no retire
+    setConfig({}); // restore defaults
+  });
+
+  it("never throws: a cap-path failure is swallowed and the turn still returns {messages} (E13)", () => {
+    // 3 LIVE shrinks (no pinnedEntryId → stale for-loop skips them, so ONLY the cap path runs). A pi whose
+    // appendEntry THROWS → appendCancelMarker swallows → inner retirement try/catch also holds → {messages}.
+    setConfig({ shrink: { maxActive: 1 } });
+    const handlers: Record<string, ((...a: unknown[]) => unknown) | undefined> = {};
+    const appendCalls: { customType: string; data: unknown }[] = [];
+    const pi = {
+      on(event: string, handler: (...a: unknown[]) => unknown) { handlers[event] = handler; },
+      appendEntry() { throw new Error("boom"); },
+    } as unknown as ExtensionAPI;
+    pipelineReturn = [{ role: "user", content: "OK" }];
+    const entries = [
+      customEntry("mulligan:shrink", shrinkData(5, "sh-5")),
+      customEntry("mulligan:shrink", shrinkData(3, "sh-3")),
+      customEntry("mulligan:shrink", shrinkData(4, "sh-4")),
+    ];
+    const ctx = makeCtx({ sessionId: "cap6", entries });
+    const event = { type: "context" as const, messages: [] } as unknown as ContextEvent;
+
+    let result: { messages: unknown[] } | undefined;
+    expect(() => { result = contextHandler(pi, event, ctx) as { messages: unknown[] } | undefined; }).not.toThrow();
+    expect(result).toBeDefined(); // NOT pass-through (void) — the transform is PRESERVED (E13 isolation)
+    expect(result?.messages).toEqual([{ role: "user", content: "OK" }]);
+    expect(appendCalls).toHaveLength(0); // appendEntry threw before push
+    setConfig({}); // restore defaults
   });
 });

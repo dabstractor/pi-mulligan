@@ -39,7 +39,7 @@ import type {
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { filterPipeline, resolvePinnedShrink } from "./transforms.js";
+import { filterPipeline, resolvePinnedShrink, stableSortBySeq } from "./transforms.js";
 import type { MessageLike, BranchEntry } from "./transforms.js";
 import { getRuntime } from "./runtime.js";
 import type { AgentMessage } from "./runtime.js"; // local opaque alias (Pi's AgentMessage is NOT exported)
@@ -293,6 +293,20 @@ export function contextHandler(
           rt.shrinkMissCounts.set(id, misses);
           if (misses >= staleAfterFires) {
             appendCancelMarker(pi, ctx, { targetId: id }); // auto-retire (next fire drops it); never throws
+          }
+        }
+      }
+
+      // P3.M2.T3.S2 / spec E15: soft cap. If the ACTIVE shrink count exceeds config.shrink.maxActive,
+      // retire the OLDEST (lowest seq) by appending a mulligan:cancel (same primitive as cancel tool + stale pass).
+      // Exactly ONE per fire (bounded, eventual). markers.shrinks is already cancel-dropped by readMarkers.
+      // Takes effect NEXT fire. NEVER throws (this try/catch, E13).
+      if (markers.shrinks.length > config.shrink.maxActive) {
+        const oldest = stableSortBySeq(markers.shrinks)[0]; // lowest seq (defensive: missing seq → 0)
+        if (oldest) {
+          const id = readOwn(oldest, "id");
+          if (typeof id === "string" && id.length > 0) {
+            appendCancelMarker(pi, ctx, { targetId: id }); // auto-retire oldest; never throws
           }
         }
       }
