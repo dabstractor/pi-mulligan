@@ -87,13 +87,15 @@ describe("shouldNudge — windowed drift gate (spec/07 §5.1)", () => {
     expect(shouldNudge([m(7000, false, 3), m(7000, false, 2), m(7000, false, 1)], cfg())).toBe(true);
   });
 
-  it("fires when ANY window metric has bloatHit (independent of the windowed delta) — bloat-only", () => {
-    // all deltas null (first turn / post-reload), one bloatHit → true.
+  it("fires on bloatHit ONLY in the no-delta fallback (first turn / post-reload) — bloat-only", () => {
+    // all deltas null → deltas.length===0 → bloat fallback arm (the ONLY surviving bloat path).
     expect(shouldNudge([m(null, true, 1)], cfg())).toBe(true);
   });
 
-  it("fires on bloatHit even when the windowed average is below threshold", () => {
-    expect(shouldNudge([m(500, true, 1)], cfg())).toBe(true);
+  it("does NOT fire on bloatHit when delta data exists and average is below threshold (P4.M2.T1)", () => {
+    // bloatHit no longer arms the delta-available path (P4.M2.T1.S1 / spec/07 §5.1); deltas=[500],
+    // avg 500 < 6000 → false. Only the no-delta fallback (next case) fires on bloat.
+    expect(shouldNudge([m(500, true, 1)], cfg())).toBe(false);
   });
 
   it("returns false for an empty window (no metrics)", () => {

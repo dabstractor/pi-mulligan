@@ -940,7 +940,8 @@ describe("contextHandler — edge-triggered high-water signal (P3.M3.T6.S1 / spe
 
 // ── P3.M3.T6.S1: windowed drift-nudge wiring (spec/07 §5.1, REQUIRED) ───────────────────────────
 // Thin wiring asserts: contextHandler passes the FULL recentMetrics window (NOT the single metric) to
-// shouldNudge. shouldNudge's OWN windowed behavior (moving average > threshold, or any window bloatHit) is
+// shouldNudge. shouldNudge's OWN windowed behavior (moving average > threshold, delta-only when delta
+// data exists; bloatHit is a no-delta fallback only — P4.M2.T1 / spec/07 §5.1) is
 // unit-tested in test/drift_nudge.test.ts (P3.M3.T4.S1). These use the DEFAULT makeCtx (no getContextUsage)
 // so the high-water block is a no-op (the single "P"-content message is ~1 token, far below any fraction).
 describe("contextHandler — windowed drift-nudge wiring (P3.M3.T6.S1 / spec/07 §5.1)", () => {

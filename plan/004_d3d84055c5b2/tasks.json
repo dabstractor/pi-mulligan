@@ -139,14 +139,14 @@
           "type": "Milestone",
           "id": "P4.M2",
           "title": "bloatHit demotion in shouldNudge (independent, tiny)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "shouldNudge fires on delta ALONE when delta data exists; bloatHit fires only in the no-delta fallback. One production line changes; two tests flip. INDEPENDENT of M1 (different file src/nudges.ts, different concern) — may be done in parallel with M1.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M2.T1",
               "title": "Demote bloatHit (src/nudges.ts + test/drift_nudge.test.ts)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Remove the `|| window.some(bloatHit)` arm from shouldNudge's delta-available return (line 323). Keep the deltas.length===0 fallback (line 321) unchanged. Update the JSDoc. Flip the 2 stale test assertions; keep the no-delta fallback assertion green.",
               "subtasks": [
                 {
@@ -168,7 +168,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "Flip the 2 stale bloat-armed test assertions",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M2.T1.S1"
@@ -203,7 +203,7 @@
                   "type": "Subtask",
                   "id": "P4.M3.T1.S1",
                   "title": "Add two rows to config table + JSON example",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M1.T1.S1"
