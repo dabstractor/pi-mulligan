@@ -39,7 +39,7 @@ import type {
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { filterPipeline } from "./transforms.js";
+import { filterPipeline, resolvePinnedShrink } from "./transforms.js";
 import type { MessageLike, BranchEntry } from "./transforms.js";
 import { getRuntime } from "./runtime.js";
 import type { AgentMessage } from "./runtime.js"; // local opaque alias (Pi's AgentMessage is NOT exported)
@@ -47,6 +47,7 @@ import { getConfig } from "./config.js";
 import { log } from "./log.js";
 import { estimateTokens } from "./tokens.js";
 import type { RewindMarker, ShrinkMarker, TurnMetric } from "./markers.js";
+import { appendCancelMarker } from "./markers.js";
 import { shouldNudge, injectNudge, suppressCheck } from "./nudges.js";
 
 // ── module-private defensive helpers (mirror transforms.ts/notes.ts — never throw) ───
@@ -187,15 +188,25 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
  * try/catch — on ANY exception it logs and returns nothing (pass-through), so an extension bug can NEVER
  * break an agent turn (spec/03 #4 fail-open, spec/08 E13).
  *
- * EXPORTED (named) so the test suite can call it directly with hand-rolled fakes; registerFilterHandler
- * is the production registration seam.
+ * EXPORTED (named) so the test suite can call it directly with hand-rolled fakes (pi FIRST — see GOTCHA);
+ * registerFilterHandler is the production registration seam.
  *
+ * WHY pi is a parameter (GOTCHA #2, mirrors turnEndMetricHandler in nudges.ts): the `context` callback only
+ * receives (event, ctx), but this handler must call appendCancelMarker(pi, …) (→ pi.appendEntry) for stale-
+ * marker retirement (spec E15). registerFilterHandler captures pi in a closure and passes it here, so the
+ * exported handler is directly testable with a fake pi.
+ *
+ * @param pi    the Pi ExtensionAPI (appendCancelMarker → pi.appendEntry lives here).
  * @param event { type:"context"; messages: AgentMessage[] } — a deep copy of the active branch, safe to
  *        mutate/replace (api_verification §7.1).
- * @param ctx  the Pi ExtensionContext (sessionManager read FRESH — C12).
+ * @param ctx   the Pi ExtensionContext (sessionManager read FRESH — C12).
  * @returns `{ messages }` to transform, or void/undefined to pass the original through (C4).
  */
-export function contextHandler(event: ContextEvent, ctx: ExtensionContext): ContextEventResult | void {
+export function contextHandler(
+  pi: ExtensionAPI,
+  event: ContextEvent,
+  ctx: ExtensionContext,
+): ContextEventResult | void {
   let sessionId = "unknown";
   try {
     sessionId = ctx.sessionManager.getSessionId(); // read FRESH (C12); first so the catch can log it
@@ -252,6 +263,50 @@ export function contextHandler(event: ContextEvent, ctx: ExtensionContext): Cont
       /* observability only — never break the turn */
     }
 
+    // P3.M2.T3.S1 / spec E15: stale-marker retirement. A PINNED shrink whose target ENTRY has been absent
+    // from the branch for config.shrink.staleAfterFires consecutive fires is auto-retired (a mulligan:cancel
+    // is appended — the SAME retraction primitive the cancel tool uses, P3.M1). The cancel takes effect on
+    // the NEXT fire (readMarkers drops the cancelled id) — NO in-fire mutation. Only PINNED shrinks can go
+    // stale (live shrinks re-resolve each fire and no-op harmlessly). NEVER throws: its OWN inner try/catch
+    // (E13) — a retirement failure is swallowed and execution falls through to the normal return, so the
+    // already-computed filter transform is PRESERVED (it does NOT fall through to the outer void-return).
+    // event.messages is PRE-filter (filterPipeline REMOVES messages, breaking the alignment walk); rt/config/
+    // branchEntries are the already-read locals (no re-fetch); sh.id/pinnedEntryId read via readOwn (Proxy-safe).
+    try {
+      const staleAfterFires = config.shrink.staleAfterFires;
+      for (const sh of markers.shrinks) {
+        const pinnedEntryId = readOwn(sh, "pinnedEntryId");
+        if (typeof pinnedEntryId !== "string" || pinnedEntryId.length === 0) continue; // live shrink → skip
+        const id = readOwn(sh, "id");
+        if (typeof id !== "string" || id.length === 0) continue; // unreadable id → skip (defensive)
+        // resolvePinnedShrink aligns branchEntries with event.messages (PRE-filter) by identity; null = absent.
+        const hit =
+          resolvePinnedShrink(
+            event.messages as unknown as MessageLike[],
+            branchEntries as unknown as BranchEntry[],
+            pinnedEntryId,
+          ) !== null;
+        if (hit) {
+          rt.shrinkMissCounts.set(id, 0); // target present → reset miss count
+        } else {
+          const misses = (rt.shrinkMissCounts.get(id) ?? 0) + 1;
+          rt.shrinkMissCounts.set(id, misses);
+          if (misses >= staleAfterFires) {
+            appendCancelMarker(pi, ctx, { targetId: id }); // auto-retire (next fire drops it); never throws
+          }
+        }
+      }
+    } catch (retireErr) {
+      // Retirement failure must not break the turn (E13). Log + fall through to the normal return.
+      try {
+        log("warn", "filter.retire", sessionId, {
+          error: retireErr instanceof Error ? retireErr.message : String(retireErr),
+        });
+      } catch {
+        /* log() never throws, but be safe */
+      }
+    }
+
     // ONE cast at the return boundary: MessageLike[] -> Pi's AgentMessage[] (ContextEventResult.messages).
     return { messages: messages as unknown as NonNullable<ContextEventResult["messages"]> };
   } catch (e) {
@@ -274,5 +329,7 @@ export function contextHandler(event: ContextEvent, ctx: ExtensionContext): Cont
  * @param pi the Pi ExtensionAPI (on() lives here).
  */
 export function registerFilterHandler(pi: ExtensionAPI): void {
-  pi.on("context", contextHandler);
+  // Thread pi through: the `context` callback only passes (event, ctx), but contextHandler needs pi for
+  // appendCancelMarker (stale retirement, P3.M2.T3.S1). Mirrors registerTurnEndMetric (nudges.ts).
+  pi.on("context", (event: ContextEvent, ctx: ExtensionContext) => contextHandler(pi, event, ctx));
 }

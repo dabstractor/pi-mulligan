@@ -745,25 +745,28 @@ describe("E13 — Tool/handler throws internally (fail-open — the cardinal saf
     // original messages, since no markers transform anything). The real forced-catch paths are getBranch +
     // getSessionId (called directly in contextHandler) — asserted next. The "readMarkers fail-open" unit test
     // in filter.test.ts is authoritative for the getEntries-swallow behavior.
+    const { pi } = makePi();
     const ctx = makeCtx({ throwOnGetEntries: true }).ctx;
     const event = { type: "context" as const, messages: [user("hi")] } as unknown as ContextEvent;
-    expect(() => contextHandler(event, ctx)).not.toThrow(); // never throws — the cardinal property
+    expect(() => contextHandler(pi, event, ctx)).not.toThrow(); // never throws — the cardinal property
     // returns {messages} (the original list passes through unchanged — no markers to apply).
-    const out = contextHandler(event, ctx) as { messages: unknown[] } | undefined;
+    const out = contextHandler(pi, event, ctx) as { messages: unknown[] } | undefined;
     expect(out).toBeDefined();
     expect(out?.messages).toEqual([user("hi")]);
   });
 
   it("contextHandler: a throwing getBranch → returns undefined, does NOT throw", () => {
+    const { pi } = makePi();
     const ctx = makeCtx({ throwOnGetBranch: true, entries: [customEntry("mulligan:rewind", rewindEntryData(1))] }).ctx;
-    expect(() => contextHandler({ type: "context", messages: [] } as unknown as ContextEvent, ctx)).not.toThrow();
-    expect(contextHandler({ type: "context", messages: [] } as unknown as ContextEvent, ctx)).toBeUndefined();
+    expect(() => contextHandler(pi, { type: "context", messages: [] } as unknown as ContextEvent, ctx)).not.toThrow();
+    expect(contextHandler(pi, { type: "context", messages: [] } as unknown as ContextEvent, ctx)).toBeUndefined();
   });
 
   it("contextHandler: a throwing getSessionId → returns undefined, does NOT throw", () => {
+    const { pi } = makePi();
     const ctx = makeCtx({ throwOnGetSessionId: true }).ctx;
-    expect(() => contextHandler({ type: "context", messages: [] } as unknown as ContextEvent, ctx)).not.toThrow();
-    expect(contextHandler({ type: "context", messages: [] } as unknown as ContextEvent, ctx)).toBeUndefined();
+    expect(() => contextHandler(pi, { type: "context", messages: [] } as unknown as ContextEvent, ctx)).not.toThrow();
+    expect(contextHandler(pi, { type: "context", messages: [] } as unknown as ContextEvent, ctx)).toBeUndefined();
   });
 
   it("bloatReminderHandler: a throwing getSessionId → returns void (pass-through), does NOT throw", () => {
@@ -854,9 +857,10 @@ describe("E13 — Tool/handler throws internally (fail-open — the cardinal saf
 describe("E14 — Extension disabled via config (master switch)", () => {
   it("contextHandler with enabled:false → returns undefined (pass-through); cache untouched", () => {
     setConfig({ enabled: false });
+    const { pi } = makePi();
     const ctx = makeCtx({ sessionId: "dis1" }).ctx;
     const event = { type: "context" as const, messages: [user("hi")] } as unknown as ContextEvent;
-    expect(contextHandler(event, ctx)).toBeUndefined(); // void = pass-through
+    expect(contextHandler(pi, event, ctx)).toBeUndefined(); // void = pass-through
     expect(getRuntime("dis1").lastFiltered).toBeNull(); // cache untouched
   });
 
