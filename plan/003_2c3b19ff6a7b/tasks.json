@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P3",
       "title": "Implement the spec refinements from commit 0ea555ed",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Three REQUIRED feature groups from the spec delta, none of which are implemented today: G3 marker retraction (cancel), G2 stale-marker retirement + soft cap, G1 drift-nudge refinements (windowed signaling + high-water signal). All reuse existing shipped patterns — no new architecture, no new event, no new model request (D4 holds). Build order: M1 (cancel primitive) → M2 (stale retirement reuses cancel) → M3 (independent drift refinements) → M4 (doc sync).",
       "milestones": [
         {
@@ -392,14 +392,14 @@
           "type": "Milestone",
           "id": "P3.M4",
           "title": "Sync changeset-level documentation (Mode B; depends on P3.M1–M3)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "README.md is stale relative to this changeset and must be synced once all three milestones land. No SPEC.md/spec/07/spec/08/spec/09 writing is needed — those are the SOURCE of this delta and already exist.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update README.md config table + JSON example, tools list, and feature blurbs to reflect all three feature groups.",
               "subtasks": [
                 {
@@ -437,7 +437,7 @@
                   "type": "Subtask",
                   "id": "P3.M4.T1.S3",
                   "title": "Update README feature blurbs (windowed drift, high-water, marker retraction)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T3.S1",

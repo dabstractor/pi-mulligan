@@ -212,10 +212,13 @@ model sees [kept prefix] + [your note] + [confirmation], resumes — no resume c
 
 **Shrink** = view substitution: `appendEntry("mulligan:shrink", {target, replacement})`; the context handler substitutes content in place (preserving `role` / `toolCallId` / `toolName` / `isError` so the tool-call/result pairing invariant holds).
 
-**Two ride-along nudges (zero extra model requests):**
+Both rewind and shrink markers are **retractable**: `mulligan_cancel` retires a mis-targeted marker so it stops applying from the next turn on — a safety valve when a rewind hid something still needed or a shrink hit the wrong message (see [§4 Tools](#4-tools)). Retraction is forward-only: on-disk side effects persist and originally-hidden content stays recoverable via `/tree`.
+
+**Ride-along nudges & signals (zero extra model requests):**
 
 1. **Bloated-result reminder** — a `tool_result` hook appends a short reminder to any result exceeding the per-tool bloat threshold (`bash`: 32 KB, `read`: 20 KB, others: the 16 KB global default).
-2. **Per-turn drift nudge** — at `turn_end` Mulligan records the token delta; on the *next* inference it injects a one-line annotation (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). The `mulligan:nudge` annotation is **never persisted**.
+2. **Per-turn drift nudge** — at `turn_end` Mulligan records the token delta; on the *next* inference it injects a one-line annotation (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). The delta is **windowed** (`spec/07-preventive-and-nudges.md` §5.1): smoothed over a rolling window of the last `nudges.driftWindowTurns` turns (default 3) before the threshold, so a single heavy turn (reading several source files, a pasted reference doc) does **not** fire it, but *sustained* growth across consecutive turns does. The `mulligan:nudge` annotation is **never persisted**.
+3. **High-water signal** (`spec/07-preventive-and-nudges.md` §5.2) — a one-time annotation (`[mulligan] Context is at ~70% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`) the first time the *filtered* context crosses `nudges.highWaterFraction` of the window (default 0.7). It is **edge-triggered** — it fires once on the upward crossing and stays quiet until the total drops back below the fraction, so it never nags. This catches slow, steady accumulation that no single-turn delta nudge sees.
 
 **`/tree` is the audit trail.** Every rewind, shrink, and checkpoint is a persisted entry — the human can inspect the full un-filtered history (including every hidden span) via Pi's native `/tree`. Mulligan adds no human-facing command of its own, because `/tree` already serves that need.
 
@@ -236,7 +239,7 @@ See `spec/SPEC.md` §1, §4 and `spec/06-context-filter.md` for the full archite
 Mulligan is deliberately minimal. These are the four things it deliberately does **not** do in v1.
 
 - **Compaction leak (`spec/08-edge-cases.md` E7).** Pi's auto-compaction may summarize a span that included a Mulligan-hidden message, producing a transient "leak" via the summary until the next compaction settles. v1 accepts this as bounded and transient — and Mulligan *reducing* context makes compaction fire later and over less-important content. There is no v1 mitigation.
-- **No undo (`spec/SPEC.md` §9 D6).** Agent-initiated rewinds and shrinks are permanent — they persist across reload and `/resume`. There is no un-rewind. A human who wants to explore hidden content uses Pi's native `/tree`.
+- **No general undo (`spec/SPEC.md` §9 D6; softened by `spec/08-edge-cases.md` E21).** Agent-initiated rewinds and shrinks persist across reload and `/resume`, and there is no un-rewind that *replays* hidden content or *reverses* on-disk side effects (file edits and bash commands persist) — a human who wants to explore hidden content uses Pi's native `/tree`. One safety valve now exists: a mis-targeted marker is **retractable** via `mulligan_cancel`, which stops the transform applying from the next turn on (the marker stays on disk for the audit trail). This softens D6 for marker mistakes; it does not make rewinds/shrinks generally reversible.
 - **No hard retry / replay (`spec/SPEC.md` §9 D1).** Mulligan supports *soft* retry only (rewind + note + re-plan). Hidden tool calls' **side effects persist on disk** (files written, commands run); replaying them would compound those effects (a duplicate commit, a double `mkdir`). The mutation warning and the note's `true_current_state` / auto-appended file ledger are the safeguards.
 - **Markers accumulate (`spec/08-edge-cases.md` E15).** v1 does no marker garbage-collection — markers persist intentionally (they are the audit trail). `rewind.maxDepth=5` bounds simultaneous *active* rewind markers; the only cost is disk growth (markers are control state, not in context). The filter is cheap in practice (few markers × messages bounded by compaction).
 
@@ -252,7 +255,7 @@ Mulligan is deliberately minimal. These are the four things it deliberately does
 
 The `spec/` directory is the deep-detail reference. Start with `spec/SPEC.md` (the master document: PRD + architecture), then the companion sections:
 
-- `spec/05-tools.md` — the four tools' full specification.
+- `spec/05-tools.md` — the five tools' full specification.
 - `spec/06-context-filter.md` — the context-event view transform.
 - `spec/09-configuration.md` — the configuration surface + coercion rules.
 - `spec/08-edge-cases.md` — edge cases (E7 compaction leak, E14 master switch, E15 markers).
