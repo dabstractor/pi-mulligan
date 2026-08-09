@@ -23,7 +23,8 @@ describe("DEFAULT_CONFIG", () => {
       nudges: {
         bloatReminder: true,
         perTurnDrift: true,
-        bloatThresholdBytes: 8192,
+        bloatThresholdBytes: 16384,
+        bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
         driftThresholdTokens: 3000,
       },
       audit: { estimateConfidence: "medium" },
@@ -72,7 +73,7 @@ describe("validateConfig", () => {
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, requireMutationWarning: false },
       shrink: { enabled: false },
-      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1 },
+      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 } },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
     });
@@ -89,11 +90,11 @@ describe("validateConfig", () => {
   });
 
   it("validates numbers: finite, >=0; thresholds >0; rejects strings/NaN/Infinity WITHOUT coercion", () => {
-    expect(validateConfig({ nudges: { bloatThresholdBytes: -1 } }).nudges.bloatThresholdBytes).toBe(8192);
-    expect(validateConfig({ nudges: { bloatThresholdBytes: 0 } }).nudges.bloatThresholdBytes).toBe(8192); // threshold must be >0
-    expect(validateConfig({ nudges: { bloatThresholdBytes: NaN } }).nudges.bloatThresholdBytes).toBe(8192);
-    expect(validateConfig({ nudges: { bloatThresholdBytes: Infinity } }).nudges.bloatThresholdBytes).toBe(8192);
-    expect(validateConfig({ nudges: { bloatThresholdBytes: "8192" } }).nudges.bloatThresholdBytes).toBe(8192); // no string coercion
+    expect(validateConfig({ nudges: { bloatThresholdBytes: -1 } }).nudges.bloatThresholdBytes).toBe(16384);
+    expect(validateConfig({ nudges: { bloatThresholdBytes: 0 } }).nudges.bloatThresholdBytes).toBe(16384); // threshold must be >0
+    expect(validateConfig({ nudges: { bloatThresholdBytes: NaN } }).nudges.bloatThresholdBytes).toBe(16384);
+    expect(validateConfig({ nudges: { bloatThresholdBytes: Infinity } }).nudges.bloatThresholdBytes).toBe(16384);
+    expect(validateConfig({ nudges: { bloatThresholdBytes: "8192" } }).nudges.bloatThresholdBytes).toBe(16384); // no string coercion
     expect(validateConfig({ rewind: { maxDepth: 0 } }).rewind.maxDepth).toBe(0); // >=0 allowed
     expect(validateConfig({ rewind: { maxDepth: -1 } }).rewind.maxDepth).toBe(5); // <0 → default
   });
@@ -180,7 +181,7 @@ describe("getConfig / setConfig cache", () => {
 
   it("setConfig validates/coerces through the cache (invalid → default)", () => {
     setConfig({ nudges: { bloatThresholdBytes: -5 } });
-    expect(getConfig().nudges.bloatThresholdBytes).toBe(8192);
+    expect(getConfig().nudges.bloatThresholdBytes).toBe(16384);
   });
 
   it("getConfig hands out independent copies — the cache cannot be poisoned by callers (GOTCHA #2b)", () => {

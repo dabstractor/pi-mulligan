@@ -59,8 +59,13 @@ export interface MulliganConfig {
     perTurnDrift: boolean;
     /** In-context byte size of a single tool result above which the bloat reminder fires.
      *  Below Pi's ~50 KB built-in cap to catch meaningful-but-not-catastrophic results.
-     *  Must be > 0. Default: 8192 (8 KB). */
+     *  Must be > 0. Default: 16384 (16 KB). Per-tool overrides in bloatThresholdBytesByTool
+     *  take precedence over this global value for the listed tools. */
     bloatThresholdBytes: number;
+    /** Optional per-tool override map. Keys are Pi tool names (e.g. "bash", "read"); values
+     *  are byte thresholds. A tool not listed falls back to bloatThresholdBytes. Default:
+     *  { bash: 32768, read: 20480 }. */
+    bloatThresholdBytesByTool?: Record<string, number>;
     /** Turn token-delta above which the per-turn drift nudge fires. Must be > 0.
      *  Default: 3000. */
     driftThresholdTokens: number;
@@ -101,7 +106,8 @@ export const DEFAULT_CONFIG: MulliganConfig = {
   nudges: {
     bloatReminder: true,
     perTurnDrift: true,
-    bloatThresholdBytes: 8192,
+    bloatThresholdBytes: 16384,
+    bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
     driftThresholdTokens: 3000,
   },
   audit: {
