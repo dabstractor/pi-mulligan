@@ -1,0 +1,13 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Audit tool's "above bloat threshold" flag is inconsistent with the per-tool bloat reminder introduced by P2
+ h2.3 Minor Issues (Nice to Fix)
+  h3.1 Issue 1: Broken/stale "F-shrink-preventive" bloatHit scenario in test/integration/scenarios.md
+  h3.2 Issue 2: spec/05-tools.md audit example and clause not updated for the per-tool bloat threshold (P2)
+  h3.3 Issue 3: Stale comments in test files still call 8192 / "8 KB" the default bloat threshold
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:17 list:3

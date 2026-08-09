@@ -1,0 +1,126 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Per-Tool Bloat Threshold Consistency Fix",
+      "status": "Planned",
+      "description": "Fix the integration gap where P2 propagated per-tool bloat threshold resolution to the bloat reminder (bloatReminderHandler in nudges.ts) but NOT to the mulligan_audit tool (audit.ts). The audit flags results as bloated using the global threshold (16384) even when the per-tool threshold (bash: 32768, read: 20480) would not consider them bloated. This violates PRD design principle #6 (honest bookkeeping). Also resolve the related spec/test-plan/comment staleness (BUG-002, BUG-003, BUG-004) left over from raising the default.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Audit Tool Per-Tool Resolution + Spec Alignment (BUG-001 + BUG-003)",
+          "status": "Planned",
+          "description": "Fix the core integration gap in src/tools/audit.ts so the mulligan_audit tool resolves the bloat threshold per message toolName via bloatThresholdFor (the same pure helper the bloat reminder uses), and update spec/05-tools.md to match the shipped per-tool behavior.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Per-tool bloat threshold resolution in the audit tool",
+              "status": "Planned",
+              "description": "Replace the single global threshold in auditExecute with per-row resolution using bloatThresholdFor. Update AuditRow to carry each row's resolved thresholdBytes. Update renderAuditReport to render each flagged row's KB from its own thresholdBytes. Update all existing audit tests that assume a single global threshold, and add per-tool discrimination tests.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Import bloatThresholdFor, add thresholdBytes to AuditRow, resolve per-row thresholds in auditExecute, and render per-row KB in renderAuditReport",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.2", "h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/system_context.md and bug_analysis.md. The pure helper bloatThresholdFor(toolName: string | undefined, config: MulliganConfig): number is ALREADY EXPORTED from src/nudges.ts and is used by bloatReminderHandler at nudges.ts:124. It resolves per-tool: if toolName is in config.nudges.bloatThresholdBytesByTool, use that entry; otherwise fall back to config.nudges.bloatThresholdBytes. A falsy toolName (undefined for non-toolResult messages) returns the global. The audit tool currently uses config.nudges.bloatThresholdBytes directly (line ~520) as a single threshold for ALL messages, and renderAuditReport takes thresholdBytes as a single arg. The fix makes the audit consistent with the nudge system.\n2. INPUT: config is obtained via getConfig() (already called at the top of auditExecute). Each message in the filtered array has a toolName field readable via the module-private readStr(msg, 'toolName') helper (already used by describeMessage at ~line 262). bloatThresholdFor takes (toolName, config) and returns a number.\n3. LOGIC:\n   (a) Add import: `import { bloatThresholdFor } from '../nudges.js';` at the top of src/tools/audit.ts.\n   (b) Add `thresholdBytes: number;` field to the AuditRow interface (currently has tokens, role, label, bloaty). Update the JSDoc comment on AuditRow.bloaty from 'exceed config.nudges.bloatThresholdBytes' to 'exceeds the resolved per-tool bloat threshold (bloatThresholdFor)'.\n   (c) In auditExecute, REMOVE the line `const threshold = config.nudges.bloatThresholdBytes;`. In the rows construction (currently `ranked.map(({tokens, msg}) => ({ tokens, role, label, bloaty: messageBytes(msg) > threshold }))`), resolve per-row: compute `const toolName = readStr(msg, 'toolName');` then `const rowThreshold = bloatThresholdFor(toolName, config);` and set `bloaty: messageBytes(msg) > rowThreshold` and `thresholdBytes: rowThreshold`.\n   (d) In renderAuditReport, REMOVE `thresholdBytes: number;` from the args type. Change the flag rendering from `const kb = Math.round(args.thresholdBytes / 1024); ... r.bloaty ? \\`... (${kb} KB)\\`` to use each row's own threshold: `r.bloaty ? \\`... (${Math.round(r.thresholdBytes / 1024)} KB)\\``. Remove the `const kb` line entirely.\n   (e) In the auditExecute call to renderAuditReport, REMOVE the `thresholdBytes: threshold,` line from the args object (threshold variable no longer exists).\n   (f) Update the JSDoc on messageBytes: change 'The bloat flag compares this to config.nudges.bloatThresholdBytes (default 16384 = 16 KB)' to 'The bloat flag compares this to the resolved per-tool threshold via bloatThresholdFor'.\n4. OUTPUT: auditExecute returns AuditRow[] where each row carries its own thresholdBytes. renderAuditReport renders each flagged row with its own KB value. A 20000-byte bash result is NOT flagged (20000 < 32768 → bloaty=false); a 40000-byte bash result IS flagged with '(32 KB)'; an 18000-byte read result is NOT flagged (18000 < 20480); a 21000-byte read result IS flagged with '(20 KB)'; a 17000-byte generic-tool result IS flagged with '(16 KB)'.\n5. MOCKING: No external services to mock. Tests use the existing makeCtx() fake and hand-rolled fixtures from test/tools/audit.test.ts. Use setConfig({}) for defaults.\n6. DOCS: [Mode A] Update JSDoc comments on AuditRow.bloaty, messageBytes, and renderAuditReport in src/tools/audit.ts to reflect per-tool resolution. These ride WITH the code change — do not create a separate docs subtask. The final Mode B doc-sync task (P1.M2.T3) sweeps README.md/overview docs.\n\nTDD IMPLICATIONS (per SOW §3 — tests ride with the work):\n   - UPDATE existing test 'flags a toolResult whose bytes exceed config.nudges.bloatThresholdBytes' in test/tools/audit.test.ts section (e): it uses toolResult('call-A', 'read', kbText(20)) → 20480 bytes = read threshold EXACTLY → 20480 > 20480 is false → bloaty=false AFTER the fix. This test MUST be updated. Change to use a size that exceeds the CORRECT per-tool threshold (e.g., kbText(21) for read → 21504 > 20480 → bloaty=true, displayed as '(20 KB)'; OR use a generic tool name with 17 KB to exceed the 16 KB global).\n   - UPDATE all renderAuditReport unit tests in test/tools/audit.test.ts: they currently pass `thresholdBytes: <num>` in the args. Remove that arg and add `thresholdBytes: <num>` to each AuditRow fixture. Update expected output strings accordingly (e.g., if a row has thresholdBytes: 32768, the flag shows '(32 KB)').\n   - ADD per-tool discrimination tests: (1) bash 20000B → bloaty=false, not flagged; (2) bash 40000B → bloaty=true, flagged as '(32 KB)'; (3) read 18000B → bloaty=false; (4) read 21000B → bloaty=true, flagged as '(20 KB)'; (5) a non-toolResult message (e.g., user) with 17 KB string content → uses global threshold → bloaty=true, flagged as '(16 KB)'.\n   - RUN `npx vitest run test/tools/audit.test.ts` to verify all pass, then `npx vitest run` for the full suite, then `npx tsc --noEmit` for type safety."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Align spec/05 §4 audit example and clause with per-tool bloat threshold (BUG-003)",
+              "status": "Planned",
+              "description": "Update spec/05-tools.md §4 to reflect the per-tool bloat threshold resolution now used by the audit tool, matching spec/07 and the shipped behavior after BUG-001 is fixed.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Update spec/05 §4 example line ~196 and clause line ~208 for per-tool resolution",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/bug_analysis.md BUG-003. spec/05-tools.md §4 (the audit tool spec) still shows the stale pre-P2 example and clause: line ~196 shows '⚠ above bloat threshold (8 KB)' (old default), and line ~208 clause 4 states 'any message above config.nudges.bloatThresholdBytes is flagged' (global-only definition). These must be updated to match spec/07 (which correctly documents per-tool bloatThresholdFor) and the shipped behavior after P1.M1.T1.S1 is complete. Defaults: global bloatThresholdBytes=16384 (16 KB); bloatThresholdBytesByTool={bash:32768 (32 KB), read:20480 (20 KB)}.\n2. INPUT: The correct per-tool behavior is defined by bloatThresholdFor (src/nudges.ts, spec/07 §1). The audit now resolves per-row: toolResult messages use their toolName's per-tool threshold; non-toolResult messages use the global. The KB display reflects the per-row resolved threshold.\n3. LOGIC:\n   (a) Line ~196: Update the audit report EXAMPLE markdown. Change the '⚠ above bloat threshold (8 KB)' row to reflect a per-tool threshold. Since the example row is 'read src/big.log', update to '⚠ above bloat threshold (20 KB)' (read's 20480 → 20 KB). Optionally add a second flagged bash row showing '(32 KB)' to illustrate per-tool differences.\n   (b) Line ~208 (clause 4): Change from 'any message above config.nudges.bloatThresholdBytes is flagged' to: 'any toolResult message above its resolved per-tool bloat threshold (via bloatThresholdFor — bash: 32 KB, read: 20 KB, others: the 16 KB global default) is flagged; each flagged row displays its own threshold'.\n4. OUTPUT: spec/05-tools.md §4 example and clause 4 are consistent with spec/07 and the shipped per-tool behavior.\n5. MOCKING: None — this is a documentation-only change to a spec markdown file.\n6. DOCS: This IS a documentation change. It updates the authoritative spec that a 'naive dev agent' would follow to one-shot the implementation. This subtask IS the doc update (Mode A — the spec file is the documentation surface being changed)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Test Plan Staleness + Comment Fixes + Doc Sync (BUG-002 + BUG-004 + Mode B)",
+          "status": "Planned",
+          "description": "Fix the remaining three minor findings: the broken F-shrink-preventive bloatHit scenario in scenarios.md (BUG-002), the stale '8 KB default' test comments (BUG-004), and perform the final changeset-level documentation sweep (Mode B).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Fix F-shrink-preventive scenario in scenarios.md (BUG-002)",
+              "status": "Planned",
+              "description": "Rewrite the F-shrink-preventive model-driven path in test/integration/scenarios.md to acknowledge that mulligan_smoke_big is skipped by the bloat reminder (GOTCHA #3) and that bloatHit:true requires a non-mulligan tool whose result exceeds its resolved per-tool threshold.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Rewrite the F-shrink-preventive model-driven path description in scenarios.md",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/bug_analysis.md BUG-002. test/integration/scenarios.md lines ~147-165 (the F-shrink-preventive scenario) has two defects: (a) line ~148 says 'the bloat reminder fires on a >8KB tool result' — stale (P2 raised global to 16384, bash to 32768, read to 20480); (b) lines ~160-164 claim the model-driven command 'Call mulligan_smoke_big and tell me what it returned' triggers the bloat reminder and records bloatHit:true — WRONG because bloatReminderHandler SKIPS any toolName starting with 'mulligan_' (src/nudges.ts GOTCHA #3, see the line `if (event.toolName.startsWith('mulligan_')) return;`). This contradicts smoke.ts itself (lines 14-17, 139-141, 205-211) which explicitly documents that mulligan_smoke_big is skipped and that bloatHit can only come from a real non-mulligan model tool call. The harness registers no non-mulligan tool capable of producing a >threshold result.\n2. INPUT: The correct bloat thresholds are: global 16384 (16 KB); bash 32768 (32 KB); read 20480 (20 KB). The mulligan_* skip behavior is at src/nudges.ts `if (event.toolName.startsWith('mulligan_')) return;`. smoke.ts documents the limitation at its comment block starting line 14 and in the F-shrink-preventive case at lines 205-211.\n3. LOGIC:\n   (a) Fix line ~148: Change 'the bloat reminder fires on a >8KB tool result' to 'the bloat reminder fires on a tool result exceeding its resolved per-tool bloat threshold (bash: 32 KB, read: 20 KB, others: 16 KB global default)'.\n   (b) Rewrite lines ~160-164 (the 'Run (model-driven — the authoritative bloatHit proof)' block): Acknowledge that mulligan_smoke_big is a mulligan_* tool → always skipped by bloatReminderHandler (GOTCHA #3), so it CANNOT trigger the bloat reminder or set bloatHit:true. State that bloatHit:true is only achievable via a real non-mulligan model tool call (e.g., reading a >20 KB file with the read tool, or a >32 KB bash output) whose result exceeds its resolved per-tool threshold. Either provide an alternative model-driven example command or reframe the path as 'not achievable in the smoke harness — see smoke.ts lines 14-17 / 205-211'. Ensure the rewritten text is consistent with smoke.ts's own documentation.\n4. OUTPUT: test/integration/scenarios.md F-shrink-preventive scenario accurately reflects the per-tool thresholds and the mulligan_* skip behavior, consistent with smoke.ts.\n5. MOCKING: None — documentation-only change to a markdown test-plan file.\n6. DOCS: This IS a documentation change. The test-plan scenarios.md is the documentation surface being corrected. Mode A."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Fix stale '8 KB default' test comments (BUG-004)",
+              "status": "Planned",
+              "description": "Update three test comment/title sites that incorrectly describe 8192 / '8 KB' as 'the default threshold' after P2 raised the global default to 16384 (16 KB). The test CODE is correct (passes 8192 as explicit args to pure helpers); only the COMMENTS are wrong.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Update stale '8 KB default' comments/titles in test/tokens.test.ts and test/notes.test.ts",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.3", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/bug_analysis.md BUG-004. After P2 raised the global default from 8192 to 16384, three test comment sites still reference 8192 / '8 KB' as 'the default'. The test CODE is correct (passes 8192 as an explicit argument to pure helpers like approxTokens and renderBloatReminder — this is valid). Only the COMMENTS/TITLES are factually wrong. Affected sites: (1) test/tokens.test.ts:334 — comment '// the default bloatThresholdBytes → ~2k tokens' next to approxTokens(8192); (2) test/notes.test.ts:411 — test title '8 KB result at the 8 KB default threshold'; (3) test/notes.test.ts:474 — test title 'representative 30 KB read at the 8 KB default threshold'. NOTE: PRD references 'test/notes.ts:474' but the actual file is test/notes.test.ts:474 (there is no test/notes.ts).\n2. INPUT: The pure helpers being tested (approxTokens, renderBloatReminder) take explicit numeric arguments. 8192 is a valid test input — it just is no longer 'the default'. The current global default is 16384 (16 KB).\n3. LOGIC:\n   (a) test/tokens.test.ts:334: Change comment from '// the default bloatThresholdBytes → ~2k tokens' to something like '// 8192 bytes (old default) → ~2k tokens' or '// explicit 8 KB → ~2k tokens' — drop the 'default' claim.\n   (b) test/notes.test.ts:411: Change test title from '8 KB result at the 8 KB default threshold' to '8 KB result at an 8 KB threshold' — drop 'default'.\n   (c) test/notes.test.ts:474: Change test title from 'representative 30 KB read at the 8 KB default threshold' to 'representative 30 KB read at an 8 KB threshold' — drop 'default'.\n   (d) DO NOT change any test assertions or code logic — only comments and test titles. The tests pass 8192 as an explicit arg, which is correct behavior.\n4. OUTPUT: All three sites no longer claim 8192/8 KB is the default threshold. Test suite still passes unchanged (no behavioral change).\n5. MOCKING: None.\n6. DOCS: This IS a documentation fix (test comments are documentation for future readers). Mode A. No code logic changes — run `npx vitest run test/tokens.test.ts test/notes.test.ts` to confirm no breakage."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Final Mode B documentation sweep. Verify README.md and any overview docs are consistent with the per-tool bloat threshold changes introduced by this changeset (BUG-001 fix + BUG-002/003/004 fixes). The README was synced during P2 but this task confirms no drift remains after the audit tool fix.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Sweep README.md and overview docs for per-tool bloat threshold consistency after all fixes",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M2.T1.S1", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h2.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_df93178e6631/bugfix/001_4ac005217ade/architecture/system_context.md. README.md was fully synced during P2: line 91 documents bloatThresholdBytes=16384 with per-tool override note; line 92 documents bloatThresholdBytesByTool={bash:32768, read:20480}; line 108 shows the settings.json example; line 204 describes the bloat reminder as per-tool. Line 171 describes the audit tool: 'flags results above the bloat threshold'. After BUG-001's fix, this is still accurate (the audit now resolves per-tool). This task VERIFIES no drift and makes any necessary touch-ups.\n2. INPUT: All prior subtasks are complete: P1.M1.T1.S1 (audit per-tool fix), P1.M1.T2.S1 (spec/05 update), P1.M2.T1.S1 (scenarios.md fix), P1.M2.T2.S1 (test comment fixes).\n3. LOGIC:\n   (a) Review README.md lines ~89-92, ~108, ~171, ~204 for accuracy against the shipped per-tool behavior.\n   (b) If README.md line 171 ('flags results above the bloat threshold') would benefit from a per-tool qualifier (e.g., 'flags results above the per-tool bloat threshold'), make that small edit. If it is already accurate, no change needed.\n   (c) Check any other overview docs or top-level capability lists that mention the bloat threshold or the audit tool.\n   (d) If no changes are needed, explicitly note 'verified — no drift' in the implementation summary.\n4. OUTPUT: README.md and overview docs are consistent with all changes in this changeset.\n5. MOCKING: None — documentation-only review.\n6. DOCS: This IS the Mode B changeset-level documentation sweep (per SOW §5). It runs LAST and depends on all implementing subtasks."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+# Bug Fix Requirements
+
+## Overview
+End-to-end validation of the completed P2 (Per-Tool Bloat Threshold) feature. Baseline: TypeScript compiles clean; the full suite passes (722 tests). The P2 deliverables themselves are complete and correct — config.ts adds bloatThresholdBytesByTool (interface, DEFAULT_CONFIG {bash:32768, read:20480}, raised global 8192→16384), coerceBloatThresholdByTool implements merge semantics with per-entry drop+warn and never throws, bloatThresholdFor is exported and pure, and it is correctly wired into bloatReminderHandler (verified live: the extension flagged my own ~21 KB read result at the 20 KB read threshold). README and smoke.ts are fully synced. The one substantive defect is an INTEGRATION GAP: P2 propagated per-tool resolution to the bloat reminder (src/nudges.ts:124) but NOT to the mulligan_audit tool (src/tools/audit.ts:520/529), so the audit now flags results as "above bloat threshold (16 KB)" that the nudge system does not consider bloated (proven by reproduction: 20 000-byte bash and 18 000-byte read results). This violates PRD design principle #6 (honest bookkeeping) and is untested. The remaining three findings are documentation/test-plan staleness left over from raising the default (a broken bloatHit scenario in scenarios.md, a stale spec/05 example+clause, and stale "8 KB default" test comments). Note: the working tree contains pre-existing UNCOMMITTED edits (comment-only 8192→16384 sweeps in audit.ts/nudges.ts plus unrelated shrink/transforms/markers WIP); these did not touch the audit behavior line, so BUG-001 is present in both the committed and working-tree states.
+
+
+## Critical Issues (Must Fix)
+Issues that prevent core functionality from working.
+
+None.
+
+
+## Major Issues (Should Fix)
+Issues that significantly impact user experience or functionality.
+
+### Issue 1: Audit tool's "above bloat threshold" flag is inconsistent with the per-tool bloat reminder introduced by P2
+**Severity**: Major
+**ID**: BUG-001
+**Location**: src/tools/audit.ts:520 (threshold assignment) and src/tools/audit.ts:529 (bloaty computation); supporting comment at src/tools/audit.ts:95 and :301
+
+**Description**:
+P2 made the bloated-result reminder (Nudge A, bloatReminderHandler) resolve its threshold PER TOOL via bloatThresholdFor (bash: 32768, read: 20480, others: 16384 global). However, the mulligan_audit tool — the SECOND consumer of the bloat threshold — was NOT updated and still flags messages as bloated using ONLY the global config.nudges.bloatThresholdBytes (16384), and renders every flagged row as "(16 KB)". This means the audit reports a result as "⚠ above bloat threshold (16 KB)" for results that the actual bloat detector would NOT fire on. For a 20 000-byte bash result the nudge never fires (20 000 < bash's 32 768), yet the audit flags it bloated and even suggests mulligan_shrink; for an 18 000-byte read result the nudge never fires (18 000 < read's 20 480), yet the audit flags it bloated. The displayed threshold (16 KB) is also wrong for those tools (real thresholds are 32 KB / 20 KB). This directly violates PRD design principle #6 ("Honest bookkeeping") and the PRD's stated intent (spec/07, README) that the bloat threshold is now per-tool; it can mislead the agent into shrinking a result that is not, by the system's own per-tool rule, bloated. Root cause: P2 propagated the per-tool resolution to bloatReminderHandler (src/nudges.ts:124) but not to the audit tool (src/tools/audit.ts:520/529), and spec/05-tools.md §4 line 208 ("any message above config.nudges.bloatThresholdBytes is flagged") + the audit's own per-tool behavior are untested (no audit test references bloatThresholdFor / bloatThresholdBytesByTool).
+
+**Steps to Reproduce**:
+1. Set default config (setConfig({})). 2. Construct a bash tool_result of 20 000 bytes. 3. Call bloatReminderHandler(event, ctx) → returns undefined (pass-through, NO reminder) because bloatThresholdFor('bash', config) === 32768 and 20000 < 32768. 4. In the SAME audit tool pass, the computation at src/tools/audit.ts:520 (`const threshold = config.nudges.bloatThresholdBytes;` → 16384) and :529 (`bloaty: messageBytes(msg) > threshold;` → 20000 > 16384 → true) flags that identical message as bloated and renders "⚠ above bloat threshold (16 KB)". Verified with a throwaway vitest reproduction (since removed) that printed: `bash 20000B — nudge fired? false ; audit bloaty? true (shows 16 KB)` and `read 18000B — nudge fired? false ; audit bloaty? true`. The fix is for the audit handler to resolve the threshold per message toolName via bloatThresholdFor (the toolName is already available: describeMessage reads msg.toolName at src/tools/audit.ts ~line 262) instead of a single global value.
+
+
+## Minor Issues (Nice to Fix)
+Small improvements or polish items.
+
+### Issue 1: Broken/stale "F-shrink-preventive" bloatHit scenario in test/integration/scenarios.md
+**Severity**: Minor
+**ID**: BUG-002
+**Location**: test/integration/scenarios.md:148 and :164
+
+**Description**:
+The F-shrink-preventive scenario describes the model-driven path as "the authoritative bloatHit proof": "Call mulligan_smoke_big and tell me what it returned." → "The >8KB result triggers the [mulligan] bloat reminder; the turn-metric records bloatHit:true." Two defects: (a) the ">8KB" figure is the OLD default (P2 raised the global to 16384 and added per-tool overrides bash 32768 / read 20480, so >8KB no longer triggers anything); (b) more seriously, bloatReminderHandler SKIPS any toolName starting with "mulligan_" (src/nudges.ts GOTCHA #3), and mulligan_smoke_big is exactly such a tool, so its result NEVER triggers the bloat reminder and NEVER sets bloatHit:true. Thus the "authoritative bloatHit proof" is unachievable via the documented path — a QA engineer following scenarios.md would expect bloatHit:true and never observe it. This directly contradicts test/integration/smoke.ts itself (lines 14-17, 139-141, 205-211), which explicitly documents that mulligan_smoke_big is skipped and that bloatHit can only come from a real non-mulligan model tool call. The harness registers no non-mulligan tool capable of producing a >threshold result, so bloatHit:true is currently unprovable in the smoke harness.
+
+**Steps to Reproduce**:
+Read test/integration/scenarios.md lines 147-165 (F-shrink-preventive). Compare with src/nudges.ts `if (event.toolName.startsWith("mulligan_")) return;` and smoke.ts lines 14-17/205-211. Run the documented model-driven command (`pi -e ./src/index.ts -e ./test/integration/smoke.ts -p "Call mulligan_smoke_big and tell me what it returned."`): the resulting turn-metric will have bloatHit:false (the result is skipped), contradicting the scenario's stated expectation.
+
+### Issue 2: spec/05-tools.md audit example and clause not updated for the per-tool bloat threshold (P2)
+**Severity**: Minor
+**ID**: BUG-003
+**Location**: spec/05-tools.md:196 (example) and spec/05-tools.md:208 (clause 4)
+
+**Description**:
+spec/05-tools.md §4 (the audit tool spec) still shows the audit example as "⚠ above bloat threshold (8 KB)" (old default) and clause 4 states "any message above config.nudges.bloatThresholdBytes is flagged" — defining the audit bloat flag as global-only. P2 updated spec/07 (the nudge) to per-tool but did not update spec/05, so the spec now (a) carries the stale 8 KB figure and (b) disagrees with the shipped per-tool behavior of the bloat reminder and with spec/07. Because the spec is the authoritative master document ("a naive dev agent can one-shot the implementation"), this stale example/clause is the likely reason the audit tool's per-tool inconsistency (BUG-001) was neither caught nor fixed. (Reported only — spec files are read-only for this agent.)
+
+**Steps to Reproduce**:
+Open spec/05-tools.md: the audit report example at line 196 reads `9,412  toolResult  read src/big.log  ⚠ above bloat threshold (8 KB)`; clause 4 at line 208 reads "any message above config.nudges.bloatThresholdBytes is flagged". Compare with spec/07-preventive-and-nudges.md §1 (per-tool bloatThresholdFor) and spec/09-configuration.md §2 (defaults 16384 / {bash:32768, read:20480}).
+
+### Issue 3: Stale comments in test files still call 8192 / "8 KB" the default bloat threshold
+**Severity**: Minor
+**ID**: BUG-004
+**Location**: test/tokens.test.ts:334; test/notes.test.ts:411; test/notes.ts:474
+
+**Description**:
+After P2 raised the global default from 8192 to 16384, several test comments were left describing 8192 / "8 KB" as "the default threshold". The test CODE is correct (it passes 8192 as an explicit argument to the pure helpers, which is valid), but the COMMENTS are now factually wrong and can mislead a future reader into thinking 8192 is still the default. Affected: test/tokens.test.ts:334 comment `// the default bloatThresholdBytes → ~2k tokens` next to approxTokens(8192); test/notes.test.ts:411 test title "8 KB result at the 8 KB default threshold"; test/notes.test.ts:474 test title "representative 30 KB read at the 8 KB default threshold".
+
+**Steps to Reproduce**:
+grep -n "default threshold\|the default bloatThresholdBytes" test/notes.test.ts test/tokens.test.ts → shows the three stale comment sites referencing 8 KB / 8192 as the default.
+
+## Testing Summary
+- Total bugs found: 4
+- Critical: 0
+- Major: 1
+- Minor: 3
+
+## Recommendations
+- Fix BUG-001: in src/tools/audit.ts, replace the single global `threshold` with a per-row resolution using bloatThresholdFor(readStr(msg,'toolName'), config) for toolResult messages (toolName is already extracted by describeMessage), and render each flagged row's KB from its own resolved threshold. Add an audit test asserting a 20 000-byte bash result is NOT flagged while a 40 000-byte bash result IS.
+- Resolve the BUG-001 root spec gap: update spec/05-tools.md §4 (example line 196 + clause line 208) to reflect per-tool resolution, matching spec/07.
+- Fix BUG-002: rewrite the F-shrink-preventive model-driven path — either register a NON-mulligan tool that returns a >threshold result, or reframe the scenario to acknowledge bloatHit:true is only achievable via a real model tool call (as smoke.ts already documents).
+- Fix BUG-004: update the three stale "8 KB default" comments/titles (or change them to pass 16384 as the explicit arg if the intent was to test the default).
+- Observation (not a hard bug): spec/09 §4 phrases the non-object case as "discard entirely (use global only)" but coerceBloatThresholdByTool (per the P2 task contract) returns the DEFAULT map ({bash:32768, read:20480}) for a non-object input. The implementation's invalid→default behavior is consistent with every other config field and is explicitly tested, but the spec wording should be reconciled to avoid future confusion.
