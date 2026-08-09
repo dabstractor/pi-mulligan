@@ -8,11 +8,12 @@ import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { makeCheckpointTool } from "./tools/checkpoint.js";
 import { auditTool } from "./tools/audit.js";
+import { makeCancelTool } from "./tools/cancel.js"; // 5th agent-callable tool (P3.M1.T3.S1)
 
 /**
  * Mulligan — Pi extension factory (spec/01 §1, spec/03 §4, spec/11 §8 Step 8).
  *
- * The single entry point (package.json `main` + `pi.extensions`). Wires all 4 agent-callable tools,
+ * The single entry point (package.json `main` + `pi.extensions`). Wires all 5 agent-callable tools,
  * the 3 event-driven handlers (context filter + 2 nudges), and the session lifecycle (runtime reset /
  * full cleanup). Zero-config: setConfig(undefined) → validated DEFAULT_CONFIG (enabled:true, log off).
  *
@@ -31,13 +32,14 @@ export default function (pi: ExtensionAPI): void {
   // 2. Point the logger at the configured destination (after the cache is populated). null = off (default).
   setLogFile(getConfig().log.file);
 
-  // 3. Register all 4 agent-callable tools. rewind/shrink/checkpoint are FACTORIES capturing `pi` via
-  //    closure (their execute() needs pi for appendXxxMarker(pi, …)/leaveNote(pi, …)/setCheckpoint(pi, …)
+  // 3. Register all 5 agent-callable tools. rewind/shrink/checkpoint/cancel are FACTORIES capturing `pi`
+  //    via closure (their execute() needs pi for appendXxxMarker(pi, …)/leaveNote(pi, …)/setCheckpoint(pi, …)
   //    but execute() does NOT receive pi). auditTool is a PLAIN const (audit needs no pi).
   pi.registerTool(makeRewindTool(pi));
   pi.registerTool(makeShrinkTool(pi));
   pi.registerTool(makeCheckpointTool(pi));
   pi.registerTool(auditTool);
+  pi.registerTool(makeCancelTool(pi)); // 5th tool — marker retraction (P3.M1.T3.S1 / E21)
 
   // 4. Arm the 3 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart

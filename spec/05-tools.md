@@ -1,6 +1,6 @@
 # 05 — Tools (the agent-callable API)
 
-> Exact contracts for the four tools Mulligan registers. Each section gives: purpose, the typebox parameter schema (copy-pasteable), the return shape, step-by-step behavior, validation rules, error handling, and a usage example. Implement verbatim — the LLM's reliable use depends on stable names, descriptions, and parameter shapes.
+> Exact contracts for the five tools Mulligan registers. Each section gives: purpose, the typebox parameter schema (copy-pasteable), the return shape, step-by-step behavior, validation rules, error handling, and a usage example. Implement verbatim — the LLM's reliable use depends on stable names, descriptions, and parameter shapes.
 
 **Shared tool conventions:**
 - Every tool's `execute(toolCallId, params, signal, onUpdate, ctx)` wraps its body in try/catch; on error it returns a text result describing the failure (never throws — a thrown tool error is noisy and can confuse the loop).
@@ -212,24 +212,93 @@ Suggestion: the `read src/big.log` result is the largest contributor. Consider m
 
 ---
 
-## 5. Tool registration summary (for `index.ts`)
+## 5. `mulligan_cancel`
+
+### Purpose (retraction — amends D6)
+Retract (cancel) a prior `mulligan_rewind` or `mulligan_shrink` marker so the transform **no longer applies going forward** (spec/08 E21; amends D6 "agent rewinds are permanent" — a mistaken marker is now retractable). The agent passes the `markerId` it received in `details.markerId` from the issuing `mulligan_rewind` / `mulligan_shrink` call. On the **next** `context` fire, `readMarkers` drops the retired marker, so the originally-hidden/shrunk content reappears verbatim in the filtered view (E21 acceptance (b)).
+
+**What retraction is NOT (forward-only):** cancelling suppresses the marker from the filtered view going forward only. It does **not** undo on-disk side effects (D1/E5 — file edits, bash commands, etc. PERSIST) and does **not** replay hidden content into the live turn. Cancelled markers stay on disk for the audit trail; only the drop from the filtered view takes effect next fire.
+
+### When the agent should use it
+When you issued a `mulligan_rewind` or `mulligan_shrink` against the **wrong target** and need to undo it. Without this tool, the mistaken transform would apply on every turn for the rest of the session (a `mulligan_rewind` of the issuing call does NOT retire a marker — markers are `custom` control entries outside the rewind's `hideEntryIds` span). Cancelling a non-existent or already-cancelled id is a safe no-op — call it freely if unsure.
+
+### Parameter schema (typebox)
+
+```ts
+import { Type } from "typebox";
+
+const CancelParams = Type.Object({
+  markerId: Type.String({ description:
+    "The marker id to cancel (the markerId value returned by mulligan_rewind or mulligan_shrink in details.markerId)." }),
+});
+```
+
+### Return shape
+```ts
+{ content: [{ type: "text", text: string }], details: { cancelled?: boolean; markerId?: string | null } }
+// text on success:
+//   "Mulligan: marker cancelled. The transform will no longer apply from the next turn on."
+//   details: { cancelled: true, markerId: <the new cancel marker's entry id, or null> }
+// text on no-op (non-existent markerId):
+//   "Mulligan: no active marker found with that id — nothing to cancel."
+//   details: { cancelled: false }
+// text on no-op (already cancelled):
+//   "Mulligan: that marker is already cancelled."
+//   details: { cancelled: false }
+// text on refusal (disabled / unexpected error):
+//   "Mulligan: refused — <reason>."   details: {}
+```
+
+### Behavior (step by step)
+1. **Config gate (E14):** if `config.enabled === false`, refuse with `"Mulligan is disabled"`. There is **no** `config.cancel` sub-knob — retraction is a safety/escape hatch, always available when Mulligan is enabled.
+2. **Read entries FRESH (C12):** `entries = ctx.sessionManager.getEntries()`, wrapped in try/catch → `[]` on throw (defense-in-depth; a transient blip yields a no-op, not a refusal).
+3. **Find the target entry (the markerId→uuid mapping):** scan `entries` for a custom entry whose `entry.id === params.markerId` AND `customType ∈ {"mulligan:rewind", "mulligan:shrink"}` (this guard excludes notes/turn-metric/cancel). Read the marker's uuid `data.id` via the defensive `readOwn` helper. A marker whose `data.id` is unreadable/non-string/empty is treated as not found (malformed marker → safe no-op).
+4. **Not-found no-op:** if no such entry → return the `"no active marker found"` no-op text + `details:{cancelled:false}`. `appendCancelMarker` is NOT called.
+5. **Already-cancelled check (idempotency):** re-scan ALL entries for `customType === "mulligan:cancel"` AND `data.targetId === <the marker's uuid>`. If found → return the `"already cancelled"` no-op text + `details:{cancelled:false}` (prevents duplicate cancel entries). `appendCancelMarker` is NOT called.
+6. **Persist:** `appendCancelMarker(pi, ctx, { targetId: <uuid> })` — the `targetId` is the marker's uuid `data.id` (**NOT** the entry id). The wrapper stamps `{schema, v, kind:"cancel", seq, ts}` and calls `pi.appendEntry("mulligan:cancel", entry)`; it never throws (returns `null` on failure). It returns the cancel marker's new entry id (or `null`).
+7. **Return:** confirmation text + `details:{cancelled:true, markerId}`. (`cancelled` stays `true` even when `markerId` is `null` — the intent was recorded best-effort.)
+
+The WHOLE body is wrapped in ONE try/catch → refusal `"unexpected error: <msg>"` on any exception (E13 — the tool never throws on the hot path).
+
+### The markerId→targetId indirection (critical)
+The agent passes `markerId` = the **ENTRY id** it received as `details.markerId` (= `getLeafId()`) from an earlier rewind/shrink. But `readMarkers` (the `context` filter) drops markers by their uuid `data.id` ∈ `cancelledIds`. So the cancel's `targetId` **MUST** be the marker's uuid `data.id`, never the entry id. The tool **maps**: `entry.id (markerId arg)` → `entry.data.id (uuid)` → that uuid is `targetId`. On the next context fire, `readMarkers` builds `cancelledIds` from every cancel's `data.targetId` and drops the retired rewind/shrink before the pipeline sees it (E21 acceptance (b)).
+
+### Refusal / no-op conditions
+- **Disabled** (`config.enabled === false`): refusal text + `details:{}`.
+- **Non-existent markerId** (no matching rewind/shrink entry, or a malformed marker): safe no-op, `details:{cancelled:false}` (not a refusal — call returns a reason, never throws).
+- **Already-cancelled** (a `mulligan:cancel` with `data.targetId === uuid` exists): safe no-op, `details:{cancelled:false}` (idempotent).
+
+### Example
+```jsonc
+// Agent issued a mis-targeted shrink, then retracts it:
+mulligan_cancel({ markerId: "entry-sh-1" })   // the markerId from the shrink's details.markerId
+// → "Mulligan: marker cancelled. The transform will no longer apply from the next turn on."
+//   details: { cancelled: true, markerId: "entry-cancel-2" }
+// Next context fire: the originally-shrunk message reappears verbatim in the filtered view.
+```
+
+---
+
+## 6. Tool registration summary (for `index.ts`)
 
 ```ts
 pi.registerTool({ name:"mulligan_rewind", label:"Mulligan Rewind", description: RWIND_DESC, parameters: RewindParams, execute: rewindExecute });
 pi.registerTool({ name:"mulligan_shrink", label:"Mulligan Shrink",  description: SHRINK_DESC, parameters: ShrinkParams, execute: shrinkExecute });
 pi.registerTool({ name:"mulligan_checkpoint", label:"Mulligan Checkpoint", description: CKPT_DESC, parameters: CheckpointParams, execute: checkpointExecute });
 pi.registerTool({ name:"mulligan_audit", label:"Mulligan Audit", description: AUDIT_DESC, parameters: AuditParams, execute: auditExecute });
+pi.registerTool({ name:"mulligan_cancel", label:"Mulligan Cancel", description: CANCEL_DESC, parameters: CancelParams, execute: cancelExecute });
 ```
 
-Each `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin.
+Each `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the four factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCheckpointTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. The summary block above shows the equivalent object-literal form for readability.
 
 ### Description strings (craft carefully — they drive LLM usage)
 - **Rewind:** `"Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The hidden content disappears from your view permanently (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message."`
 - **Shrink:** `"Replace a specific past tool result with a compact summary you provide, in your view, going forward. Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in context (just with your summary as its result)."`
 - **Checkpoint:** `"Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot."`
 - **Audit:** `"Show a token breakdown of the context you're currently carrying (what the model actually sees), flag the biggest contributors, and list active Mulligan markers. Use this to decide whether to rewind or shrink."`
+- **Cancel:** `"Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken transform would apply on every turn for the rest of the session. Pass the markerId you received in details when you issued the marker. The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op."`
 
-## 6. Cross-references
+## 7. Cross-references
 - Persisted shapes written by these tools → `@04-data-model.md`
 - How the filter consumes the markers → `@06-context-filter.md`
 - Edge cases & refusal conditions → `@08-edge-cases.md`
