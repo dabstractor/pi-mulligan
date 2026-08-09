@@ -243,7 +243,7 @@ Wait — that removed both the grep AND the read, and the rewinds' own calls rem
 
 Idempotency: re-firing the filter on the same session reproduces the same result (markers resolve against the same session each time until the session changes). No double-removal because removed messages are absent from subsequent passes within the same fire.
 
-**Within a turn, the session is NOT static across fires.** A tool call appends entries between one `context` fire and the next, so a rewind marker that stores a *relative* spec ("last tool-call group" / "last turn") and is re-resolved against the live message list every fire is unstable: the moment the agent resumes work after a rewind, the relative spec re-targets onto the NEW work, un-hiding the originally-hidden mistake (BUG-001) and/or hiding the agent's own redo on every fire (BUG-002). For this reason, **new markers pin stable entry IDs at creation time** (`hideEntryIds`, captured by `captureHideEntryIds` — see §3/§4/§6 and `@04-data-model.md` §3) and `filterPipeline` resolves them by *identity* every fire via `resolvePinnedHide` (§12). The hidden set is therefore invariant across session growth: the originally-hidden mistake stays hidden every fire; the agent's new work (new entries, new IDs not in the pinned set) stays visible. The relative resolvers below remain ONLY as a backward-compat fallback for old markers (or capture failures) that lack `hideEntryIds`. (Idempotency of the pure pipeline on identical input still holds; the instability was always about re-resolution against a *growing* input, which pinning eliminates.)
+**Within a turn, the session is NOT static across fires.** A tool call appends entries between one `context` fire and the next, so a rewind marker that stores a *relative* spec ("last tool-call group" / "last turn") and is re-resolved against the live message list every fire is unstable: the moment the agent resumes work after a rewind, the relative spec re-targets onto the NEW work, un-hiding the originally-hidden mistake (BUG-001) and/or hiding the agent's own redo on every fire (BUG-002). For this reason, **new markers pin stable entry IDs at creation time** (`hideEntryIds`, captured by `captureHideEntryIds` — see §3/§4/§6 and `@04-data-model.md` §3) and `filterPipeline` resolves them by *identity* every fire via `resolvePinnedHide` (§12). The hidden set is therefore invariant across session growth: the originally-hidden mistake stays hidden every fire; the agent's new work (new entries, new IDs not in the pinned set) stays visible. The relative resolvers below remain ONLY as a backward-compat fallback for old markers (or capture failures) that lack `hideEntryIds`. That backward-compat fallback is further **gated** by `turnHasAdvanced` so it can never re-target the agent's resumed work (see the pseudocode note in §12 and `FIX_TURN_REPLAY_LOOP.md`; tested in `@10-testing.md` §1.9). (Idempotency of the pure pipeline on identical input still holds; the instability was always about re-resolution against a *growing* input, which pinning eliminates.)
 
 ---
 
@@ -263,18 +263,26 @@ function filterPipeline(messages: AgentMessage[], markers, config, branchEntries
     const pinned = Array.isArray(rw.hideEntryIds) ? rw.hideEntryIds : [];
     if (pinned.length > 0) {
       remove = resolvePinnedHide(m, branchEntries, pinned);
-    } else if (rw.granularity === "last_tool_call_group") {
-      // LEGACY FALLBACK (old markers / capture failures): relative re-resolution. Re-partition FRESH each rewind
-      // (the real code partitions inside the loop, not once before it — a pre-loop partition indexes a stale array
-      // after the first rewind reduces m).
-      const units = partitionIntoUnits(m);
-      const u = resolveLastToolCallGroup(units, m, rw.excludeToolCallId);
-      remove = u ? u.indices : [];
-    } else if (rw.granularity === "last_turn") {
-      remove = resolveLastTurn(m, rw.options, rw.excludeToolCallId).remove;
-    } else { // checkpoint
-      const res = resolveCheckpoint(m, branchEntries, rw.checkpoint, rw.excludeToolCallId);
-      remove = res ? res.remove : [];
+    } else {
+      // LEGACY FALLBACK (old markers / capture failures): relative re-resolution. GATED to the creating/resume fire
+      // by turnHasAdvanced(m, rw.excludeToolCallId): once any non-note work exists past the rewind's own toolGroup,
+      // the relative resolver MUST no-op (remove=[]) rather than re-target the agent's new work every fire and
+      // replay the turn (FIX_TURN_REPLAY_LOOP.md). Production markers carry hideEntryIds → take the PINNED branch
+      // above, so this guard only matters for old/k=0/capture-failed markers. (If the rewind's own group can't be
+      // located, e.g. an old marker lacking excludeToolCallId, turnHasAdvanced returns false/allow so it doesn't
+      // over-suppress — production never reaches here.)
+      if (turnHasAdvanced(m, rw.excludeToolCallId)) {
+        remove = [];
+      } else if (rw.granularity === "last_tool_call_group") {
+        // Re-partition FRESH each rewind (a pre-loop partition indexes a stale array after the first rewind reduces m).
+        const u = resolveLastToolCallGroup(partitionIntoUnits(m), m, rw.excludeToolCallId);
+        remove = u ? u.indices : [];
+      } else if (rw.granularity === "last_turn") {
+        remove = resolveLastTurn(m, rw.options, rw.excludeToolCallId).remove;
+      } else { // checkpoint
+        const res = resolveCheckpoint(m, branchEntries, rw.checkpoint, rw.excludeToolCallId);
+        remove = res ? res.remove : [];
+      }
     }
     if (!protectedOk(m, remove, config)) { log("warn","rewind.protected",...); continue; }
     m = removeIndices(m, remove);
@@ -288,6 +296,10 @@ function filterPipeline(messages: AgentMessage[], markers, config, branchEntries
   return m;
 }
 ```
+
+**Legacy-resolution gate (`turnHasAdvanced`).** `turnHasAdvanced(messages, excludeToolCallId)` locates the rewind's own toolGroup (the assistant message carrying `excludeToolCallId`) and returns true iff any **non-`mulligan:*`-note** message exists past that group. On the creating/resume fire (nothing but notes follows the rewind's own group) it returns false → the relative resolver runs once. The instant the agent appends real work, it returns true → the relative resolver no-ops forever after, so it can never re-target the resumed turn and replay it (`FIX_TURN_REPLAY_LOOP.md`).
+
+**Invariant log + `diag` sink.** `filterPipeline` accepts an optional 5th argument `diag: (d: RewindDiag) => void` (pure, opt-in; the unit suite omits it). The `context` handler passes a sink that logs `filter.invariant` per fire, per rewind, with `{ seq, mode, remove, resolvedLen }`, and **WARNs when any rewind's `max(remove) >= resolvedLen-3`** — the replay signature (a rewind hiding the freshest messages). This makes a live recurrence diagnosable from logs alone: it distinguishes the empty-`hideEntryIds` re-target vector (fixed by `turnHasAdvanced`) from a pinned/compaction misalignment (see `@08-edge-cases.md` E24).
 
 `injectNudge` and `shouldNudge` are specified in `@07-preventive-and-nudges.md`.
 

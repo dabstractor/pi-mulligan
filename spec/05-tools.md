@@ -59,7 +59,7 @@ const RewindParams = Type.Object({
 //   "Mulligan: rewound <granularity>. <K> messages will be hidden from your view
 //    starting next turn. Note left. <mutation warning if applicable>."
 // text on validation/safety failure:
-//   "Mulligan: refused — <reason>. (e.g. would cross a protected message; max depth reached; checkpoint not found)"
+//   "Mulligan: refused — <reason>. (e.g. would cross a protected message; max depth reached; checkpoint not found; per-prompt retry budget reached; context at abort fraction)"
 ```
 
 ### Behavior (step by step)
@@ -69,6 +69,8 @@ const RewindParams = Type.Object({
    - `last_tool_call_group` / `last_turn`: always valid (the filter resolves them; if there is nothing to rewind, the filter no-ops and the tool still reports success but with K=0 — see step 7).
    - `checkpoint`: the named checkpoint MUST exist on the current branch (scan `getEntries()` for a label `mulligan:checkpoint:<name>`). Else refuse.
 4. **Depth guard:** count active `mulligan:rewind` markers on the branch; if `>= config.rewind.maxDepth`, refuse with a message suggesting `mulligan_shrink` or just continuing. (Prevents runaway marker accumulation.)
+   - **Per-prompt retry budget (REQUIRED; spec/08 E22):** additionally count rewinds that re-land at the **same latest user message** — every `last_turn`/`to_previous_prompt` rewind issued since that prompt and not yet advanced past it (a `last_tool_call_group`/`checkpoint` rewind whose resolved target is at/after that user message counts too). If that count is `>= config.rewind.maxRetriesPerPrompt` (default **5**), refuse *before persisting*: `"Mulligan: refused — hit the per-prompt retry budget (<N>/<max> rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again."` This is the hard backstop against same-prompt retry loops: a self-authored note can otherwise re-instruct the resumed self to repeat the exact action that triggered the rewind, so the note's `next` field alone cannot be trusted to break the loop. Distinct from the total-depth cap — it specifically bounds revisiting one prompt. Advancing to a new user prompt resets the budget. A **zero-hide rewind** (`nothing matched to hide`) still counts toward this budget — it is the canonical loop vector.
+   - **Out-of-band context-fraction stop (REQUIRED; spec/08 E22):** independent of the marker counts above, before persisting compute the filtered-context total (the same estimate `mulligan_audit` produces, §4) and the model's context window. If it is `>= config.rewind.abortContextFraction` (default **0.9**) of the window, refuse with `"Mulligan: refused — context is at <P>% of the window; rewinding will not help. Run mulligan_audit and shrink the largest result."` This catches the **zero-marker loop vector** — a spin that persists no rewind yet re-bloats each turn (e.g. re-reading the same large files because a bloat nudge keeps re-firing) — which the marker-counting budget cannot see. All three guards (`maxDepth`, `maxRetriesPerPrompt`, `abortContextFraction`) apply independently.
 5. **Compose ledger + note:**
    - Resolve the *target span preview* read-only to extract the file ledger. (The tool MAY do a read-only resolution using the same pure helpers the filter uses, operating on a snapshot from `ctx.sessionManager.buildContextEntries()` converted to messages. This is the one place a tool reads entries — but it does not transform the live context; it only extracts the ledger.) If resolution is ambiguous (e.g. before compaction settles), extract over the available span best-effort; the ledger is advisory.
    - `renderNote(note, ledger, granularity)` → the note string.
@@ -166,6 +168,8 @@ const CheckpointParams = Type.Object({
 2. `const leafId = ctx.sessionManager.getLeafId();`
 3. `pi.setLabel(leafId, \`mulligan:checkpoint:${name}\`);` (overwrites a prior checkpoint of the same name — labels are unique-per-target; setting the same label on a new target moves it. Acceptable.)
 4. Return text with the entry id.
+
+**Design note — exposed to the wrong actor (spec/08 E23):** a checkpoint only pays off if set *before* a mistake, which requires anticipating it. Agents anticipate mistakes poorly (they recognize them only in hindsight), so spontaneous checkpoint adoption will be near-zero; the tool effectively needs the *user's* foresight but is exposed only to the agent. v1 therefore relies on the per-prompt retry budget (E22) as the real backstop and does **not** depend on checkpoints for correctness. A future version should either surface checkpoint to the user directly, or fold its use into the nudge channel (suggest a checkpoint at risky moments, the way the bloat reminder already nudges shrink/rewind).
 
 ---
 

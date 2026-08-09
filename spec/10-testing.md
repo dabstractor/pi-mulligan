@@ -51,6 +51,17 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 - Two rewinds compose to the example in `@06-context-filter.md` §11 (assert exact resulting index set).
 - Rewind-then-shrink-on-removed-target → shrink no-ops.
 - Protected message → rewind skipped + warn.
+- **Legacy-gate regression (`turnHasAdvanced`; `test/bug-replay-repro.test.ts`):** a marker with **no** `hideEntryIds` resolves on the creating/resume fire but **no-ops once the turn has advanced** past the rewind's own toolGroup — assert a legacy `last_tool_call_group`/`last_turn` marker hides nothing on the continuation fire after new work is appended (the turn-replay bug, `FIX_TURN_REPLAY_LOOP.md`). A **pinned** marker (with `hideEntryIds`) is unaffected and keeps hiding its span across continuation fires; assert it does NOT replay under compaction either (pinned → `[]`, a leak).
+- **`diag` sink:** passing an optional 5th `diag` argument to `filterPipeline` collects `{seq, mode, remove, resolvedLen}` per rewind; assert it WARNs when any rewind's `max(remove) >= resolvedLen-3` (the replay signature). The full suite stays green when `diag` is omitted (opt-in, pure — no Pi).
+
+### 1.10 Retry-cap & context-fraction guards (E22)
+- `maxRetriesPerPrompt: 3`, 3 consecutive `last_turn` rewinds re-landing at the same prompt → the 4th is refused with the budget reason and persists nothing.
+- A zero-hide rewind (`nothing matched to hide`) still increments the per-prompt counter.
+- A `last_tool_call_group`/`checkpoint` rewind whose resolved target is at/after the latest user message counts toward the budget.
+- A new user message resets the counter; the next rewind succeeds.
+- `mulligan_shrink`/`mulligan_audit`/`mulligan_checkpoint`/`mulligan_cancel` remain callable after the budget is hit.
+- A rewind requested while filtered context ≥ `abortContextFraction` of the window is refused even if the budget remains.
+- All refusals return a reason and never throw (E13), and never block a normal text reply.
 
 ---
 
@@ -71,6 +82,8 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 | **F-checkpoint** | `mulligan_checkpoint("x")`, then `mulligan_rewind(granularity:"checkpoint", checkpoint:"x")` | label entry exists; rewind hides back to the labeled point (assert filtered message count drops to prefix) |
 | **F-failopen** | force an exception inside the filter (test hook) | handler returns pass-through; no turn break; error logged |
 | **F-reload** | create a rewind, then re-open the session (`--session-id`) and run one more turn | filter still hides the canary (marker survived reload) |
+| **F-retrycap** | `maxRetriesPerPrompt: 2`; drive repeated `last_turn` rewinds at the same prompt | the 3rd rewind is refused with the budget text and persists nothing; a fresh user prompt restores the budget |
+| **F-abortfraction** | force filtered context ≥ `abortContextFraction`, then request a rewind | rewind refused with the context-fraction text even though budget remains; shrink/audit still callable |
 
 ### 2.2 Driving reliability
 - Use a deterministic, instruction-following model if available; otherwise phrase prompts to force the tool call (the spike used `glm-5.2` successfully with explicit instructions). Provide a fallback "deterministic command" path (`/mulligan_smoke <scenario>`) that invokes the tools/handlers directly for scenarios that don't need model judgment (F-shrink-persist, F-protected, F-maxdepth, F-checkpoint, F-failopen, F-reload).

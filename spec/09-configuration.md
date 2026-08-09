@@ -21,6 +21,8 @@
       "enabled": true,
       "protectedRoles": ["first:user", "latest:user"],  // selectors never rewound past
       "maxDepth": 5,                  // max simultaneous active mulligan:rewind markers
+      "maxRetriesPerPrompt": 5,       // max consecutive rewinds re-landing at the same user prompt before refusal (E22)
+      "abortContextFraction": 0.9,    // refuse any rewind once filtered context reaches this fraction of the window (E22 zero-marker guard)
       "requireMutationWarning": true  // append side-effect warning when rewinding mutating spans
     },
 
@@ -63,6 +65,8 @@
 | `rewind.enabled` | `true` | Core feature. |
 | `rewind.protectedRoles` | `["first:user","latest:user"]` | Prevent catastrophic amnesia of the original task or the current ask. v1 supports these two selectors. |
 | `rewind.maxDepth` | `5` | Generous enough for legitimate retry cascades; tight enough to surface a stuck agent (the refusal text tells the agent/human something is wrong). Markers are permanent, so the cap bounds accumulation. |
+| `rewind.maxRetriesPerPrompt` | `5` | Caps *consecutive* rewinds that re-land at the same latest user prompt — the runaway-loop bound (`@08-edge-cases.md` E22). Distinct from `maxDepth` (cumulative markers): the loop can persist while re-bloating between rewinds, so depth alone can't stop it. 5 matches `maxDepth`'s precedent and is enough for a legitimately flaky turn while still arresting a true loop. |
+| `rewind.abortContextFraction` | `0.9` | Wall-clock backstop: refuse any rewind once the filtered-context estimate reaches this fraction of the model's window (`@08` E22). Catches the **zero-marker loop vector** (pure intra-turn re-reading driven by a re-firing bloat nudge) that the marker-counting budget cannot see. 0.9 leaves headroom below the provider's "Prompt too long" rejection. |
 | `rewind.requireMutationWarning` | `true` | Side-effect safety: the agent must be told hidden writes persist. Cheap, high value. |
 | `shrink.enabled` | `true` | Core feature. |
 | `shrink.maxActive` | `32` | Bounds long-session filter cost and marker accumulation; the oldest shrink is retired when exceeded. Mirrors `rewind.maxDepth`. |
@@ -85,6 +89,8 @@
 - `bloatThresholdBytesByTool`: if present, must be an object mapping tool-name strings to finite numbers `> 0`. Non-object → discard entirely (use global only). Any non-numeric or `<= 0` value in the map is dropped with a warn (the rest of the map is kept). Unknown tool names are permitted (forward-compat — the map is only consulted when a matching `event.toolName` arrives).
 - `estimateConfidence`: must be one of `"low"|"medium"|"high"`; else default.
 - `log.file`: if set, must be a string; opening is deferred to first write (and wrapped — a bad path must not crash the extension).
+- `rewind.maxRetriesPerPrompt`: integer ≥ 1; non-integer or `<1` → default.
+- `rewind.abortContextFraction`: number in (0,1]; out of range or non-number → default.
 - On any per-field validation failure: log a warn naming the field and the value, use the default, continue. **Never throw.**
 
 ## 5. Environment overrides (optional, v1.1 — not required for v1)
@@ -92,4 +98,4 @@
 Reserved for future: `MULLIGAN_DISABLED=1` (force-disable), `MULLIGAN_LOG=/path` (force log). Not required for v1; documented as future.
 
 ## 6. Cross-references
-- Where knobs are enforced → `@05-tools.md` (enabled flags), `@06-context-filter.md` (protect, maxDepth), `@07-preventive-and-nudges.md` (thresholds).
+- Where knobs are enforced → `@05-tools.md` (enabled flags, maxRetriesPerPrompt, abortContextFraction), `@06-context-filter.md` (protect, maxDepth), `@07-preventive-and-nudges.md` (thresholds).
