@@ -1,0 +1,21 @@
+h1.0 pi-mulligan — Specification
+ h2.0 0. How to read this document
+ h2.1 1. Executive summary
+ h2.2 2. Problem statement (PRD)
+  h3.0 2.1 The pain
+  h3.1 2.2 Why Pi's existing tools don't solve this
+  h3.2 2.3 What we build
+  h3.3 2.4 Target users
+  h3.4 2.5 Success criteria
+  h3.5 2.6 Non-goals (explicitly out of scope)
+ h2.3 3. Design principles
+ h2.4 4. High-level architecture
+ h2.5 5. The two operations (plain-language summary)
+ h2.6 6. The two nudges (plain-language summary)
+ h2.7 7. Configuration surface (summary)
+ h2.8 8. Verification strategy (summary)
+ h2.9 9. Decision log (condensed)
+ h2.10 10. Glossary (summary)
+ h2.11 Index
+---
+code:1 para:22 list:12 table:1 quote:4
