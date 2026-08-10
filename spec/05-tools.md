@@ -13,7 +13,7 @@
 ## 1. `mulligan_rewind`
 
 ### Purpose
-The "mulligan." Shed recent context the agent produced by mistake (a bloated tool interaction, or a whole wrong-direction turn) and leave itself a structured note so the resumed attempt is better-informed. The hidden content disappears from the model's view from the next turn on (permanently) but remains on disk and visible in `/tree`.
+The "mulligan." Shed recent context the agent produced by mistake (a bloated tool interaction, or a whole wrong-direction turn) and leave itself a structured note so the resumed attempt is better-informed. The hidden content disappears from the model's view from the next turn on (permanently) but remains on disk and visible in `/tree`. **The structured self-authored note is Mulligan's flagship UX** — it is what turns a hide into a *better-informed retry*: the resumed model reads `what_happened`/`avoid`/`true_current_state`/`next` and re-plans, rather than blindly repeating the discarded work.
 
 ### When the agent should use it
 After a tool interaction whose output was far larger than useful, or after realizing a recent turn pursued a wrong approach. The cost of a rewind (a short note + tiny overhead) is far smaller than carrying the bloat for the rest of the task. **Do not** rewind trivial spans — if nothing material was wasted, keep going.
@@ -77,7 +77,7 @@ const RewindParams = Type.Object({
 6. **Persist:**
    - `pi.appendEntry("mulligan:rewind", { schema, v:1, kind:"rewind", id, granularity, options:{ to_previous_prompt, protect }, excludeToolCallId: toolCallId, seq, note, ledger, ts })`.
    - Immediately capture the marker's entry id: `const markerEntryId = ctx.sessionManager.getLeafId()`.
-   - `pi.sendMessage({ customType:"mulligan:note", content: renderedNote, display:true, details:{ schema:"pi-mulligan", v:1, kind:"note", rewindId: id } })`.
+   - `pi.sendMessage({ customType:"mulligan:note", content: renderedNote, display:true, details:{ schema:"pi-mulligan", v:1, kind:"note", rewindId: id } })`. **(`display:true` is deliberate — it surfaces the note to the operator as well, so the human can see exactly what the model told its resumed self. This is the rewind counterpart of shrink's replacement echo: every self-directed payload is operator-visible.)**
    - Increment the in-memory `seq`.
 7. **Mutation warning (if `config.rewind.requireMutationWarning`):** if the ledger's `modifiedFiles` or `bashSideEffects` is non-empty, the success text appends: `"⚠ The hidden span modified files/ran side-effecting commands (see note). Those effects PERSIST on disk; do not blindly redo them."`
 8. Return success text (with K = estimated messages to be hidden, computed from the preview resolution; 0 is reported honestly as "nothing matched to hide").
@@ -130,7 +130,12 @@ const ShrinkParams = Type.Object({
 
 ### Return shape
 ```ts
-{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched message will show the replacement from the next turn on. (Matched now: yes/no)" }] }
+{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched: yes/no." }] }
+// The replacement is NOT echoed in the result. Echoing it would place a second
+// copy in the model's context — defeating the tool's entire purpose. The operator
+// sees the extracted summary via ctx.ui.notify (behavior step 5) at ZERO context
+// cost; the model sees only this terse line, then the replacement applied to the
+// target message on the next turn.
 ```
 
 ### Behavior
@@ -138,7 +143,13 @@ const ShrinkParams = Type.Object({
 2. Validate `replacement` non-empty.
 3. **Match now (best-effort):** resolve `target` against the current snapshot to (a) give immediate feedback ("matched: yes/no") and (b) reject obviously-invalid targets (e.g. `by_tool_call_id` that does not exist anywhere) — though note a "no match now" is not a hard refusal, because the content might appear before a compaction settles; in that case accept and let the filter keep trying. Use judgement: refuse only if the target is structurally impossible (e.g. unknown id format), not merely currently-unmatched.
 4. `pi.appendEntry("mulligan:shrink", { schema, v:1, kind:"shrink", id, target, replacement, reason, seq, ts })`.
-5. Return feedback text.
+5. **Notify the operator at zero context cost (REQUIRED):** after persisting, surface the extracted summary to the *human* via `ctx.ui` — a pure UI side-channel that is **never** added to the model's context:
+```ts
+if (ctx.hasUI) ctx.ui.notify(
+  `Shrunk <target desc> — replacement:\n<<<\n${cap(replacement, config.shrink.notifyMaxChars)}\n>>>`,
+  "info");
+```
+Guard with `ctx.hasUI` (no-op in print/JSON mode — there is no user to show). The tool RESULT (returned to the model) stays terse — the model does not need its own summary echoed back. `config.shrink.notifyMaxChars` (default **2048**) caps the toast for *UI ergonomics only* (not context); over-cap, append `…(<N> chars total)`. **Why not echo in the result / `sendMessage`:** both enter the model's context. `ctx.ui.notify` is the only user-facing channel that costs zero tokens — the whole point of the tool is to reduce context, so the summary must reach the human without re-entering the model's view.
 
 The filter applies shrinks **after** rewinds and substitutes content in place, preserving `role:"toolResult"`, `toolCallId`, `toolName`, `isError` so the tool pairing invariant holds (C-pairing). Only the `content` array is replaced with `[{type:"text", text: replacement}]`.
 
@@ -168,6 +179,7 @@ const CheckpointParams = Type.Object({
 2. `const leafId = ctx.sessionManager.getLeafId();`
 3. `pi.setLabel(leafId, \`mulligan:checkpoint:${name}\`);` (overwrites a prior checkpoint of the same name — labels are unique-per-target; setting the same label on a new target moves it. Acceptable.)
 4. Return text with the entry id.
+5. **Auto-expiry on consumption (REQUIRED):** a checkpoint exists to be rewound *to*. Once a `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` successfully targets it, the checkpoint is **consumed** and MUST be retired — its label cleared (or suppressed via a `mulligan:checkpoint-cancel` entry) so it no longer appears active in `mulligan_audit`. Rationale (live use): a used checkpoint has no further purpose, and unconsumed throwaway checkpoints otherwise linger in the active-marker list indefinitely. Re-creating a checkpoint of the same name after consumption is allowed (sets a fresh label). A checkpoint that is never consumed persists, as today.
 
 **Design note — exposed to the wrong actor (spec/08 E23):** a checkpoint only pays off if set *before* a mistake, which requires anticipating it. Agents anticipate mistakes poorly (they recognize them only in hindsight), so spontaneous checkpoint adoption will be near-zero; the tool effectively needs the *user's* foresight but is exposed only to the agent. v1 therefore relies on the per-prompt retry budget (E22) as the real backstop and does **not** depend on checkpoints for correctness. A future version should either surface checkpoint to the user directly, or fold its use into the nudge channel (suggest a checkpoint at risky moments, the way the bloat reminder already nudges shrink/rewind).
 
@@ -219,7 +231,9 @@ Suggestion: the `read src/big.log` result is the largest contributor. Consider m
 ## 5. `mulligan_cancel`
 
 ### Purpose (retraction — amends D6)
-Retract (cancel) a prior `mulligan_rewind` or `mulligan_shrink` marker so the transform **no longer applies going forward** (spec/08 E21; amends D6 "agent rewinds are permanent" — a mistaken marker is now retractable). The agent passes the `markerId` it received in `details.markerId` from the issuing `mulligan_rewind` / `mulligan_shrink` call. On the **next** `context` fire, `readMarkers` drops the retired marker, so the originally-hidden/shrunk content reappears verbatim in the filtered view (E21 acceptance (b)).
+Retract (cancel) a prior `mulligan_rewind` or `mulligan_shrink` marker so the transform **no longer applies going forward** (spec/08 E21; amends D6 "agent rewinds are permanent" — a mistaken marker is now retractable). The agent identifies the marker to retire **by target** — the same hint shape `mulligan_shrink` uses (`by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`), resolved live each turn. On the **next** `context` fire, `readMarkers` drops the retired marker, so the originally-hidden/shrunk content reappears verbatim in the filtered view (E21 acceptance (b)).
+
+**Why target-based, not id-based:** the toolkit's own operations (`shrink`/`rewind`) can hide the very message that carried an opaque `markerId`, so an id captured at issue-time is fragile *by construction* in this system. A content/role hint re-resolves live each turn — the same compaction-robustness `mulligan_shrink`'s target already enjoys. An explicit `markerId` is accepted as an optional fallback for hosts that surface one.
 
 **What retraction is NOT (forward-only):** cancelling suppresses the marker from the filtered view going forward only. It does **not** undo on-disk side effects (D1/E5 — file edits, bash commands, etc. PERSIST) and does **not** replay hidden content into the live turn. Cancelled markers stay on disk for the audit trail; only the drop from the filtered view takes effect next fire.
 
@@ -232,9 +246,15 @@ When you issued a `mulligan_rewind` or `mulligan_shrink` against the **wrong tar
 import { Type } from "typebox";
 
 const CancelParams = Type.Object({
-  markerId: Type.String({ description:
-    "The marker id to cancel (the markerId value returned by mulligan_rewind or mulligan_shrink in details.markerId)." }),
-});
+  target: Type.Union([
+    Type.Object({ by_tool_call_id: Type.String({ description: "The toolCallId of a message the marker affected." }) }),
+    Type.Object({ by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
+                  occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]) }),
+    Type.Object({ by_content_includes: Type.String({ description: "Match a marker whose affected message(s) include this substring." }) }),
+  ], { description: "How to identify the marker to cancel — the SAME hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired." }),
+
+  markerId: Type.Optional(Type.String({ description: "Optional explicit fallback: the markerId returned by mulligan_rewind/mulligan_shrink in details.markerId. If both target and markerId are given, markerId wins." })),
+}, { description: "Cancel accepts a `target` (preferred) or an explicit `markerId` (fallback). At least one MUST be present." });
 ```
 
 ### Return shape
@@ -243,8 +263,8 @@ const CancelParams = Type.Object({
 // text on success:
 //   "Mulligan: marker cancelled. The transform will no longer apply from the next turn on."
 //   details: { cancelled: true, markerId: <the new cancel marker's entry id, or null> }
-// text on no-op (non-existent markerId):
-//   "Mulligan: no active marker found with that id — nothing to cancel."
+// text on no-op (no marker matched the target / unknown markerId):
+//   "Mulligan: no active marker found for that target — nothing to cancel."
 //   details: { cancelled: false }
 // text on no-op (already cancelled):
 //   "Mulligan: that marker is already cancelled."
@@ -256,29 +276,35 @@ const CancelParams = Type.Object({
 ### Behavior (step by step)
 1. **Config gate (E14):** if `config.enabled === false`, refuse with `"Mulligan is disabled"`. There is **no** `config.cancel` sub-knob — retraction is a safety/escape hatch, always available when Mulligan is enabled.
 2. **Read entries FRESH (C12):** `entries = ctx.sessionManager.getEntries()`, wrapped in try/catch → `[]` on throw (defense-in-depth; a transient blip yields a no-op, not a refusal).
-3. **Find the target entry (the markerId→uuid mapping):** scan `entries` for a custom entry whose `entry.id === params.markerId` AND `customType ∈ {"mulligan:rewind", "mulligan:shrink"}` (this guard excludes notes/turn-metric/cancel). Read the marker's uuid `data.id` via the defensive `readOwn` helper. A marker whose `data.id` is unreadable/non-string/empty is treated as not found (malformed marker → safe no-op).
-4. **Not-found no-op:** if no such entry → return the `"no active marker found"` no-op text + `details:{cancelled:false}`. `appendCancelMarker` is NOT called.
+3. **Resolve the marker to retire:**
+   - **Preferred — `target`:** resolve `params.target` against the current message snapshot using the **same pure resolver** `mulligan_shrink` uses (live each turn, robust to compaction). Then collect candidate markers — every active `mulligan:rewind`/`mulligan:shrink` whose effect covers the matched message: a *shrink* covers the message its own `target` resolves to; a *rewind* covers any message in its hidden span (resolved read-only). Pick the **most recent** candidate by `seq` (LIFO — the latest-issued marker affecting that content is the likely mistake). Read its uuid `data.id` via `readOwn`.
+   - **Fallback — explicit `markerId`:** if `params.markerId` is set (or `target` resolved to nothing and `markerId` is present), scan `entries` for a custom entry whose `entry.id === params.markerId` AND `customType ∈ {"mulligan:rewind", "mulligan:shrink"}` (excludes notes/turn-metric/cancel); read its uuid `data.id`. If both `target` and `markerId` are given, `markerId` wins.
+   - A marker whose `data.id` is unreadable/non-string/empty is treated as not found (malformed marker → safe no-op).
+4. **Not-found no-op:** if no marker resolved (target matched no covering marker, and no explicit markerId matched) → return the `"no active marker found for that target"` no-op text + `details:{cancelled:false}`. `appendCancelMarker` is NOT called.
 5. **Already-cancelled check (idempotency):** re-scan ALL entries for `customType === "mulligan:cancel"` AND `data.targetId === <the marker's uuid>`. If found → return the `"already cancelled"` no-op text + `details:{cancelled:false}` (prevents duplicate cancel entries). `appendCancelMarker` is NOT called.
 6. **Persist:** `appendCancelMarker(pi, ctx, { targetId: <uuid> })` — the `targetId` is the marker's uuid `data.id` (**NOT** the entry id). The wrapper stamps `{schema, v, kind:"cancel", seq, ts}` and calls `pi.appendEntry("mulligan:cancel", entry)`; it never throws (returns `null` on failure). It returns the cancel marker's new entry id (or `null`).
 7. **Return:** confirmation text + `details:{cancelled:true, markerId}`. (`cancelled` stays `true` even when `markerId` is `null` — the intent was recorded best-effort.)
 
 The WHOLE body is wrapped in ONE try/catch → refusal `"unexpected error: <msg>"` on any exception (E13 — the tool never throws on the hot path).
 
-### The markerId→targetId indirection (critical)
-The agent passes `markerId` = the **ENTRY id** it received as `details.markerId` (= `getLeafId()`) from an earlier rewind/shrink. But `readMarkers` (the `context` filter) drops markers by their uuid `data.id` ∈ `cancelledIds`. So the cancel's `targetId` **MUST** be the marker's uuid `data.id`, never the entry id. The tool **maps**: `entry.id (markerId arg)` → `entry.data.id (uuid)` → that uuid is `targetId`. On the next context fire, `readMarkers` builds `cancelledIds` from every cancel's `data.targetId` and drops the retired rewind/shrink before the pipeline sees it (E21 acceptance (b)).
+### Target resolution → marker uuid (critical)
+The agent identifies the marker *by the content it affected* (a `target` hint, same as `mulligan_shrink`), but `readMarkers` drops markers by their uuid `data.id` ∈ `cancelledIds`. So the cancel tool MUST map: `target hint → matched message → covering marker → marker.data.id (uuid)` — and that uuid is the persisted `targetId`. The explicit `markerId` path short-circuits the first two hops (`entry.id → entry.data.id`) for hosts that surface `details.markerId`. Either way, what is persisted is the marker's uuid, **never** an entry id. On the next context fire, `readMarkers` builds `cancelledIds` from every cancel's `data.targetId` and drops the retired rewind/shrink before the pipeline sees it (E21 acceptance (b)).
 
 ### Refusal / no-op conditions
 - **Disabled** (`config.enabled === false`): refusal text + `details:{}`.
-- **Non-existent markerId** (no matching rewind/shrink entry, or a malformed marker): safe no-op, `details:{cancelled:false}` (not a refusal — call returns a reason, never throws).
+- **No matching marker** (target resolved to no covering rewind/shrink, or an unknown/malformed explicit `markerId`): safe no-op, `details:{cancelled:false}` (not a refusal — call returns a reason, never throws).
 - **Already-cancelled** (a `mulligan:cancel` with `data.targetId === uuid` exists): safe no-op, `details:{cancelled:false}` (idempotent).
 
 ### Example
 ```jsonc
-// Agent issued a mis-targeted shrink, then retracts it:
-mulligan_cancel({ markerId: "entry-sh-1" })   // the markerId from the shrink's details.markerId
+// Agent issued a mis-targeted shrink on the last `read`, then retracts it BY TARGET:
+mulligan_cancel({ target: { by_tool_name: "read", occurrence: "last" } })
 // → "Mulligan: marker cancelled. The transform will no longer apply from the next turn on."
 //   details: { cancelled: true, markerId: "entry-cancel-2" }
 // Next context fire: the originally-shrunk message reappears verbatim in the filtered view.
+
+// Explicit-id fallback (only when the host actually surfaces details.markerId):
+mulligan_cancel({ markerId: "entry-sh-1" })
 ```
 
 ---
@@ -300,7 +326,7 @@ Each `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolRe
 - **Shrink:** `"Replace a specific past tool result with a compact summary you provide, in your view, going forward. Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in context (just with your summary as its result)."`
 - **Checkpoint:** `"Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot."`
 - **Audit:** `"Show a token breakdown of the context you're currently carrying (what the model actually sees), flag the biggest contributors, and list active Mulligan markers. Use this to decide whether to rewind or shrink."`
-- **Cancel:** `"Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken transform would apply on every turn for the rest of the session. Pass the markerId you received in details when you issued the marker. The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op."`
+- **Cancel:** `"Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken transform would apply on every turn for the rest of the session. Identify the marker by \`target\` (same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — the most recent marker affecting that content is retired; or pass an explicit \`markerId\` if you have one. The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op."`
 
 ## 7. Cross-references
 - Persisted shapes written by these tools → `@04-data-model.md`

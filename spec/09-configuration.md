@@ -30,7 +30,8 @@
     "shrink": {
       "enabled": true,
       "maxActive": 32,              // cap on simultaneous active mulligan:shrink markers; oldest retired when exceeded
-      "staleAfterFires": 3          // auto-retire a pinned shrink whose target has been absent this many consecutive fires
+      "staleAfterFires": 3,         // auto-retire a pinned shrink whose target has been absent this many consecutive fires
+      "notifyMaxChars": 2048,        // cap on the replacement shown to the operator via ctx.ui.notify (ZERO context cost)
       // "autoOnBloat": false         // NOT in v1; reserved. Auto-shrink would risk data loss.
     },
 
@@ -71,6 +72,7 @@
 | `shrink.enabled` | `true` | Core feature. |
 | `shrink.maxActive` | `32` | Bounds long-session filter cost and marker accumulation; the oldest shrink is retired when exceeded. Mirrors `rewind.maxDepth`. |
 | `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent this many consecutive fires (`@08-edge-cases.md` E15/E21). Stops dead markers from being walked every fire. |
+| `shrink.notifyMaxChars` | `2048` | Caps the replacement text shown to the operator via `ctx.ui.notify` when a shrink is recorded. Pure UI side-channel — **zero context cost** (the tool result itself stays terse). `@05-tools.md` §2. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |

@@ -63,6 +63,15 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 - A rewind requested while filtered context ≥ `abortContextFraction` of the window is refused even if the budget remains.
 - All refusals return a reason and never throw (E13), and never block a normal text reply.
 
+### 1.11 Cancel target resolution (E21, target-based)
+- `by_tool_call_id` hint → retires the uuid of the (single) marker whose matched message / `hideEntryIds` carries that id.
+- `by_tool_name:"read", occurrence:"last"` → retires the most-recent active shrink or rewind whose covered span includes the last `read` result.
+- `by_content_includes:"<substr>"` → retires the most-recent active marker covering a message whose text contains the substring.
+- Several markers cover the match → **most recent by `seq`** is retired (LIFO); the rest stay active.
+- No active marker covers the match → safe no-op (`cancelled:false`); nothing appended.
+- Explicit `markerId` fallback → retires that exact marker; unknown id → safe no-op.
+- After a successful cancel, the next `context` fire shows the originally-hidden/shrunk content verbatim (E21 (b)); the retired marker stays on disk.
+
 ---
 
 ## 2. Tier 2 — Integration smoke harness (real `pi`)
@@ -75,11 +84,12 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 |---|---|---|
 | **F-rewind-core** | inject a canary `CustomMessage` at `session_start`; prompt the agent to call `mulligan_rewind(granularity:"last_tool_call_group")` after a bloated tool call | `context.fire` log shows canary present then dropped on the next inference (`context.filter before:N after:N-1`); a second assistant message is produced (auto-prompt); session JSONL has `mulligan:rewind` + `mulligan:note` entries |
 | **F-shrink-persist** | prompt agent to call a tool returning a large canary result, then `mulligan_shrink` it | next inference's filtered view shows the replacement; session JSONL toolResult is the original (shrink is a view-substitution, not a JSONL rewrite — **assert the original is still on disk and the substitution appears in the filtered cache**) |
-| **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended `[mulligan]` reminder; `turn-metric` records `bloatHit:true` |
-| **F-nudge-drift** | sustained growth: 3 consecutive turns each adding ~4k tokens | after the 3rd turn the next inference's filtered view ends with a `mulligan:nudge` custom message (ephemeral; NOT in session JSONL). Negatives MUST also pass: a single ~8k-token turn amid small turns does NOT fire, and a single >threshold result with ~0 net growth does NOT fire the drift nudge (it only triggers Nudge A) |
+| **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended bloat reminder ("This result added ~…"); `turn-metric` records `bloatHit:true` |
+| **F-nudge-drift** | sustained growth: 3 consecutive turns each adding ~4k tokens | after the 3rd turn the next inference's filtered view ends with a `mulligan:nudge` custom message (ephemeral; NOT in session JSONL). Negatives MUST also pass: a single ~8k-token turn amid small turns does NOT fire, and a single >threshold result with ~0 net growth does NOT fire the drift nudge (it only triggers Nudge A); and a turn that produces a >threshold result AND shrinks/rewinds it in the same turn does NOT fire the drift nudge next turn (§5.3 — Nudge A and B are non-overlapping) |
 | **F-protected** | attempt `mulligan_rewind(granularity:"last_turn", to_previous_prompt:true)` when it's the first user message | tool returns refusal text; no marker created |
 | **F-maxdepth** | create 5 rewinds, attempt a 6th | 6th refuses with depth message |
-| **F-checkpoint** | `mulligan_checkpoint("x")`, then `mulligan_rewind(granularity:"checkpoint", checkpoint:"x")` | label entry exists; rewind hides back to the labeled point (assert filtered message count drops to prefix) |
+| **F-checkpoint** | `mulligan_checkpoint("x")`, then `mulligan_rewind(granularity:"checkpoint", checkpoint:"x")` | label entry exists; rewind hides back to the labeled point (assert filtered message count drops to prefix); **checkpoint is consumed on use — `mulligan_audit` no longer lists it active and a second rewind to `"x"` refuses (not found) unless re-created (spec/05 §3 step 5)** |
+| **F-cancel** | create a `mulligan_shrink`, then `mulligan_cancel({target:{by_tool_name:"read", occurrence:"last"}})` | next `context` fire the originally-shrunk message reappears verbatim in the filtered view; session JSONL has both `mulligan:shrink` and `mulligan:cancel` entries (shrink is skipped, not deleted) |
 | **F-failopen** | force an exception inside the filter (test hook) | handler returns pass-through; no turn break; error logged |
 | **F-reload** | create a rewind, then re-open the session (`--session-id`) and run one more turn | filter still hides the canary (marker survived reload) |
 | **F-retrycap** | `maxRetriesPerPrompt: 2`; drive repeated `last_turn` rewinds at the same prompt | the 3rd rewind is refused with the budget text and persists nothing; a fresh user prompt restores the budget |

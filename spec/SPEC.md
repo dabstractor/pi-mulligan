@@ -48,7 +48,7 @@ Mulligan gives the agent that missing primitive. Concretely, the agent gains the
 
 - **Rewind** — hide either its *last tool-call group* or its *last full turn*, and leave itself a structured note so the resumed attempt is better-informed.
 - **Shrink** — replace a specific past tool result (or message) with a compact summary, persistently, in the view.
-- **Checkpoint** — tag the current position with a name, so a later rewind can target it precisely.
+- **Checkpoint** — tag the current position with a name, so a later rewind can target it precisely (auto-retired once rewound to, so consumed checkpoints don't accumulate).
 - **Audit** — see a token breakdown of its own context (computed from the *filtered* view, not Pi's bookkeeping), so its rewind decisions are informed.
 - **Be nudged** — automatically, at near-zero token cost, when a tool result is bloated or a turn grew sharply.
 
@@ -179,7 +179,7 @@ The full reasoning lives in `@reference/HANDOFF.md`. The locked decisions:
 | D7 | Relative targeting for the two granularities | Robust across compaction (which renumbers entries) |
 | D8 | No human command; no session-tree mutation | Redundant with Pi's built-in `/tree`/`/compact`/`/fork` |
 
-> **D6 — amended (marker retraction):** agent `mulligan:rewind`/`mulligan:shrink` markers are **retractable**. Per `@08-edge-cases.md` E21, an agent MAY cancel any marker by id (`mulligan_cancel` / a cancel mode) and the filter then skips it. This softens D6's "permanent" contract — a mistaken marker is no longer irrevocable. Retraction suppresses the marker going forward only; it does NOT undo on-disk side effects (D1/E5) or replay hidden content.
+> **D6 — amended (marker retraction):** agent `mulligan:rewind`/`mulligan:shrink` markers are **retractable**. Per `@08-edge-cases.md` E21, an agent MAY cancel any marker via `mulligan_cancel`, identifying it **by target** (the same hint shape `mulligan_shrink` uses — `by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`, resolved live each turn, robust to compaction) or by explicit `markerId`; the filter then skips it. This softens D6's "permanent" contract — a mistaken marker is no longer irrevocable. Retraction suppresses the marker going forward only; it does NOT undo on-disk side effects (D1/E5) or replay hidden content.
 
 ---
 

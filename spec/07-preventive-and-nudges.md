@@ -23,7 +23,7 @@ pi.on("tool_result", async (event, ctx) => {
     const threshold = bloatThresholdFor(event.toolName, config);  // per-tool override, else global
     if (bytes < threshold) return;                              // under threshold → no-op
 
-    const reminder = renderBloatReminder(event.toolName, bytes, threshold);
+    const reminder = renderBloatReminder(event.toolName, bytes);  // threshold gates firing above; no longer rendered
     // Append the reminder to the existing content (do not replace — the agent may need the data).
     const content = [...(event.content ?? []), { type: "text", text: reminder }];
     // Also record a turn-metric contribution so the per-turn nudge (Nudge B) can aggregate.
@@ -36,17 +36,13 @@ pi.on("tool_result", async (event, ctx) => {
 });
 ```
 
-### `renderBloatReminder`
+### `renderBloatReminder(toolName, bytes)`
 ```md
 
----
-[mulligan] This result is ~<KB> KB in your context (threshold <T> KB).
-If you don't need the full output going forward, call `mulligan_shrink` with a
-summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole
-call was a mistake. (The hidden/shrunk content stays on disk for the human.)
+This result added ~<KB> KB to your context. If you don't need the full output, call `mulligan_shrink` with a summary or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole call was a mistake.
 ```
 
-The reminder is **appended**, not replacing — the agent may genuinely need the full output right now; the hint is about *future turns*. It is a single block; modest token cost (~40 tokens) incurred once, only when the threshold is crossed.
+The reminder is **appended**, not replacing — the agent may genuinely need the full output right now; the hint is about *future turns*. It is a single line; modest token cost (~30 tokens) incurred once, only when the threshold is crossed.
 
 ### Threshold default & calibration
 - Default `bloatThresholdBytes = 16384` (16 KB ≈ 4k tokens in-context), deliberately **below** Pi's built-in 50 KB truncation cap so Mulligan catches meaningful-but-not-catastrophic results that slip under the built-in cap. The previous default was 8192 (8 KB); it was raised after observation showed 8 KB nagging on every routine source-file read (9–17 KB) — i.e. firing on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.).
@@ -133,9 +129,7 @@ function injectNudge(messages: AgentMessage[], metric: TurnMetric): AgentMessage
 ```
 `renderDriftNudge`:
 ```md
-[mulligan] Previous turn added ~<delta>k tokens to your context< and produced <N> bloated result(s)>.
-If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).
-Run `mulligan_audit` for a breakdown.
+Previous turn added ~<delta>k tokens to your context. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.
 ```
 
 ### Why this is zero-extra-requests
@@ -149,8 +143,8 @@ Run `mulligan_audit` for a breakdown.
 
 ### Edge cases
 - **First turn / post-reload:** `tokenBaseline` is null → `deltaTokens` null → with no delta data in the window, `shouldNudge` falls back to `bloatHit`-only signaling (still useful; a bloated result on turn 1 still nudges). This is the **only** path on which `bloatHit` fires the drift nudge.
-- **Negative delta** (a rewind/shrink shrank context): the windowed delta is non-positive → `shouldNudge` does not fire (it keys on positive sustained growth). The filter additionally suppresses the nudge if a `mulligan:rewind` or `mulligan:shrink` marker was created **during** the metric's turn (compare `metric.seq` range to marker `seq`s) — simple heuristic: if any marker's `ts` is within the turn's time window, skip the nudge. (`bloatHit` is no longer a firing condition when delta data exists, so a since-shrunk result no longer re-triggers the drift nudge.)
-- **Bloat counts are cosmetic now, not a firing trigger (known rough edge):** `pendingBloatHits` are collected at `tool_result` time and are not subtracted when a later `mulligan_rewind` hides those same results. Previously a near-zero-delta turn with a big result could fire the drift nudge as `~0k tokens / N bloated results` (self-contradictory); with `bloatHit` removed from the firing condition (§2/§5.1 — delta-only), that contradiction no longer occurs — a ~0-net-growth turn does not fire regardless of how big a result it held. The stale counts can still appear in the *rendered* bloat clause of a nudge that fired on genuine delta, and in the no-delta fallback (first turn) — cosmetic only, not loop-driving. The nudge SHOULD additionally be suppressed for the remainder of any turn in which a rewind was refused (any reason), so a capped/stuck turn stops being poked (`@08-edge-cases.md` E22).
+- **Negative delta** (a rewind/shrink shrank context): the windowed delta is non-positive → `shouldNudge` does not fire (it keys on positive sustained growth). Additionally, per §5.3, the drift nudge is **hard-suppressed** whenever a `mulligan:rewind` or `mulligan:shrink` marker was created during the metric's turn — so a since-shrunk or since-rewound result never re-triggers the cross-turn nudge. (`bloatHit` is no longer a firing condition when delta data exists.)
+- **Bloat counts are cosmetic now, not a firing trigger (known rough edge):** `pendingBloatHits` are collected at `tool_result` time and are not subtracted when a later `mulligan_rewind` hides those same results. Previously a near-zero-delta turn with a big result could fire the drift nudge as `~0k tokens / N bloated results` (self-contradictory); with `bloatHit` removed from the firing condition (§2/§5.1 — delta-only), that contradiction no longer occurs — a ~0-net-growth turn does not fire regardless of how big a result it held. The rendered drift nudge no longer carries a bloat clause at all (see `renderDriftNudge`), so stale counts cannot appear in it — the rough edge is closed at the rendering layer too. (`pendingBloatHits` are still collected only to drive the no-delta fallback firing decision in §5.1; they are never rendered.) The nudge SHOULD additionally be suppressed for the remainder of any turn in which a rewind was refused (any reason), so a capped/stuck turn stops being poked (`@08-edge-cases.md` E22).
 - **`turn_end` not firing in print mode for the final turn:** acceptable; the nudge is best-effort.
 
 ---
@@ -174,3 +168,6 @@ These refine Nudge B (§2) to cut false positives and catch slow accumulation. B
 
 ### 5.2 Edge-triggered high-water signal (REQUIRED)
 In addition to the delta nudge, the filter MUST inject a one-line annotation the first time the **total filtered** context crosses a high-water fraction of the window (`config.nudges.highWaterFraction`, default 0.7), using the same filtered-total `mulligan_audit` computes (`@05-tools.md` §4). It MUST be **edge-triggered** — fire once on crossing, not every turn while above — by tracking `rt.aboveHighWater` (set true when the annotation fires, cleared only when the total drops back below the fraction) in the session runtime. This catches slow, steady accumulation that no single-turn delta nudge sees, without nagging.
+
+### 5.3 Suppress the drift nudge when the agent already acted (REQUIRED)
+The drift nudge (§2) MUST NOT fire for a turn in which the agent already issued a `mulligan:shrink` or `mulligan:rewind` that addressed the bloat/drift the nudge would describe. Rationale (live use): in observed sessions the agent shrank a bloated result *in the same turn* it was produced, yet the drift nudge still re-announced the bloat at the next turn's start — pure redundancy that cost ~25–40 tokens and risked poking a stuck turn. The §2 edge-case ts-window heuristic is promoted here to a hard rule and sharpened: collect the `seq`s of every `mulligan:rewind`/`mulligan:shrink` marker created during the metric's turn (turn-boundary → `turn_end`); if that set is non-empty, `shouldNudge` returns false for that metric **regardless** of delta or `bloatHit`. This makes Nudge A (inline, co-located) and Nudge B (cross-turn) strictly non-overlapping: Nudge A fires at most once per bloated result; Nudge B fires only when the agent did **not** self-correct. Acceptance: (a) a turn that produces a >threshold result AND shrinks it does NOT fire the drift nudge next turn; (b) a turn that produces a >threshold result and does nothing fires normally; (c) a turn that rewinds also does not fire. Composes with §5.1 (windowing) and the E22 refusal-suppression rule.
