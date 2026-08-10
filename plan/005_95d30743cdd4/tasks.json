@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "pi-mulligan refinements (cancel-by-target · operator echo · checkpoint expiry · nudge text)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "MEDIUM delta: four independent, spec-already-written refinements to existing tools/nudges, plus a README sync. No new architecture — every change is a localized modification to code that already exists. The spec is the source of truth and is already at the target state; the code lags it in four spots. Milestones M1–M4 touch disjoint files and may be parallelized; M5 (README) depends on all of M1–M4.",
       "milestones": [
         {
@@ -313,21 +313,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Sync README (Mode B; depends on M1–M4)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Update README.md to reflect the four user-visible behavior changes and the new config knob. This is the catch-all that prevents a coherent delta from shipping with a stale README.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "README config table + JSON example + feature blurbs",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add shrink.notifyMaxChars to the config table and JSON example. Add concise feature blurbs for the four behavior changes. Confirm existing rows are already current.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Config table + JSON example",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -343,7 +343,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S2",
                   "title": "Feature blurbs for four behavior changes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S2",
