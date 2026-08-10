@@ -393,32 +393,32 @@ describe("renderNote — types", () => {
 
 /** The FIXED tail of the drift nudge (spec/07 §2) — appended after "<lead>." in every drift case. */
 const DRIFT_TAIL =
-  ". If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.";
+  ". If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.";
 
 describe("renderBloatReminder — spec/07 §1 pinned format", () => {
-  it("8 KB result → 'This result added ~8 KB …'; leading \n---\n; no trailing newline", () => {
+  it("8 KB result → '~8 KB added …'; leading \n---\n; no trailing newline", () => {
     const out = renderBloatReminder("read", 8192);
     expect(out).toBe(
-      "\n---\nThis result added ~8 KB to your context. If you don't need the full output, call `mulligan_shrink` with a summary or `mulligan_rewind(granularity:\"last_tool_call_group\")` if the whole call was a mistake.",
+      "\n---\n~8 KB added to your context. `mulligan_shrink` to summarize, or `mulligan_rewind` if the whole call was a mistake.",
     );
     expect(out.startsWith("\n---\n")).toBe(true);
     expect(out.endsWith("\n")).toBe(false); // no trailing newline
   });
 
-  it("30 KB result (the spec's '30 KB read') → 'This result added ~30 KB …'", () => {
+  it("30 KB result (the spec's '30 KB read') → '~30 KB added …'", () => {
     const out = renderBloatReminder("read", 30720);
-    expect(out).toContain("This result added ~30 KB to your context.");
+    expect(out).toContain("~30 KB added to your context.");
   });
 
   it("bytes round to the nearest KB (8704 bytes = 8.5 KB → '~9 KB')", () => {
     const out = renderBloatReminder("bash", 8704);
-    expect(out).toContain("This result added ~9 KB to your context.");
+    expect(out).toContain("~9 KB added to your context.");
   });
 
-  it("body text is VERBATIM (backticks, the granularity literal, 'summary or' — no comma — GOTCHA #13)", () => {
+  it("body text is VERBATIM (backticks, 'to summarize', 'if the whole call was a mistake' — GOTCHA #13)", () => {
     const out = renderBloatReminder("read", 8192);
-    expect(out).toContain("call `mulligan_shrink` with a summary or");
-    expect(out).toContain('`mulligan_rewind(granularity:"last_tool_call_group")`');
+    expect(out).toContain("`mulligan_shrink` to summarize");
+    expect(out).toContain("`mulligan_rewind` if the whole call was a mistake");
     // regression guards: the three removed phrases MUST be absent
     expect(out).not.toContain("[mulligan]");
     expect(out).not.toContain("threshold");
@@ -436,13 +436,13 @@ describe("renderBloatReminder — spec/07 §1 pinned format", () => {
 
 describe("renderBloatReminder — defensive (NEVER throws / bad numbers → 0 KB — GOTCHA #5/#7)", () => {
   it("NaN bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", NaN)).toContain("This result added ~0 KB to your context.");
+    expect(renderBloatReminder("read", NaN)).toContain("~0 KB added to your context.");
   });
   it("negative bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", -100)).toContain("This result added ~0 KB to your context.");
+    expect(renderBloatReminder("read", -100)).toContain("~0 KB added to your context.");
   });
   it("Infinity bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", Infinity)).toContain("This result added ~0 KB to your context.");
+    expect(renderBloatReminder("read", Infinity)).toContain("~0 KB added to your context.");
   });
   it("never throws on any number input", () => {
     expect(() => renderBloatReminder("read", NaN)).not.toThrow();
@@ -457,7 +457,7 @@ describe("renderBloatReminder — snapshot-style (spec/10 §1.8-style)", () => {
     expect(renderBloatReminder("read", 30720)).toMatchInlineSnapshot(`
       "
       ---
-      This result added ~30 KB to your context. If you don't need the full output, call \`mulligan_shrink\` with a summary or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole call was a mistake."
+      ~30 KB added to your context. \`mulligan_shrink\` to summarize, or \`mulligan_rewind\` if the whole call was a mistake."
     `);
   });
 });
@@ -602,7 +602,7 @@ describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
 describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
   it("representative drift-only nudge (~4.2k tokens)", () => {
     expect(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toMatchInlineSnapshot(
-      '"Previous turn added ~4.2k tokens to your context. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown."',
+      `"Previous turn added ~4.2k tokens to your context. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result."`,
     );
   });
 
@@ -616,7 +616,7 @@ describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
         ],
       }),
     ).toMatchInlineSnapshot(
-      '"Previous turn produced 2 bloated results. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown."',
+      `"Previous turn produced 2 bloated results. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result."`,
     );
   });
 });
