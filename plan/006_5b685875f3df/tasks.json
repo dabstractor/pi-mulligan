@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Rewind note consolidation + nudge text simplification",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Two localized, independent changes to the post-005 codebase. (1) Remove the NoteInput.avoid field, folding its lesson into what_happened — note goes from 4 fields to 3. (2) Shorten renderBloatReminder and renderDriftNudge text strings. No new files, no new mechanisms, no architecture change. Both ride entirely on existing code that session 005 shipped.",
       "milestones": [
         {
@@ -149,21 +149,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync README (Mode B changeset-level documentation)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The README has cross-cutting references to both clusters: the 'four-field note' blurb (Cluster 1) and the nudge text examples + token-cost estimates (Cluster 2). This is a Mode B sweep of the overview doc that summarizes the entire delta. Depends on M1 + M2.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update README.md to reflect the three-field note and the new nudge text. Confirm no other README references to 'avoid' or the old nudge strings remain.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "README note-structure + nudge-text sections",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S2",
