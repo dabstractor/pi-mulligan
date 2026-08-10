@@ -21,7 +21,7 @@ describe("DEFAULT_CONFIG", () => {
         abortContextFraction: 0.9,
         requireMutationWarning: true,
       },
-      shrink: { enabled: true, maxActive: 32, staleAfterFires: 3 },           // no autoOnBloat (not v1)
+      shrink: { enabled: true, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 },           // no autoOnBloat (not v1)
       nudges: {
         bloatReminder: true,
         perTurnDrift: true,
@@ -76,7 +76,7 @@ describe("validateConfig", () => {
     expect(cfg).toEqual({
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, maxRetriesPerPrompt: 5, abortContextFraction: 0.9, requireMutationWarning: false },
-      shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
+      shrink: { enabled: false, maxActive: 8, staleAfterFires: 2, notifyMaxChars: 2048 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { read: 24576 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
@@ -190,7 +190,7 @@ describe("validateConfig", () => {
   it("ignores unknown keys (forward-compat), incl. shrink.autoOnBloat", () => {
     const cfg = validateConfig({ foo: "bar", rewind: { baz: 1, enabled: false }, shrink: { autoOnBloat: true } });
     expect(cfg.rewind.enabled).toBe(false);
-    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3 }); // autoOnBloat dropped; defaults retained
+    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 }); // autoOnBloat dropped; defaults retained
     expect(cfg).toEqual(validateConfig({ rewind: { enabled: false } }));
   });
 
@@ -242,7 +242,7 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 ยง2-ย
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({});
-      expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3 });
+      expect(cfg.shrink).toEqual({ enabled: true, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 });
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
@@ -257,7 +257,7 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 ยง2-ย
 
   it("(d) leaves shrink.enabled unchanged when only knobs set", () => {
     const cfg = validateConfig({ shrink: { enabled: false } });
-    expect(cfg.shrink).toEqual({ enabled: false, maxActive: 32, staleAfterFires: 3 });
+    expect(cfg.shrink).toEqual({ enabled: false, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 });
   });
 
   it("(e) invalid maxActive โ {0,-1,NaN,'abc',Infinity} โ’ 32 + exactly 1 warn naming shrink.maxActive", () => {
@@ -304,7 +304,7 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 ยง2-ย
     const cfg = validateConfig({ shrink: { maxActive: 10, staleAfterFires: 5, autoOnBloat: true } });
     expect(cfg.shrink.maxActive).toBe(10);
     expect(cfg.shrink.staleAfterFires).toBe(5);
-    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 10, staleAfterFires: 5 }); // autoOnBloat dropped
+    expect(cfg.shrink).toEqual({ enabled: true, maxActive: 10, staleAfterFires: 5, notifyMaxChars: 2048 }); // autoOnBloat dropped
   });
 
   it("(type) shrink.maxActive / shrink.staleAfterFires are required numbers (type-level)", () => {

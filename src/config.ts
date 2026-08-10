@@ -66,6 +66,11 @@ export interface MulliganConfig {
      *  fires. Must be > 0. Default: 3. Source: spec/09-configuration.md §2/§3.
      *  Consumed by P3.M2.T3. */
     staleAfterFires: number;
+    /** Caps the replacement text shown to the operator via ctx.ui.notify when a shrink is recorded —
+     *  a pure UI side-channel with ZERO context cost (the tool result itself stays terse). Must be > 0.
+     *  Default: 2048. Source: spec/09-configuration.md §3; spec/05-tools.md §2.
+     *  Consumed by P1.M2.T1.S2 (the shrink operator echo). */
+    notifyMaxChars: number;
     // NOTE: "autoOnBloat" is reserved for a FUTURE opt-in mode and is NOT in v1
     //       (spec/07 §nudges: "Auto-shrink would risk data loss"). Do not add it.
   };
@@ -138,6 +143,7 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     enabled: true,
     maxActive: 32,
     staleAfterFires: 3,
+    notifyMaxChars: 2048,
   },
   nudges: {
     bloatReminder: true,
@@ -261,6 +267,8 @@ export function validateConfig(raw: unknown): MulliganConfig {
       if (v !== undefined) cfg.shrink.maxActive = coerceNumber("shrink.maxActive", v, cfg.shrink.maxActive, true);
       v = safeGet(shrinkRaw, "staleAfterFires");
       if (v !== undefined) cfg.shrink.staleAfterFires = coerceNumber("shrink.staleAfterFires", v, cfg.shrink.staleAfterFires, true);
+      v = safeGet(shrinkRaw, "notifyMaxChars");
+      if (v !== undefined) cfg.shrink.notifyMaxChars = coerceNumber("shrink.notifyMaxChars", v, cfg.shrink.notifyMaxChars, true);
     }
 
     // nudges.*
