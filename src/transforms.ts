@@ -742,10 +742,11 @@ export type ShrinkTarget =
  *     (occurrence:"last", the default for any non-"first" value — GOTCHA #6) or the FIRST index (occurrence:"first"),
  *     else null.
  *   - by_content_includes: return the index of the FIRST message (ANY role — spec/08 E19) whose stringified `content`
- *     includes the substring (stringifyContent: string→verbatim, array→JSON.stringify), else null.
+ *     includes the NON-EMPTY substring (an empty needle resolves to null — defense-in-depth, BUG-004;
+ *     stringifyContent: string→verbatim, array→JSON.stringify), else null.
  *
  * The FIRST present non-empty-string discriminator key decides the variant (by_tool_call_id → by_tool_name →
- * by_content_includes); a target with no recognizable discriminator, or a non-string/empty id/name, resolves to null.
+ * by_content_includes); a target with no recognizable discriminator, or a non-string/empty id/name/needle, resolves to null.
  *
  * Pure + defensive: a non-array `messages` → null; a non-record `target` → null; malformed messages, throwing-Proxy
  * messages, and non-string/empty discriminator values are all handled gracefully — NEVER throws (E13; context-handler
@@ -786,9 +787,9 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
     return found === -1 ? null : found;
   }
 
-  // by_content_includes: first message (ANY role — E19) whose stringified content includes the substring.
+  // by_content_includes: first message (ANY role — E19) whose stringified content includes a NON-EMPTY substring.
   const needle = readOwn(target, "by_content_includes");
-  if (typeof needle === "string") {
+  if (typeof needle === "string" && needle.length > 0) {
     for (let i = 0; i < messages.length; i++) {
       if (stringifyContent(readOwn(messages[i], "content")).includes(needle)) return i;
     }

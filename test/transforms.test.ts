@@ -1115,6 +1115,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     expect(resolveShrinkTarget(msgs, { by_tool_name: "grep", occurrence: "last" })).toBe(4);
     expect(resolveShrinkTarget(msgs, { by_tool_name: "absent", occurrence: "last" })).toBeNull();
     expect(resolveShrinkTarget(msgs, { by_content_includes: "u" })).toBe(0); // user("u") stringified includes "u"
+    expect(resolveShrinkTarget(msgs, { by_content_includes: "" })).toBeNull(); // BUG-004: empty needle → no match (null, not 0)
   });
 
   it("defensive: non-array messages → []; non-record marker → unchanged (same ref); malformed target → no-op", () => {
@@ -1138,15 +1139,15 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     );
     // resolveShrinkTarget never throws on it (all reads via readOwn; stringifyContent catches JSON.stringify throws).
     expect(() => resolveShrinkTarget([trap], { by_content_includes: "" })).not.toThrow();
+    expect(resolveShrinkTarget([trap], { by_content_includes: "" })).toBeNull(); // BUG-004: empty needle → null even on a throwing-Proxy
     // applyShrink where a throwing-Proxy is PRESENT but NOT matched → copied by reference via .map, never read.
     const msgs1: MessageLike[] = [user("keep"), trap];
     expect(() => applyShrink(msgs1, { target: { by_content_includes: "keep" }, replacement: "r" })).not.toThrow();
-    // applyShrink where the throwing-Proxy IS matched (empty needle matches empty stringified content) → spread is
-    // try/caught → minimal fallback → never throws, content replaced.
-    expect(() => applyShrink([trap], { target: { by_content_includes: "" }, replacement: "r" })).not.toThrow();
-    const out = applyShrink([trap], { target: { by_content_includes: "" }, replacement: "r" });
-    expect(out).toHaveLength(1);
-    expect(textOf(out[0])).toBe("r");               // fallback still replaced content (role read safely before spread)
+    // BUG-004: an empty by_content_includes needle now resolves to null → applyShrink is a NO-OP (returns the
+    // array unchanged, same reference) and never throws even when a throwing-Proxy is the sole message.
+    const trapArr: MessageLike[] = [trap];
+    expect(() => applyShrink(trapArr, { target: { by_content_includes: "" }, replacement: "r" })).not.toThrow();
+    expect(applyShrink(trapArr, { target: { by_content_includes: "" }, replacement: "r" })).toBe(trapArr); // no-op → same ref
   });
 
   it("purity: never mutates the input array (map returns a new array; no-op returns the same unmuted ref)", () => {
