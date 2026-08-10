@@ -1,0 +1,15 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Checkpoint not consumed when the same name is set on multiple targets (spec/05 §3 step 5 MUST violation)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.1 Issue 1: nudges.driftWindowTurns accepts fractional values that floor to 0, producing a degenerate empty drift window
+  h3.2 Issue 2: shrink.maxActive and shrink.staleAfterFires accept fractional values without flooring to integers
+  h3.3 Issue 3: resolveShrinkTarget with empty by_content_includes matches the FIRST message (degenerate; only guarded at the tool layer)
+  h3.4 Issue 4: mulligan_audit runs and reports a marker-transformed view even when config.enabled === false (inconsistent with E14 "no-op")
+  h3.5 Issue 5: to_previous_prompt (nuclear) rewind on the first/only user message persists a no-op marker instead of refusing per spec E3
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:23 list:3

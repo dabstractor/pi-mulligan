@@ -1,0 +1,191 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Bug Fix Remediation — pi-mulligan BUG-001 through BUG-006",
+      "status": "Ready",
+      "description": "Fix six verified bugs in the pi-mulligan extension: one Major (checkpoint consumption clearing wrong target on duplicate labels) and five Minor (config integer validation gaps, empty-needle resolver match, audit disabled-state inconsistency, and nuclear-rewind persisting no-op markers). All bugs are in edge cases not covered by the existing 949-test suite. The fixes are surgical, following established patterns (the maxRetriesPerPrompt integer-guard precedent, the tool-layer refusal convention, and defense-in-depth in the pure resolver tier).",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Config Integer Validation Fixes (BUG-002, BUG-003)",
+          "status": "Planned",
+          "description": "Fix three integer-valued config knobs in src/config.ts validateConfig that accept fractional values: driftWindowTurns floors to 0 without a >= 1 guard (BUG-002), and shrink.maxActive/staleAfterFires accept fractions like 0.5 verbatim without flooring (BUG-003). All three follow the exact same pattern already established for rewind.maxRetriesPerPrompt: Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : default.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Fix driftWindowTurns integer validation (BUG-002)",
+              "status": "Planned",
+              "description": "Add the missing Math.floor(n) >= 1 guard to the nudges.driftWindowTurns branch of validateConfig so that a fractional value like 0.5 — which passes coerceNumber's > 0 check but floors to 0 — falls back to the default instead of producing a degenerate zero-length drift window.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Add Math.floor >= 1 guard to driftWindowTurns in validateConfig",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.1", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-002 and architecture/spec_requirements.md §BUG-002. The driftWindowTurns branch at src/config.ts lines 285-288 currently reads:\n  const n = coerceNumber(\"nudges.driftWindowTurns\", v, cfg.nudges.driftWindowTurns, true);\n  cfg.nudges.driftWindowTurns = Number.isFinite(n) ? Math.floor(n) : cfg.nudges.driftWindowTurns;\nThis is MISSING the >= 1 guard. Math.floor(0.5) === 0 is accepted, creating a zero-length drift window that makes shouldNudge (src/nudges.ts) slice recentMetrics.slice(0, 0) → empty deltas → permanent bloat-only fallback path.\n2. INPUT: The existing validateConfig function in src/config.ts. The driftWindowTurns branch is at lines 285-288, inside the `if (isRecord(nudgesRaw))` block. The CORRECT precedent is rewind.maxRetriesPerPrompt at lines 247-250:\n  cfg.rewind.maxRetriesPerPrompt = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.rewind.maxRetriesPerPrompt;\n3. LOGIC: Replace the driftWindowTurns assignment (line 288) with the EXACT same guard pattern as maxRetriesPerPrompt:\n  cfg.nudges.driftWindowTurns = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.nudges.driftWindowTurns;\nThis is a single-line change. Verify: validateConfig({nudges:{driftWindowTurns:0.5}}) returns driftWindowTurns===3 (default, not 0). validateConfig({nudges:{driftWindowTurns:5.7}}) still returns 5 (Math.floor(5.7)===5 >= 1 → kept). No new imports, no new functions.\n4. OUTPUT: The modified src/config.ts file. validateConfig should now reject any driftWindowTurns value whose Math.floor is < 1 (falling back to the default of 3). Downstream consumers (shouldNudge in src/nudges.ts, contextHandler in src/filter.ts) are unchanged — they already handle driftWindowTurns as a positive integer.\n5. DOCS: [Mode A] Update the JSDoc comment on the driftWindowTurns field in MulliganConfig interface (src/config.ts ~line 90) if it does not already state 'Positive integer >= 1' — it currently says 'Positive integer. Default: 3.' which is adequate. No external doc change needed. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Fix shrink.maxActive and shrink.staleAfterFires integer validation (BUG-003)",
+              "status": "Planned",
+              "description": "Add Math.floor + >= 1 integer guards to shrink.maxActive and shrink.staleAfterFires in validateConfig so fractional values like 0.5 are rejected (falling back to defaults) instead of being accepted verbatim and silently neutering the shrink retirement subsystem.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Add Math.floor >= 1 guards to maxActive and staleAfterFires in validateConfig",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.2", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-003 and architecture/spec_requirements.md §BUG-003. The maxActive and staleAfterFires branches at src/config.ts lines 266-269 currently read:\n  v = safeGet(shrinkRaw, \"maxActive\");\n  if (v !== undefined) cfg.shrink.maxActive = coerceNumber(\"shrink.maxActive\", v, cfg.shrink.maxActive, true);\n  v = safeGet(shrinkRaw, \"staleAfterFires\");\n  if (v !== undefined) cfg.shrink.staleAfterFires = coerceNumber(\"shrink.staleAfterFires\", v, cfg.shrink.staleAfterFires, true);\nNO Math.floor at all — 0.5 is accepted verbatim. Consequences in filter.ts: maxActive 0.5 → `1 > 0.5` is true → oldest shrink retired with just ONE active shrink; staleAfterFires 0.5 → `1 >= 0.5` → pinned shrink retired after a SINGLE miss instead of 3.\n2. INPUT: The existing validateConfig function in src/config.ts. The shrink.maxActive/staleAfterFires branches are at lines 266-269, inside the `if (isRecord(shrinkRaw))` block. Follow the same pattern as maxRetriesPerPrompt (lines 247-250) and the BUG-002 fix for driftWindowTurns.\n3. LOGIC: Replace each single-line assignment with the guarded two-line pattern. For maxActive:\n  v = safeGet(shrinkRaw, \"maxActive\");\n  if (v !== undefined) {\n    const n = coerceNumber(\"shrink.maxActive\", v, cfg.shrink.maxActive, true);\n    cfg.shrink.maxActive = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.maxActive;\n  }\nAnd identically for staleAfterFires:\n  v = safeGet(shrinkRaw, \"staleAfterFires\");\n  if (v !== undefined) {\n    const n = coerceNumber(\"shrink.staleAfterFires\", v, cfg.shrink.staleAfterFires, true);\n    cfg.shrink.staleAfterFires = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.staleAfterFires;\n  }\nVerify: validateConfig({shrink:{maxActive:0.5}}) returns maxActive===32 (default); validateConfig({shrink:{staleAfterFires:0.5}}) returns staleAfterFires===3 (default); validateConfig({shrink:{maxActive:5.7}}) returns 5.\n4. OUTPUT: The modified src/config.ts file. validateConfig should now floor and >= 1 guard all three integer knobs (driftWindowTurns, maxRetriesPerPrompt, and now maxActive + staleAfterFires) consistently. Downstream consumers (contextHandler in filter.ts) are unchanged — they already compare against these as integers.\n5. DOCS: [Mode A] The JSDoc comments on maxActive ('Must be > 0') and staleAfterFires ('Must be > 0') in MulliganConfig (src/config.ts ~lines 60-65) should be updated to 'Positive integer >= 1' to reflect the tightened validation. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Pure Transform Defense-in-Depth (BUG-004)",
+          "status": "Planned",
+          "description": "Add an empty-needle guard to resolveShrinkTarget's by_content_includes arm in src/transforms.ts so that an empty string does not degenerately match the first message. This is defense-in-depth — the shrink tool layer already refuses empty discriminators, but the filter-level resolver should be self-protecting for old/persisted markers or hand-crafted entries that bypass tool validation.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Add empty-needle guard to resolveShrinkTarget by_content_includes arm",
+              "status": "Planned",
+              "description": "In src/transforms.ts, resolveShrinkTarget's by_content_includes branch (line ~789) checks only `typeof needle === \"string\"` without a `.length > 0` guard. An empty needle matches every message via String.prototype.includes(\"\") and returns index 0 (the FIRST message). Add the same `.length > 0` guard that the by_tool_call_id and by_tool_name arms already use.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Add needle.length > 0 guard in by_content_includes branch of resolveShrinkTarget",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.3", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-004 and architecture/spec_requirements.md §BUG-004. The by_content_includes branch in src/transforms.ts (line ~789) currently reads:\n  const needle = readOwn(target, \"by_content_includes\");\n  if (typeof needle === \"string\") {\n    for (let i = 0; i < messages.length; i++) {\n      if (stringifyContent(readOwn(messages[i], \"content\")).includes(needle)) return i;\n    }\n    return null;\n  }\nThe sibling arms already guard: `if (typeof callId === \"string\" && callId.length > 0)` (line 778) and `if (typeof name === \"string\" && name.length > 0)` (line 783).\n2. INPUT: The resolveShrinkTarget function in src/transforms.ts (Pi-FREE, zero imports, fully unit-testable). The function signature is `resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarget): number | null`. The by_content_includes arm is the LAST discriminator check before the final `return null`.\n3. LOGIC: Change the guard from `if (typeof needle === \"string\")` to `if (typeof needle === \"string\" && needle.length > 0)`. This is a single-condition addition. An empty needle now falls through to `return null` (no match → no-op), exactly like the other two arms when their discriminator is empty. This preserves E13 (never throws — it just returns null) and mirrors the existing arm guards. No structural change to the function — the for-loop and return null are unchanged.\n4. OUTPUT: The modified src/transforms.ts file. resolveShrinkTarget with an empty by_content_includes now returns null instead of 0. Downstream: applyShrink (which calls resolveShrinkTarget for live/unpinned shrinks) already handles null as a no-op (returns messages unchanged, same reference). filterPipeline is unchanged.\n5. DOCS: [Mode A] Update the resolveShrinkTarget JSDoc (src/transforms.ts ~line 740, the 'MATCHER STRATEGIES' section) to note that an empty by_content_includes needle resolves to null (defense-in-depth). The current doc says 'first message (ANY role — E19) whose stringified content includes the substring' — add 'non-empty substring' to the description. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Rewind Tool Correctness (BUG-001, BUG-006)",
+          "status": "Planned",
+          "description": "Fix two bugs in src/tools/rewind.ts: BUG-001 (Major) — the checkpoint consumption loop clears only the first-found target when multiple targets share the same label, leaving the checkpoint active; BUG-006 (Minor) — a nuclear last_turn rewind on the first user message persists a no-op marker instead of refusing before persisting. Both are in rewindExecute but in different code regions (step 7b vs steps 5-7).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Fix checkpoint consumption to clear ALL matching targets (BUG-001)",
+              "status": "Planned",
+              "description": "The checkpoint-consumption loop at step 7b in rewindExecute scans getEntries() in append order, calls pi.setLabel on the FIRST matching label entry, then breaks. When two distinct targets carry the same checkpoint label (which Pi allows — labelsById is Map<targetId,label> with no cross-target uniqueness), only the oldest target is cleared. The fix: iterate ALL entries and clear EVERY target whose current getLabel matches the needle, not just the first one found.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Remove break-after-first-clear; clear all targets whose getLabel matches the checkpoint needle",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2/h3.0", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-001 and architecture/spec_requirements.md §BUG-001. The consumption loop at src/tools/rewind.ts lines 582-623 (step 7b) iterates getEntries() in append order, and at line 611-612 does:\n  pi.setLabel(targetId, undefined);  // clears ONLY the first-found (oldest) target\n  break;                             // stops — newer targets retain the label\nPi's labelsById is Map<targetId,label> with NO cross-target uniqueness. resolveCheckpoint (transforms.ts) scans branchEntries in REVERSE to find the MOST RECENT match (targetB), but the consumption loop clears targetA (oldest). After clearing targetA, checkpointExists still returns true via getLabel(targetB).\n2. INPUT: The rewindExecute function in src/tools/rewind.ts, specifically the `if (granularity === \"checkpoint\")` block at step 7b (lines 582-623). The `needle` variable is `mulligan:checkpoint:${params.checkpoint}`. The `ctx` (ExtensionContext) provides `ctx.sessionManager.getEntries()`. The `pi` (ExtensionAPI) provides `pi.setLabel(targetId, undefined)`. The existing `checkpointExists()` function (lines 278-320) in the same file demonstrates the correct pattern: collect candidate targetIds from raw label entries, then confirm via getLabel(id) === needle.\n3. LOGIC: Modify the consumption loop to clear ALL targets whose CURRENT getLabel matches the needle. Two valid approaches:\n  APPROACH A (recommended — mirrors checkpointExists' pattern): After collecting candidates, iterate them and clear each whose getLabel(id) === needle. This ensures only ACTUALLY-active targets are cleared (not historical label entries that were already cleared).\n  APPROACH B (simpler — clear all raw label entries matching the needle): Iterate all entries, and for each label entry matching the needle, call pi.setLabel(targetId, undefined) — WITHOUT breaking. This is simpler but may issue redundant setLabel calls for already-cleared targets (harmless — setting undefined on an already-undefined label is a no-op).\n  IMPLEMENTATION (Approach A): Replace the existing loop with:\n    // Collect candidate targetIds (same as checkpointExists)\n    const candidates = new Set<string>();\n    for (const e of entries) { ... if (ee.type === \"label\" && ee.label === needle && typeof ee.targetId === \"string\") candidates.add(ee.targetId); }\n    // Clear each candidate whose CURRENT label still matches\n    for (const id of candidates) { try { if (ctx.sessionManager.getLabel(id) === needle) pi.setLabel(id, undefined); } catch { /* E13 */ } }\n  Keep the existing try/catch wrapping (E13: a label-clear failure must never undo the rewind — the marker is already persisted at step 7).\n4. OUTPUT: The modified src/tools/rewind.ts file. After a checkpoint rewind to name \"x\" where two targets (targetA, targetB) both carry label \"mulligan:checkpoint:x\", BOTH targets are cleared. A subsequent checkpointExists(ctx, \"x\") returns false. A second mulligan_rewind(granularity:\"checkpoint\", checkpoint:\"x\") correctly refuses with \"checkpoint 'x' not found on this branch\".\n5. DOCS: [Mode A] Update the step 7b comment block in rewind.ts to reflect the new behavior: clear ALL matching targets (not just the first found). The existing comment references 'BUG-001 fix (validation 1a)' which was a prior fix for a different sub-issue — update to note the duplicate-target fix. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T2",
+              "title": "Refuse nuclear last_turn on first user message before persisting (BUG-006)",
+              "status": "Planned",
+              "description": "When granularity is 'last_turn' with to_previous_prompt:true and the latest user message IS the first user message, resolveLastTurn (src/transforms.ts) correctly returns {remove:[]} (protected refusal). But rewindExecute does not detect this case — it treats the empty remove as a legitimate K=0 rewind and persists a useless marker + stray note. Add an explicit protected-refusal check between resolvePreview and the persist step.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S1",
+                  "title": "Add protected-refusal check in rewindExecute for nuclear-first-user case",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M3.T1.S1"],
+                  "prd_selectors": ["h2.3/h3.5", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-006 and architecture/spec_requirements.md §BUG-006. In src/transforms.ts, resolveLastTurn (line ~345) returns `{ remove: [] }` when `iFirstUser === iLastUser` (nuclear on the first user message — the protected boundary). In src/tools/rewind.ts, rewindExecute step 5 calls resolvePreview which internally calls resolveLastTurn. When resolveLastTurn returns {remove:[]}, resolvePreview returns {ledger: emptyLedger, k:0, hideEntryIds:[]}. The tool then proceeds to step 6 (render note) and step 7 (persist marker with empty hideEntryIds + leave note) — violating spec/08 E3 ('the tool refuses before persisting').\n2. INPUT: The rewindExecute function in src/tools/rewind.ts, specifically the region between step 5 (resolvePreview, lines 538-548) and step 6 (renderNote, line 551). The `params` object has `granularity` and `to_previous_prompt`. The `k` value from resolvePreview is 0 for this case, but k===0 is ALSO a legitimate result for last_tool_call_group (nothing to hide). The DISTINGUISHING signal is: granularity==='last_turn' AND to_previous_prompt===true AND k===0 AND hideEntryIds.length===0 — this combination only occurs when resolveLastTurn returned the protected refusal.\n3. LOGIC: Add a guarded check AFTER resolvePreview returns and BEFORE step 6 (renderNote) / step 7 (persist):\n    // (5b) Protected-refusal check (spec/08 E3): nuclear last_turn on the first user message.\n    //      resolveLastTurn returns {remove:[]} for this protected case. The ONLY way\n    //      granularity==='last_turn' + to_previous_prompt===true produces k===0 with\n    //      empty hideEntryIds is this protected refusal — a normal last_turn always finds\n    //      at least one message after the user prompt (the rewind's own call).\n    if (\n      granularity === 'last_turn' &&\n      params.to_previous_prompt === true &&\n      k === 0 &&\n      hideEntryIds.length === 0\n    ) {\n      return refuse('would cross the protected first:user boundary (cannot nuclear-rewind the original task)', granularity);\n    }\n  Place this AFTER the resolvePreview try/catch block (step 5) and BEFORE step 6 (renderNote). The refuse() closure already handles the rewindRefusedTurnIndex flag (P4.M1.T2.S3). This ensures the marker is NOT persisted and NO note is left.\n4. OUTPUT: The modified src/tools/rewind.ts file. A nuclear last_turn rewind on the first/only user message now returns `Mulligan: refused — would cross the protected first:user boundary (cannot nuclear-rewind the original task).` WITHOUT persisting any marker or note. The depth counter (countRewindMarkers) is NOT incremented. A normal nuclear last_turn (with a prior user message) is unaffected.\n5. DOCS: [Mode A] Add a comment at the new check (step 5b) explaining the E3 contract: 'spec/08 E3: the tool refuses before persisting when the rewind would cross a protected message.' Also update the step numbering comment for subsequent steps if needed. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M4",
+          "title": "Audit Tool Consistency (BUG-005)",
+          "status": "Planned",
+          "description": "Add a config.enabled gate to mulligan_audit's auditExecute so that when the extension is disabled, the audit either reports the UNFILTERED view or refuses — rather than running filterPipeline and reporting a transformed view that does not match what the model actually sees. The rewind/shrink/cancel tools all gate on config.enabled; audit is the lone inconsistency.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M4.T1",
+              "title": "Add config.enabled gate to mulligan_audit (BUG-005)",
+              "status": "Planned",
+              "description": "auditExecute in src/tools/audit.ts has no config.enabled check at the top. When config.enabled===false, the context handler is pass-through (model sees unfiltered context), but audit's fallback path runs filterPipeline and reports markers as active + a filtered total — actively misleading the agent about what the model sees (D5 violation). Add a config.enabled gate.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S1",
+                  "title": "Add config.enabled gate to auditExecute that reports the unfiltered view when disabled",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.4", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-005 and architecture/spec_requirements.md §BUG-005. The auditExecute function in src/tools/audit.ts (line 545) reads `const config = getConfig()` at the top of the try block but does NOT check `config.enabled`. The source comment at line 23 says 'NO config gate (GOTCHA #4): ... The audit is always-on diagnostics (read-only).' However, when disabled, the model sees UNFILTERED context (contextHandler returns immediately at filter.ts line 455) but audit's E16-fallback path runs filterPipeline and reports the transformed view — violating D5 (honest bookkeeping) and E14 ('the extension is a no-op').\n2. INPUT: The auditExecute function in src/tools/audit.ts (lines 545-570). The function already reads `const config = getConfig()` at the top of the try block. The other tools refuse with 'Mulligan is disabled' when config.enabled is false (rewind.ts line 478, shrink.ts line 286, cancel.ts line 350). The AuditDetails interface requires specific fields on every return path. The refusal text convention is: 'Mulligan: refused — <reason>.'\n3. LOGIC: Add a config.enabled check IMMEDIATELY after reading config (after `const config = getConfig()`) and BEFORE the `const sessionId = ctx.sessionManager.getSessionId()` line. When config.enabled is false, the audit should report the UNFILTERED view (build the report from buildContextEntries WITHOUT filterPipeline), NOT refuse — because the audit's value is showing the agent what's in context, and when disabled that IS the unfiltered view. IMPLEMENTATION:\n  // BUG-005 fix: when disabled, the model sees the UNFILTERED view (contextHandler is pass-through).\n  // Report that view honestly (D5) — do NOT run filterPipeline (which would show a transformed view\n  // the model does NOT see, actively misleading the agent).\n  if (!config.enabled) {\n    const entries = ctx.sessionManager.buildContextEntries();\n    const filtered = entriesToMessages(entries);\n    const totalTokens = estimateTokens(filtered as unknown as Parameters<typeof estimateTokens>[0]).tokens;\n    const top = Math.min(8, filtered.length);\n    const callLookup = buildCallLookup(filtered);\n    // ... build rows from UNFILTERED messages (same logic as the normal path, just without filterPipeline)\n    // ... render with 0 active markers (markers are NOT applied when disabled)\n    // ... source='fallback', confidence='low'\n    // ... nRewinds=0, nShrinks=0, nCheckpoints=0, nCancelled=0\n  }\n  ALTERNATIVE (simpler, acceptable): refuse with 'Mulligan is disabled' matching the other tools. This is less useful (the agent gets no diagnostic) but is consistent with E14 ('tools refuse with Mulligan is disabled'). Choose this if the full unfiltered report is too complex for a 1-SP subtask. The PRD says 'either add a gate that reports the unfiltered view / refuses.'\n  RECOMMENDED: Use the simpler refusal approach (`return refusal('Mulligan is disabled')`) for consistency with the other tools and to stay within 1 SP. The unfiltered-report approach can be a future enhancement.\n4. OUTPUT: The modified src/tools/audit.ts file. When config.enabled===false, auditExecute returns `{ content: [{ type: 'text', text: 'Mulligan: refused — Mulligan is disabled.' }], details: { totalTokens: 0, confidence: 'low', source: 'fallback', nRewinds: 0, nShrinks: 0, nCheckpoints: 0, nCancelled: 0, top: [] } }`. It does NOT run filterPipeline or report a transformed view. When enabled, behavior is unchanged.\n5. DOCS: [Mode A] Update the source comment at audit.ts line 23 (currently 'NO config gate (GOTCHA #4)') to reflect the new behavior: the audit now gates on config.enabled for consistency with E14 + D5. Also update the auditExecute JSDoc to note the config.enabled gate. This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M5",
+          "title": "Sync changeset-level documentation",
+          "status": "Planned",
+          "description": "Final cross-cutting documentation task. Update README.md and VERIFICATION.md to reflect the six bug fixes. Per SOW §5 Mode B, this task depends on ALL implementing subtasks and runs last.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M5.T1",
+              "title": "Sync changeset-level documentation for BUG-001 through BUG-006",
+              "status": "Planned",
+              "description": "Update README.md and VERIFICATION.md to document the six bug fixes: checkpoint consumption now clears all duplicate-target labels; config integer validation is tightened for driftWindowTurns/maxActive/staleAfterFires; resolveShrinkTarget rejects empty needles; audit respects config.enabled; and nuclear last_turn on the first user message is refused before persisting.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S1",
+                  "title": "Update VERIFICATION.md and README.md with bug fix summaries",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M2.T1.S1", "P1.M3.T1.S1", "P1.M3.T2.S1", "P1.M4.T1.S1"],
+                  "prd_selectors": ["h2.4", "h2.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/system_context.md for the overall bug fix summary. VERIFICATION.md (12KB) is the QA verification document at the project root; README.md (24KB) is the primary documentation. Both already document the existing 949-test suite and the BUG-001/002/003 fixes from the spec's own history.\n2. INPUT: The completed bug fixes from subtasks P1.M1.T1.S1 (driftWindowTurns), P1.M1.T2.S1 (maxActive/staleAfterFires), P1.M2.T1.S1 (empty-needle guard), P1.M3.T1.S1 (checkpoint consumption), P1.M3.T2.S1 (nuclear refusal), P1.M4.T1.S1 (audit gate). Each fix adds regression tests to the existing suite.\n3. LOGIC: Add a new section to VERIFICATION.md documenting the six bug fixes (BUG-001 through BUG-006 from this PRD cycle) with: the bug ID, severity, root cause, fix applied, and test coverage added. In README.md, update any sections that describe checkpoint consumption behavior, config validation, shrink resolver behavior, audit disabled-state, or protected-message rewind behavior to reflect the corrected semantics. If README.md has a 'Known Issues' or 'Bug History' section, add entries for the six fixes.\n4. OUTPUT: Updated VERIFICATION.md and README.md files.\n5. DOCS: This IS the documentation task (Mode B). No further doc action needed within this subtask."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
