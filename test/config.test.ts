@@ -307,6 +307,28 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 §2-�
     expect(cfg.shrink).toEqual({ enabled: true, maxActive: 10, staleAfterFires: 5, notifyMaxChars: 2048 }); // autoOnBloat dropped
   });
 
+  it("(i) maxActive fractional value that floors below 1 (0.5) → falls back to default 32, SILENT (BUG-003)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ shrink: { maxActive: 0.5 } });
+      expect(cfg.shrink.maxActive).toBe(32); // Math.floor(0.5)===0, 0 < 1 → default (was 0.5 before the fix)
+      expect(warn).not.toHaveBeenCalled();   // silent fallback, matching maxRetriesPerPrompt
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(j) staleAfterFires fractional value that floors below 1 (0.5) → falls back to default 3, SILENT (BUG-003)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ shrink: { staleAfterFires: 0.5 } });
+      expect(cfg.shrink.staleAfterFires).toBe(3); // Math.floor(0.5)===0, 0 < 1 → default (was 0.5 before the fix)
+      expect(warn).not.toHaveBeenCalled();         // silent fallback, matching maxRetriesPerPrompt
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("(type) shrink.maxActive / shrink.staleAfterFires are required numbers (type-level)", () => {
     expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("maxActive").toEqualTypeOf<number>();
     expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("staleAfterFires").toEqualTypeOf<number>();

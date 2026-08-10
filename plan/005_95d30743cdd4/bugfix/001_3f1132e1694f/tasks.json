@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Config Integer Validation Fixes (BUG-002, BUG-003)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix three integer-valued config knobs in src/config.ts validateConfig that accept fractional values: driftWindowTurns floors to 0 without a >= 1 guard (BUG-002), and shrink.maxActive/staleAfterFires accept fractions like 0.5 verbatim without flooring (BUG-003). All three follow the exact same pattern already established for rewind.maxRetriesPerPrompt: Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : default.",
           "tasks": [
             {
@@ -41,14 +41,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Fix shrink.maxActive and shrink.staleAfterFires integer validation (BUG-003)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add Math.floor + >= 1 integer guards to shrink.maxActive and shrink.staleAfterFires in validateConfig so fractional values like 0.5 are rejected (falling back to defaults) instead of being accepted verbatim and silently neutering the shrink retirement subsystem.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add Math.floor >= 1 guards to maxActive and staleAfterFires in validateConfig",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-003 and architecture/spec_requirements.md §BUG-003. The maxActive and staleAfterFires branches at src/config.ts lines 266-269 currently read:\n  v = safeGet(shrinkRaw, \"maxActive\");\n  if (v !== undefined) cfg.shrink.maxActive = coerceNumber(\"shrink.maxActive\", v, cfg.shrink.maxActive, true);\n  v = safeGet(shrinkRaw, \"staleAfterFires\");\n  if (v !== undefined) cfg.shrink.staleAfterFires = coerceNumber(\"shrink.staleAfterFires\", v, cfg.shrink.staleAfterFires, true);\nNO Math.floor at all — 0.5 is accepted verbatim. Consequences in filter.ts: maxActive 0.5 → `1 > 0.5` is true → oldest shrink retired with just ONE active shrink; staleAfterFires 0.5 → `1 >= 0.5` → pinned shrink retired after a SINGLE miss instead of 3.\n2. INPUT: The existing validateConfig function in src/config.ts. The shrink.maxActive/staleAfterFires branches are at lines 266-269, inside the `if (isRecord(shrinkRaw))` block. Follow the same pattern as maxRetriesPerPrompt (lines 247-250) and the BUG-002 fix for driftWindowTurns.\n3. LOGIC: Replace each single-line assignment with the guarded two-line pattern. For maxActive:\n  v = safeGet(shrinkRaw, \"maxActive\");\n  if (v !== undefined) {\n    const n = coerceNumber(\"shrink.maxActive\", v, cfg.shrink.maxActive, true);\n    cfg.shrink.maxActive = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.maxActive;\n  }\nAnd identically for staleAfterFires:\n  v = safeGet(shrinkRaw, \"staleAfterFires\");\n  if (v !== undefined) {\n    const n = coerceNumber(\"shrink.staleAfterFires\", v, cfg.shrink.staleAfterFires, true);\n    cfg.shrink.staleAfterFires = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.staleAfterFires;\n  }\nVerify: validateConfig({shrink:{maxActive:0.5}}) returns maxActive===32 (default); validateConfig({shrink:{staleAfterFires:0.5}}) returns staleAfterFires===3 (default); validateConfig({shrink:{maxActive:5.7}}) returns 5.\n4. OUTPUT: The modified src/config.ts file. validateConfig should now floor and >= 1 guard all three integer knobs (driftWindowTurns, maxRetriesPerPrompt, and now maxActive + staleAfterFires) consistently. Downstream consumers (contextHandler in filter.ts) are unchanged — they already compare against these as integers.\n5. DOCS: [Mode A] The JSDoc comments on maxActive ('Must be > 0') and staleAfterFires ('Must be > 0') in MulliganConfig (src/config.ts ~lines 60-65) should be updated to 'Positive integer >= 1' to reflect the tightened validation. This rides WITH the work.",
@@ -66,21 +66,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Pure Transform Defense-in-Depth (BUG-004)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Add an empty-needle guard to resolveShrinkTarget's by_content_includes arm in src/transforms.ts so that an empty string does not degenerately match the first message. This is defense-in-depth — the shrink tool layer already refuses empty discriminators, but the filter-level resolver should be self-protecting for old/persisted markers or hand-crafted entries that bypass tool validation.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Add empty-needle guard to resolveShrinkTarget by_content_includes arm",
-              "status": "Planned",
+              "status": "Researching",
               "description": "In src/transforms.ts, resolveShrinkTarget's by_content_includes branch (line ~789) checks only `typeof needle === \"string\"` without a `.length > 0` guard. An empty needle matches every message via String.prototype.includes(\"\") and returns index 0 (the FIRST message). Add the same `.length > 0` guard that the by_tool_call_id and by_tool_name arms already use.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Add needle.length > 0 guard in by_content_includes branch of resolveShrinkTarget",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-004 and architecture/spec_requirements.md §BUG-004. The by_content_includes branch in src/transforms.ts (line ~789) currently reads:\n  const needle = readOwn(target, \"by_content_includes\");\n  if (typeof needle === \"string\") {\n    for (let i = 0; i < messages.length; i++) {\n      if (stringifyContent(readOwn(messages[i], \"content\")).includes(needle)) return i;\n    }\n    return null;\n  }\nThe sibling arms already guard: `if (typeof callId === \"string\" && callId.length > 0)` (line 778) and `if (typeof name === \"string\" && name.length > 0)` (line 783).\n2. INPUT: The resolveShrinkTarget function in src/transforms.ts (Pi-FREE, zero imports, fully unit-testable). The function signature is `resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarget): number | null`. The by_content_includes arm is the LAST discriminator check before the final `return null`.\n3. LOGIC: Change the guard from `if (typeof needle === \"string\")` to `if (typeof needle === \"string\" && needle.length > 0)`. This is a single-condition addition. An empty needle now falls through to `return null` (no match → no-op), exactly like the other two arms when their discriminator is empty. This preserves E13 (never throws — it just returns null) and mirrors the existing arm guards. No structural change to the function — the for-loop and return null are unchanged.\n4. OUTPUT: The modified src/transforms.ts file. resolveShrinkTarget with an empty by_content_includes now returns null instead of 0. Downstream: applyShrink (which calls resolveShrinkTarget for live/unpinned shrinks) already handles null as a no-op (returns messages unchanged, same reference). filterPipeline is unchanged.\n5. DOCS: [Mode A] Update the resolveShrinkTarget JSDoc (src/transforms.ts ~line 740, the 'MATCHER STRATEGIES' section) to note that an empty by_content_includes needle resolves to null (defense-in-depth). The current doc says 'first message (ANY role — E19) whose stringified content includes the substring' — add 'non-empty substring' to the description. This rides WITH the work.",

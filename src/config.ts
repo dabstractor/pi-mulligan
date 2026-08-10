@@ -59,11 +59,13 @@ export interface MulliganConfig {
     /** Enable the shrink tool/feature. Default: true. */
     enabled: boolean;
     /** Cap on simultaneous active shrink markers; when exceeded the oldest is retired.
-     *  Mirrors rewind.maxDepth as a bound on marker accumulation. Must be > 0.
+     *  Mirrors rewind.maxDepth as a bound on marker accumulation. Positive integer (>= 1;
+     *  fractional values that floor below 1 fall back to the default).
      *  Default: 32. Source: spec/09-configuration.md §2/§3. Consumed by P3.M2.T3. */
     maxActive: number;
     /** Auto-retire a pinned shrink whose target is absent for this many consecutive
-     *  fires. Must be > 0. Default: 3. Source: spec/09-configuration.md §2/§3.
+     *  fires. Positive integer (>= 1; fractional values that floor below 1 fall back to the default).
+     *  Default: 3. Source: spec/09-configuration.md §2/§3.
      *  Consumed by P3.M2.T3. */
     staleAfterFires: number;
     /** Caps the replacement text shown to the operator via ctx.ui.notify when a shrink is recorded —
@@ -265,9 +267,15 @@ export function validateConfig(raw: unknown): MulliganConfig {
       v = safeGet(shrinkRaw, "enabled");
       if (v !== undefined) cfg.shrink.enabled = coerceBoolean(v, cfg.shrink.enabled);
       v = safeGet(shrinkRaw, "maxActive");
-      if (v !== undefined) cfg.shrink.maxActive = coerceNumber("shrink.maxActive", v, cfg.shrink.maxActive, true);
+      if (v !== undefined) {
+        const n = coerceNumber("shrink.maxActive", v, cfg.shrink.maxActive, true);
+        cfg.shrink.maxActive = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.maxActive;
+      }
       v = safeGet(shrinkRaw, "staleAfterFires");
-      if (v !== undefined) cfg.shrink.staleAfterFires = coerceNumber("shrink.staleAfterFires", v, cfg.shrink.staleAfterFires, true);
+      if (v !== undefined) {
+        const n = coerceNumber("shrink.staleAfterFires", v, cfg.shrink.staleAfterFires, true);
+        cfg.shrink.staleAfterFires = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.shrink.staleAfterFires;
+      }
       v = safeGet(shrinkRaw, "notifyMaxChars");
       if (v !== undefined) cfg.shrink.notifyMaxChars = coerceNumber("shrink.notifyMaxChars", v, cfg.shrink.notifyMaxChars, true);
     }
