@@ -186,3 +186,22 @@ run — see the DoD #2 harness note):
 | 6 | README accuracy cross-check | all claims hold |
 
 **Result: pi-mulligan v1.0 meets all 6 Definition-of-Done criteria. The extension is releaseable.**
+
+## Bug-fix remediation pass — BUG-001 through BUG-006
+
+A creative end-to-end PRD validation pass (post-v1.0) found six issues in edge cases the v1.0 671-test suite
+did not cover: 1 Major, 5 Minor; 0 Critical, 0 data-loss. All six were fixed with regression tests added;
+the suite is now **956 passed, 0 failed** (the v1.0 DoD `671 passed` above is the v1.0 baseline — it is
+preserved here as an accurate historical snapshot and is not rewritten). The table records the engineering
+detail per bug (the six implementing subtask PRPs hold the full depth).
+
+| Bug | Severity | Root cause | Fix applied | Regression test added |
+|-----|----------|------------|-------------|-----------------------|
+| BUG-001 | Major | `rewind.ts` checkpoint-consumption loop cleared only the first-found target then `break`ed, leaving a duplicate-labeled target active | Remove the `break`; clear **all** candidate targetIds whose current `getLabel===needle` | `rewind.test.ts` "checkpoint consumption" case (i): two targets same name → both cleared, 2nd rewind refuses |
+| BUG-002 | Minor | `config.ts` `driftWindowTurns` floored without a `>=1` guard; `0.5→0` collapsed the drift window | `Math.floor(n)>=1` guard mirroring `maxRetriesPerPrompt` | `config.test.ts`: `0.5→3` (silent) |
+| BUG-003 | Minor | `config.ts` `maxActive`/`staleAfterFires` used bare `coerceNumber` with no floor; `0.5` accepted verbatim | 3-line floored `>=1` block mirroring `maxRetriesPerPrompt` | `config.test.ts`: `0.5→32` and `0.5→3` (silent) |
+| BUG-004 | Minor | `transforms.ts` `resolveShrinkTarget` `by_content_includes` had no empty-needle guard; `""` matched `messages[0]` | Add `needle.length>0` → empty needle returns `null` (defense-in-depth) | `transforms.test.ts`: rewrite E13 throw-test + 2 assertions locking empty→null |
+| BUG-005 | Minor | `audit.ts` `auditExecute` had no `config.enabled` gate; reported a transformed view when disabled | `refusal()` helper + `config.enabled` gate as 2nd statement; disabled path touches no `sessionManager` | `audit.test.ts`: new `config.enabled===false` describe (refusal text + zeroed details) |
+| BUG-006 | Minor | `rewind.ts` had no protected-refusal check before persist; nuclear `last_turn` on the first/only user message persisted a no-op marker | step-5b guarded refusal before persist (detects crossing `first:user`) | `edge-cases.test.ts:447-456` rewritten to assert refusal + no-persist |
+
+`npm test` → **956 passed, 0 failed** (post-remediation; the v1.0 DoD `671 passed` above is the v1.0 baseline).

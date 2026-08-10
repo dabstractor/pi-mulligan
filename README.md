@@ -87,8 +87,8 @@ All 20 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `rewind.requireMutationWarning` | `true` | Append a ⚠ warning when the hidden span wrote files / ran side-effecting bash (those effects persist on disk). |
 | **shrink** | | |
 | `shrink.enabled` | `true` | Enable the `mulligan_shrink` tool. |
-| `shrink.maxActive` | `32` | Cap on simultaneous *active* `mulligan:shrink` markers; the oldest is retired when exceeded. Mirrors `rewind.maxDepth` as a bound on marker accumulation. |
-| `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent for this many consecutive filter fires (`spec/08-edge-cases.md` E15/E21). Stops dead markers being walked every fire. |
+| `shrink.maxActive` | `32` | Cap on simultaneous *active* `mulligan:shrink` markers; the oldest is retired when exceeded. Mirrors `rewind.maxDepth` as a bound on marker accumulation. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
+| `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent for this many consecutive filter fires (`spec/08-edge-cases.md` E15/E21). Stops dead markers being walked every fire. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
 | `shrink.notifyMaxChars` | `2048` | Caps the replacement text shown to the operator via `ctx.ui.notify` when a shrink is recorded. Pure UI side-channel — **zero context cost** (the tool result itself stays terse). See `spec/05-tools.md` §2. |
 | **nudges** | | |
 | `nudges.bloatReminder` | `true` | Annotate a `tool_result` exceeding the byte threshold with a rewind reminder. |
@@ -96,7 +96,7 @@ All 20 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `nudges.bloatThresholdBytes` | `16384` | Global catch-all: in-context byte size of a single tool result above which the bloat reminder fires (16 KB — below Pi's ~50 KB cap). A tool listed in `bloatThresholdBytesByTool` uses its own value instead; tools not listed fall back to this. |
 | `nudges.bloatThresholdBytesByTool` | `{ "read": 24576 }` | Per-tool byte thresholds (keyed by Pi `toolName`). A tool listed here uses its own value instead of the global `bloatThresholdBytes`; tools not listed fall back to the global. `bash` is intentionally NOT listed — it is the primary bloat surface, so it uses the 16 KB global default to stay maximally sensitive; `read` gets 24 KB because large source-file reads are routine. |
 | `nudges.driftThresholdTokens` | `6000` | Windowed (`spec/07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from the previous 3k default after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
-| `nudges.driftWindowTurns` | `3` | Rolling window (in turns) over which the per-turn token delta is smoothed before thresholding (`spec/07-preventive-and-nudges.md` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
+| `nudges.driftWindowTurns` | `3` | Rolling window (in turns) over which the per-turn token delta is smoothed before thresholding (`spec/07-preventive-and-nudges.md` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered — fires once on crossing, clears when the total drops back below). Catches slow, steady accumulation the delta nudge misses. |
 | **audit** | | |
 | `audit.estimateConfidence` | `"medium"` | Honesty label reported with token estimates (`low` \| `medium` \| `high`). |
@@ -120,7 +120,7 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
 
 #### Disabling
 
-`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and the state-changing tools refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (the three mutating tools — `rewind`, `shrink`, `cancel` — gate on the master switch; `checkpoint` and `audit` remain available as always-on read-only diagnostics). The human can disable Mulligan without uninstalling it.
+`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and the four state-affecting tools refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (`rewind`, `shrink`, `cancel`, **and `audit`** all gate on the master switch — audit refuses when disabled while staying read-only). Only `checkpoint` remains available as an always-on read-only diagnostic (it sets a harmless label, no transform). The human can disable Mulligan without uninstalling it.
 
 ---
 
@@ -146,7 +146,7 @@ Mulligan registers five agent-callable tools. The descriptions below are **verba
 | `last_turn` | Everything after the most recent user message (assistant + tool-result work produced this turn). The model lands back at the current user prompt. |
 | `checkpoint` | Back to a named checkpoint set via `mulligan_checkpoint` (requires the `checkpoint` param). |
 
-The optional `to_previous_prompt` (only valid with `last_turn`) is the *nuclear* option: it also discards the most recent user message, abandoning the current ask entirely.
+The optional `to_previous_prompt` (only valid with `last_turn`) is the *nuclear* option: it also discards the most recent user message, abandoning the current ask entirely. It is refused if there is no prior user message (it would otherwise cross the protected first user message).
 
 **The four-field note (confabulation defense).** A rewind requires a `note` with four non-empty fields — `what_happened` (what went wrong), `avoid` (what not to do again), `true_current_state` (files changed, commands run, decisions made on the discarded span — a deterministic file ledger is auto-appended here), and `next` (the immediate next action). Vacuous notes are refused. The resumed model reads this note as the most-recent context.
 
@@ -162,7 +162,7 @@ The optional `to_previous_prompt` (only valid with `last_turn`) is the *nuclear*
 
 - `by_tool_call_id` — the unique toolCallId of the result to shrink.
 - `by_tool_name` + `occurrence` (`"last"` / `"first"`) — semantic match by tool name.
-- `by_content_includes` — the first message (any role) whose text contains the substring.
+- `by_content_includes` — the first message (any role) whose text contains the substring. An empty substring matches nothing (resolves to null).
 
 The `replacement` must be non-empty and **faithful** — the model treats it as ground truth from then on.
 
@@ -170,7 +170,7 @@ The `replacement` must be non-empty and **faithful** — the model treats it as 
 
 > Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot.
 
-**When to use it:** before a speculative sub-task you might want to discard wholesale — set a checkpoint, and a later `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` returns to it in one shot. A checkpoint **auto-expires** once a rewind targets it: its label is cleared so it no longer lingers in the active-marker list (`mulligan_audit`); re-creating a checkpoint of the same name later is allowed. (`spec/05-tools.md` §3.)
+**When to use it:** before a speculative sub-task you might want to discard wholesale — set a checkpoint, and a later `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` returns to it in one shot. A checkpoint **auto-expires** once a rewind targets it: its label is cleared so it no longer lingers in the active-marker list (`mulligan_audit`); re-creating a checkpoint of the same name later is allowed. The match clears **all** concurrently-labeled targets — a name can be set on more than one target, and the rewind retires every one whose current `getLabel===needle`. (`spec/05-tools.md` §3.)
 
 The `name` must match `/^[a-z0-9_-]{1,40}$/` (lowercase, digits, hyphen, underscore; 1–40 chars). Invalid names are refused.
 
@@ -180,7 +180,7 @@ The `name` must match `/^[a-z0-9_-]{1,40}$/` (lowercase, digits, hyphen, undersc
 
 **When to use it:** when you suspect context is bloated and want to decide between rewind (mistake) and shrink (fine-but-big). The report ranks the top messages by size (`top`, default `8`), flags results above the per-tool bloat threshold, and lists active rewind/shrink markers + checkpoints — closing the feedback loop ("that one read is 9.4k → shrink it").
 
-The token total is computed from the **filtered view** (what the model actually sees after Mulligan's transforms) — *not* Pi's `getContextUsage()`, which would count already-hidden tokens. The audit is **read-only** and persists nothing.
+The token total is computed from the **filtered view** (what the model actually sees after Mulligan's transforms) — *not* Pi's `getContextUsage()`, which would count already-hidden tokens. The audit is **read-only** and persists nothing. It refuses with the standard disabled message (`Mulligan: refused — Mulligan is disabled.`) when `enabled: false`.
 
 ### `mulligan_cancel`
 
@@ -247,6 +247,16 @@ Mulligan is deliberately minimal. These are the four things it deliberately does
 - **No general undo (`spec/SPEC.md` §9 D6; softened by `spec/08-edge-cases.md` E21).** Agent-initiated rewinds and shrinks persist across reload and `/resume`, and there is no un-rewind that *replays* hidden content or *reverses* on-disk side effects (file edits and bash commands persist) — a human who wants to explore hidden content uses Pi's native `/tree`. One safety valve now exists: a mis-targeted marker is **retractable** via `mulligan_cancel`, which stops the transform applying from the next turn on (the marker stays on disk for the audit trail). This softens D6 for marker mistakes; it does not make rewinds/shrinks generally reversible.
 - **No hard retry / replay (`spec/SPEC.md` §9 D1).** Mulligan supports *soft* retry only (rewind + note + re-plan). Hidden tool calls' **side effects persist on disk** (files written, commands run); replaying them would compound those effects (a duplicate commit, a double `mkdir`). The mutation warning and the note's `true_current_state` / auto-appended file ledger are the safeguards.
 - **Markers accumulate (`spec/08-edge-cases.md` E15).** v1 does no marker garbage-collection — markers persist intentionally (they are the audit trail). `rewind.maxDepth=5` bounds simultaneous *active* rewind markers; the only cost is disk growth (markers are control state, not in context). The filter is cheap in practice (few markers × messages bounded by compaction). Two hard backstops guard against runaway same-prompt retry loops (`spec/08-edge-cases.md` E22): a per-prompt retry budget (`rewind.maxRetriesPerPrompt`) and a context-fraction stop (`rewind.abortContextFraction`) that refuse a rewind *before* it can drive the context to a provider 'Prompt too long' rejection.
+
+### Resolved bugs (BUG-001–BUG-006)
+
+A post-v1.0 validation pass found and fixed six edge-case bugs (1 Major, 5 Minor; 0 Critical, 0 data-loss). These are **resolved** corrections to shipped behavior, listed separately from the ongoing limitations above. All six have regression tests; see VERIFICATION.md "Bug-fix remediation pass" for the full engineering record (root cause, fix, test) and the post-fix test count.
+
+- **BUG-001 (Major)** — `mulligan_checkpoint` consumption now clears **all** concurrently-labeled targets (previously cleared only the first).
+- **BUG-002 / BUG-003 (Minor)** — config integer validation now floors fractional knobs (`driftWindowTurns`, `shrink.maxActive`, `shrink.staleAfterFires`) to a minimum of 1.
+- **BUG-004 (Minor)** — `mulligan_shrink` `by_content_includes` with an empty substring now matches nothing (returns null).
+- **BUG-005 (Minor)** — `mulligan_audit` now refuses when `enabled: false` (stays read-only).
+- **BUG-006 (Minor)** — `mulligan_rewind` `to_previous_prompt` now refuses when there is no prior user message (would cross the protected first user message).
 
 ---
 

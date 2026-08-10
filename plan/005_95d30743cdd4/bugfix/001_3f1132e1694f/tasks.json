@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Remediation — pi-mulligan BUG-001 through BUG-006",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Fix six verified bugs in the pi-mulligan extension: one Major (checkpoint consumption clearing wrong target on duplicate labels) and five Minor (config integer validation gaps, empty-needle resolver match, audit disabled-state inconsistency, and nuclear-rewind persisting no-op markers). All bugs are in edge cases not covered by the existing 949-test suite. The fixes are surgical, following established patterns (the maxRetriesPerPrompt integer-guard precedent, the tool-layer refusal convention, and defense-in-depth in the pure resolver tier).",
       "milestones": [
         {
@@ -187,21 +187,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Sync changeset-level documentation",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Final cross-cutting documentation task. Update README.md and VERIFICATION.md to reflect the six bug fixes. Per SOW §5 Mode B, this task depends on ALL implementing subtasks and runs last.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Sync changeset-level documentation for BUG-001 through BUG-006",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Update README.md and VERIFICATION.md to document the six bug fixes: checkpoint consumption now clears all duplicate-target labels; config integer validation is tightened for driftWindowTurns/maxActive/staleAfterFires; resolveShrinkTarget rejects empty needles; audit respects config.enabled; and nuclear last_turn on the first user message is refused before persisting.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Update VERIFICATION.md and README.md with bug fix summaries",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
