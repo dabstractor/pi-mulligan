@@ -3,7 +3,22 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
-  "pi": { "extensions": ["./src/index.ts"] },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "retry",
+    "context",
+    "pi-extension",
+    "ai",
+    "agents",
+    "cli"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
