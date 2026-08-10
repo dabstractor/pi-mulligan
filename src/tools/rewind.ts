@@ -2,7 +2,7 @@
  * rewind.ts — the `mulligan_rewind` agent-callable tool (spec/05 §1; spec/04 §3; spec/08 E1–E15).
  *
  * THE "MULLIGAN" ITSELF — the headline operation. When the agent realizes a recent tool interaction was a
- * bloated mistake or a whole turn pursued the wrong direction, it calls this tool with a structured four-field
+ * bloated mistake or a whole turn pursued the wrong direction, it calls this tool with a structured three-field
  * note + a granularity. The tool: (1) refuses cleanly when disabled / the note is vacuous / a named checkpoint is
  * absent / the max-depth cap is hit; (2) does a BEST-EFFORT read-only resolution of the target span to extract a
  * deterministic FileLedger and estimate K (messages to hide) — purely advisory, never mutating live context;
@@ -81,20 +81,17 @@ export const RewindParams = Type.Object({
     {
       what_happened: Type.String({
         description:
-          "Past tense: what specifically went wrong and wasted context. Be concrete.",
-      }),
-      avoid: Type.String({
-        description: "Imperative: what NOT to do again on resume.",
+          "Past tense: what went wrong and wasted context — and what to avoid doing again. Be concrete; generalize the lesson.",
       }),
       true_current_state: Type.String({
         description:
-          "The TRUE current state as of this rewind — files changed, commands run, decisions made on the span being discarded. This prevents redoing work. (A deterministic file ledger is auto-appended.)",
+          "The TRUE current state as of this rewind — task progress, decisions, and conclusions (files/commands are auto-captured in the ledger below). This prevents redoing work.",
       }),
       next: Type.String({
         description: "Imperative: the immediate next action to take when you resume.",
       }),
     },
-    { description: "The note your resumed self will read. All four fields required." },
+    { description: "The note your resumed self will read. All three fields required." },
   ),
   granularity: Type.Union(
     [
@@ -133,7 +130,7 @@ export type RewindArgs = Static<typeof RewindParams>;
  * This string IS the tool's documentation. Copy verbatim — it drives LLM usage.
  */
 export const REWIND_DESC =
-  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The hidden content disappears from your view permanently (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.";
+  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.";
 
 // ── Mutation warning (spec/08 E5 — VERBATIM warning string) ──────────────────
 

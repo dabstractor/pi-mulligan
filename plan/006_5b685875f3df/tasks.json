@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Consolidate the rewind note to three fields",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The `avoid` field is removed from `NoteInput`; its lesson folds into `what_happened`. Update the schema, the renderer, validation, the rewind tool's typebox schema + description, the RWIND_DESC string, and all fixtures/assertions in the affected test files.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Note consolidation (notes.ts note machinery + rewind.ts schema + tests)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove `avoid` from the NoteInput type, the NOTE_FIELDS array, renderNote's **Avoid:** line, readNoteField's key union, and every JSDoc/format reference. Update the RewindParams typebox schema and RWIND_DESC. Update all test fixtures and assertions across notes.test.ts, rewind.test.ts, and edge-cases.test.ts.",
               "subtasks": [
                 {
@@ -45,7 +45,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "rewind.ts schema + description + RWIND_DESC",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -66,7 +66,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Tests for the three-field note (notes.test.ts + rewind.test.ts + edge-cases.test.ts)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M1.T1.S1",
