@@ -263,7 +263,7 @@ interface MulliganConfig {
     bloatReminder: boolean;          // tool_result annotation; default true
     perTurnDrift: boolean;           // context nudge; default true
     bloatThresholdBytes: number;     // default 16384 (in-context bytes of a single result; 16 KB)
-    bloatThresholdBytesByTool?: Record<string, number>; // per-tool overrides; default { bash: 32768, read: 20480 }
+    bloatThresholdBytesByTool?: Record<string, number>; // per-tool overrides; default { read: 24576 }
     driftThresholdTokens: number;    // default 3000 (turn delta that triggers the nudge)
   };
   audit: {

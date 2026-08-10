@@ -59,7 +59,7 @@ The reminder is **appended**, not replacing — the agent may genuinely need the
     return byTool[toolName] ?? global;
   }
   ```
-  Rationale: legitimate output size differs sharply by tool. A `bash` build/test/`git log` run routinely and legitimately produces tens of KB; an `lsp_hover` payload is a few hundred bytes. One global threshold either over-nags the noisy tools or under-catches the quiet ones. Shipped defaults: `{ "bash": 32768, "read": 20480 }`, with all other tools falling back to the 16 KB global.
+  Rationale: legitimate output size differs sharply by tool, so the override map tunes sensitivity per tool. `bash` is the primary bloat surface (large command output), so it is intentionally NOT in the map — it uses the 16 KB global default to stay maximally sensitive. `read` gets a higher bar (24 KB) because large source-file reads are routine and legitimate; an `lsp_hover` payload is a few hundred bytes and needs no override. Shipped defaults: `{ "read": 24576 }`, with all other tools (including `bash`) falling back to the 16 KB global.
   - *Limitation:* the override is keyed by Pi `toolName` (e.g. `"bash"`), not by subcommand — a `git log` and an `echo` both present as `bash`. Sub-command-level sensitivity is out of scope for v1; the `perTurnDrift` nudge (§2) catches aggregate turn growth regardless of which tool produced it.
 - The threshold is in **bytes of the in-context text representation** (sum of `.text` lengths across content blocks, UTF-8 byte length). Not model tokens (we don't tokenize here — keep it cheap and deterministic).
 - Configurable; a project that routinely handles large legitimate outputs (log analysis) may raise either the global value or a specific tool's entry.

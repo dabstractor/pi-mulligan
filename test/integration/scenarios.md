@@ -145,7 +145,7 @@ view-substitution, NOT a JSONL rewrite).
 
 ### F-shrink-preventive
 
-**Tests:** the bloat reminder fires on a tool result exceeding its resolved per-tool bloat threshold (bash: 32 KB, read: 20 KB, all other tools: 16 KB global default); a turn-metric with `bloatHit:true` is recorded.
+**Tests:** the bloat reminder fires on a tool result exceeding its resolved per-tool bloat threshold (read: 24 KB, all other tools — including bash: 16 KB global default); a turn-metric with `bloatHit:true` is recorded.
 
 **Run (deterministic):** the deterministic path cannot trigger the bloat reminder (a local `bigResult()` call
 does not go through Pi's `tool_result` event, so Mulligan's `bloatReminderHandler` never sees it). It asserts

@@ -14,7 +14,7 @@
  *   (4) registerTool mulligan_smoke_big → returns a large canary result. NOTE: bloatReminderHandler SKIPS
  *       mulligan_* tools (src/nudges.ts GOTCHA #3), so this tool never triggers the bloat reminder regardless
  *       of size; its role is as a shrink target (RESULT_CANARY). New defaults: global bloatThresholdBytes=16384,
- *       bloatThresholdBytesByTool={bash:32768, read:20480}.
+ *       bloatThresholdBytesByTool={read:24576}.
  *   (5) registerCommand /mulligan_smoke <scenario> → the DETERMINISTIC driver. Dispatches per scenario using
  *       the REAL tool factories (makeRewindTool/makeShrinkTool/makeCheckpointTool — shared module, same
  *       process) and triggers an observing inference via pi.sendUserMessage("ok",{deliverAs:"followUp"}) so
@@ -138,7 +138,7 @@ async function rewindNow(
  * bigResult — the canary string (RESULT_CANARY + padding) used by mulligan_smoke_big + the F-shrink-preventive
  * deterministic path. NOTE: mulligan_smoke_big is a mulligan_* tool → bloatReminderHandler SKIPS it
  * (src/nudges.ts GOTCHA #3), so size never triggers the reminder. Defaults now: global 16384; per-tool
- * bash 32768, read 20480. The canary's job is being a shrink target, not crossing a bloat threshold.
+ * read 24576 (bash uses the 16 KB global). The canary's job is being a shrink target, not crossing a bloat threshold.
  */
 function bigResult(): string {
   // Size is moot for bloat (mulligan_* skip); the value is intentionally unchanged — a shrink-target canary.
@@ -202,13 +202,13 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
       }
       case "F-shrink-preventive": {
         // The bloat reminder fires on the tool_result EVENT when a NON-mulligan_* result exceeds its resolved
-        // threshold (global bloatThresholdBytes=16384; per-tool bash 32768, read 20480). mulligan_smoke_big is
+        // threshold (global bloatThresholdBytes=16384; per-tool read 24576, bash = global 16384). mulligan_smoke_big is
         // a mulligan_* tool → bloatReminderHandler SKIPS it (src/nudges.ts GOTCHA #3) → it can NEVER fire here,
         // regardless of canary size. The deterministic path also CANNOT trigger this: calling bigResult()
         // locally is a plain function call — it does NOT go through Pi's tool_result event.
         // So the deterministic assertion is: a turn-metric entry EXISTS (the turn_end handler ran). A real
         // bloatHit:true proof would require a NON-mulligan_* tool whose result exceeds its resolved threshold
-        // (bash >32768, read >20480, other >16384) — model-driven; see scenarios.md.
+        // (read >24576, bash/other >16384) — model-driven; see scenarios.md.
         try {
           const big = bigResult();
           smokeLog("tool.smoke_big", "info", { len: big.length, note: "bloatHit needs model tool call; see scenarios.md" });
@@ -500,7 +500,7 @@ export default function (pi: ExtensionAPI): void {
   // (4) registerTool mulligan_smoke_big — returns a large canary result. NOTE: bloatReminderHandler SKIPS
   //     mulligan_* tools (src/nudges.ts GOTCHA #3), so this tool NEVER triggers the bloat reminder regardless
   //     of size; its role is as a shrink target (RESULT_CANARY observable). New defaults: global 16384,
-  //     per-tool bash 32768 / read 20480.
+  //     per-tool read 24576 (bash uses the global).
   pi.registerTool({
     name: "mulligan_smoke_big",
     label: "Big Result",

@@ -26,7 +26,7 @@ describe("DEFAULT_CONFIG", () => {
         bloatReminder: true,
         perTurnDrift: true,
         bloatThresholdBytes: 16384,
-        bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
+        bloatThresholdBytesByTool: { read: 24576 },
         driftThresholdTokens: 6000,
         driftWindowTurns: 3,
         highWaterFraction: 0.7,
@@ -77,7 +77,7 @@ describe("validateConfig", () => {
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, maxRetriesPerPrompt: 5, abortContextFraction: 0.9, requireMutationWarning: false },
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
-      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { bash: 32768, read: 20480 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
+      nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { read: 24576 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
       log: { file: "/tmp/mulligan.jsonl" },
     });
@@ -103,21 +103,22 @@ describe("validateConfig", () => {
     expect(validateConfig({ rewind: { maxDepth: -1 } }).rewind.maxDepth).toBe(5); // <0 → default
   });
 
-  it("default bloatThresholdBytesByTool is the per-tool map { bash: 32768, read: 20480 }", () => {
-    expect(validateConfig({}).nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+  it("default bloatThresholdBytesByTool is the per-tool map { read: 24576 }", () => {
+    expect(validateConfig({}).nudges.bloatThresholdBytesByTool).toEqual({ read: 24576 });
   });
 
   it("bloatThresholdBytesByTool: partial override MERGES over defaults (unmentioned tools preserved)", () => {
     const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: 99999 } } });
-    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 20480 }); // read preserved
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 24576 }); // read default preserved by merge
   });
 
   it("bloatThresholdBytesByTool: invalid entries dropped with per-entry warn; defaults preserved", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: -1, read: 20480 } } });
-      // bash(-1) dropped+warned → default 32768 preserved by merge; read(20480) valid → kept
-      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      // bash(-1) dropped+warned (bash is not in the default map, so nothing to restore);
+      // read(20480) valid → kept. Result is { read: 20480 }.
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ read: 20480 });
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytesByTool entry");
     } finally {
@@ -129,7 +130,7 @@ describe("validateConfig", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: "oops" } });
-      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ read: 24576 });
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain("nudges.bloatThresholdBytesByTool");
     } finally {
@@ -141,7 +142,7 @@ describe("validateConfig", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: [["bash", 5]] } });
-      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ read: 24576 });
       expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();
@@ -150,14 +151,14 @@ describe("validateConfig", () => {
 
   it("bloatThresholdBytesByTool: unknown tool names are kept (forward-compat, spec/09 §4)", () => {
     const cfg = validateConfig({ nudges: { bloatThresholdBytesByTool: { bash: 99999, custom_tool: 5000 } } });
-    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 20480, custom_tool: 5000 });
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 99999, read: 24576, custom_tool: 5000 });
   });
 
   it("bloatThresholdBytesByTool: absent field is NOT warned (absent ≠ invalid)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // byTool absent
-      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+      expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ read: 24576 });
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
@@ -400,7 +401,7 @@ describe("nudges.driftWindowTurns & nudges.highWaterFraction + driftThresholdTok
     expect(cfg.nudges.bloatReminder).toBe(true);
     expect(cfg.nudges.perTurnDrift).toBe(true);
     expect(cfg.nudges.bloatThresholdBytes).toBe(16384);
-    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ bash: 32768, read: 20480 });
+    expect(cfg.nudges.bloatThresholdBytesByTool).toEqual({ read: 24576 });
   });
 
   it("(i) round-trip via setConfig/getConfig", () => {

@@ -39,9 +39,8 @@
       "perTurnDrift": true,           // context-annotation when a turn grew past threshold
       "bloatThresholdBytes": 16384,   // 16 KB in-context → reminder (global catch-all; below Pi's 50 KB built-in cap)
       "bloatThresholdBytesByTool": {  // OPTIONAL per-tool overrides (keyed by toolName); fall back to bloatThresholdBytes
-        "bash": 32768,                // 32 KB — builds/tests/git logs legitimately produce tens of KB
-        "read": 20480                 // 20 KB — large source-file reads are routine and legitimate
-      },
+        "read": 24576                 // 24 KB — large source-file reads are routine and legitimate
+      },                              // (bash is intentionally omitted: it uses the 16 KB global to stay sensitive)
       "driftThresholdTokens": 6000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
       "driftWindowTurns": 3,          // rolling window for §5.1 windowed drift signaling
       "highWaterFraction": 0.7        // §5.2 edge-triggered high-water signal (fraction of context window)
@@ -75,7 +74,7 @@
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
-| `nudges.bloatThresholdBytesByTool` | `{ "bash": 32768, "read": 20480 }` | Legitimate output size differs sharply by tool: `bash` (builds, test runs, `git log`) routinely and legitimately produces tens of KB, while `read` of a large source file is normal. A single global threshold either over-nags the noisy tools or under-catches the quiet ones. Resolution: look up `event.toolName` in the map; on miss, use `bloatThresholdBytes`. |
+| `nudges.bloatThresholdBytesByTool` | `{ "read": 24576 }` | `bash` is the primary bloat surface, so it is intentionally NOT listed — it falls back to the 16 KB global to stay maximally sensitive. `read` of a large source file is normal, so it gets a higher 24 KB bar. Resolution: look up `event.toolName` in the map; on miss (including `bash`), use `bloatThresholdBytes`. |
 | `nudges.driftThresholdTokens` | `6000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
 | `nudges.driftWindowTurns` | `3` | Rolling window over which the drift delta is smoothed before thresholding (`@07` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered). Catches slow steady accumulation the delta nudge misses. |

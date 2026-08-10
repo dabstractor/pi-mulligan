@@ -82,9 +82,11 @@ export interface MulliganConfig {
      *  Must be > 0. Default: 16384 (16 KB). Per-tool overrides in bloatThresholdBytesByTool
      *  take precedence over this global value for the listed tools. */
     bloatThresholdBytes: number;
-    /** Optional per-tool override map. Keys are Pi tool names (e.g. "bash", "read"); values
+    /** Optional per-tool override map. Keys are Pi tool names (e.g. "read"); values
      *  are byte thresholds. A tool not listed falls back to bloatThresholdBytes. Default:
-     *  { bash: 32768, read: 20480 }. */
+     *  { read: 24576 }. `bash` is intentionally NOT listed — it is the primary bloat surface,
+     *  so it falls back to the 16 KB global default to stay maximally sensitive; `read` gets
+     *  a higher bar (24 KB) because large source-file reads are routine and legitimate. */
     bloatThresholdBytesByTool?: Record<string, number>;
     /** Turn token-delta above which the per-turn drift nudge fires. Must be > 0.
      *  Default: 6000 (raised from 3000; spec/09 §3: the §5.1 windowing makes 6000
@@ -141,7 +143,7 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     bloatReminder: true,
     perTurnDrift: true,
     bloatThresholdBytes: 16384,
-    bloatThresholdBytesByTool: { bash: 32768, read: 20480 },
+    bloatThresholdBytesByTool: { read: 24576 },
     driftThresholdTokens: 6000,
     driftWindowTurns: 3,
     highWaterFraction: 0.7,

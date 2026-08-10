@@ -444,12 +444,12 @@ describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)
   it("flags a read toolResult whose bytes exceed the resolved read threshold", async () => {
     const { ctx } = makeCtx();
     getRuntime("s1").lastFiltered = [
-      toolResult("call-A", "read", kbText(21)), // 21 KB > read's 20 KB threshold → bloaty
+      toolResult("call-A", "read", kbText(25)), // 25 KB > read's 24 KB threshold → bloaty
     ];
     const res = await run(ctx, {});
     expect(res.details.top[0].bloaty).toBe(true);
-    expect(res.details.top[0].thresholdBytes).toBe(20480);
-    expect(firstText(res)).toContain("⚠ above bloat threshold (20 KB)");
+    expect(res.details.top[0].thresholdBytes).toBe(24576);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (24 KB)");
   });
 
   it("does NOT flag a small toolResult", async () => {
@@ -457,7 +457,7 @@ describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)
     getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "tiny")];
     const res = await run(ctx, {});
     expect(res.details.top[0].bloaty).toBe(false);
-    expect(res.details.top[0].thresholdBytes).toBe(20480);
+    expect(res.details.top[0].thresholdBytes).toBe(24576);
     expect(firstText(res)).not.toContain("⚠ above bloat threshold");
   });
 });
@@ -467,40 +467,40 @@ describe("mulligan_audit — bloat flag (spec/05 §4: ⚠ above bloat threshold)
 describe("mulligan_audit — per-tool bloat thresholds (BUG-001 fix)", () => {
   beforeEach(() => setConfig({}));
 
-  it("bash 20000B is NOT flagged (bash threshold 32 KB)", async () => {
+  it("bash 15000B is NOT flagged (bash uses the 16 KB global)", async () => {
     const { ctx } = makeCtx();
-    getRuntime("s1").lastFiltered = [toolResult("call-A", "bash", "x".repeat(20000))];
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "bash", "x".repeat(15000))];
     const res = await run(ctx, {});
-    expect(res.details.top[0].bloaty).toBe(false); // 20000 < 32768
-    expect(res.details.top[0].thresholdBytes).toBe(32768);
+    expect(res.details.top[0].bloaty).toBe(false); // 15000 < 16384 (bash falls back to the global)
+    expect(res.details.top[0].thresholdBytes).toBe(16384);
     expect(firstText(res)).not.toContain("⚠ above bloat threshold");
   });
 
-  it('bash 40000B is flagged with "(32 KB)" (bash threshold 32 KB)', async () => {
+  it('bash 40000B is flagged with "(16 KB)" (bash uses the 16 KB global)', async () => {
     const { ctx } = makeCtx();
     getRuntime("s1").lastFiltered = [toolResult("call-A", "bash", "x".repeat(40000))];
     const res = await run(ctx, {});
-    expect(res.details.top[0].bloaty).toBe(true); // 40000 > 32768
-    expect(res.details.top[0].thresholdBytes).toBe(32768);
-    expect(firstText(res)).toContain("⚠ above bloat threshold (32 KB)");
+    expect(res.details.top[0].bloaty).toBe(true); // 40000 > 16384 (bash falls back to the global)
+    expect(res.details.top[0].thresholdBytes).toBe(16384);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (16 KB)");
   });
 
-  it("read 18000B is NOT flagged (read threshold 20 KB)", async () => {
+  it("read 18000B is NOT flagged (read threshold 24 KB)", async () => {
     const { ctx } = makeCtx();
     getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "x".repeat(18000))];
     const res = await run(ctx, {});
-    expect(res.details.top[0].bloaty).toBe(false); // 18000 < 20480
-    expect(res.details.top[0].thresholdBytes).toBe(20480);
+    expect(res.details.top[0].bloaty).toBe(false); // 18000 < 24576
+    expect(res.details.top[0].thresholdBytes).toBe(24576);
     expect(firstText(res)).not.toContain("⚠ above bloat threshold");
   });
 
-  it('read 21000B is flagged with "(20 KB)" (read threshold 20 KB)', async () => {
+  it('read 25000B is flagged with "(24 KB)" (read threshold 24 KB)', async () => {
     const { ctx } = makeCtx();
-    getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "x".repeat(21000))];
+    getRuntime("s1").lastFiltered = [toolResult("call-A", "read", "x".repeat(25000))];
     const res = await run(ctx, {});
-    expect(res.details.top[0].bloaty).toBe(true); // 21000 > 20480
-    expect(res.details.top[0].thresholdBytes).toBe(20480);
-    expect(firstText(res)).toContain("⚠ above bloat threshold (20 KB)");
+    expect(res.details.top[0].bloaty).toBe(true); // 25000 > 24576
+    expect(res.details.top[0].thresholdBytes).toBe(24576);
+    expect(firstText(res)).toContain("⚠ above bloat threshold (24 KB)");
   });
 
   it('generic tool (grep) 17000B is flagged with "(16 KB)" (global fallback)', async () => {
