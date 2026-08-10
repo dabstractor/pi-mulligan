@@ -26,6 +26,7 @@ import { NOTE_INVALID_REASON, renderNote } from "../../src/notes.js";
 import { clearAll, getRuntime } from "../../src/runtime.js";
 import { setConfig } from "../../src/config.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js"; // P4.M1.T3.S1 test (d)/(e): shrink stays callable after the rewind budget/context-fraction refuse
+import { listCheckpoints } from "../../src/tools/audit.js"; // P1.M3.T1.S2: pure-fn assertions on the consumed-state entries
 import type { RewindMarker, RewindMarkerInput } from "../../src/markers.js";
 import type {
   AgentToolResult,
@@ -1097,5 +1098,90 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
     expect(res.content.length).toBeGreaterThan(0);
     expect((res.content[0] as { type?: string }).type).toBe("text");
     expect(typeof (res.content[0] as { text?: string }).text).toBe("string");
+  });
+});
+
+// ── P1.M3.T1.S2: checkpoint consumption (spec/05 §3 step 5 "Auto-expiry on consumption (REQUIRED)") ──
+// These tests verify the S1 hook (src/tools/rewind.ts step 7b): a successful checkpoint rewind CONSUMES its
+// target checkpoint — pi.setLabel(targetId, undefined) clears the label so mulligan_audit no longer lists it
+// active, and a second rewind by the same name refuses (not found). Re-creating the checkpoint sets a fresh
+// label. A non-checkpoint rewind never touches labels. A setLabel throw during consumption is swallowed (E13).
+//
+// GOTCHA #1 (the fake's entries array is STATIC): makeCtx().entries is NOT mutated by setLabel (setLabel only
+//   pushes to makePi.labels). So scenarios (b)/(c) construct a FRESH ctx whose entries simulate the post-
+//   consumption / post-re-create state, mirroring how the real session looks after the clear.
+// GOTCHA #2 (labels captures the clear as { entryId, label: undefined }): assert via toContainEqual with
+//   label: undefined (NOT a string). The default checkpointLabelEntry targetId is "leaf-1".
+describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () => {
+  it("(a) a successful checkpoint rewind clears the label → listCheckpoints drops it", async () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [checkpointLabelEntry("anchor")], // label present (consumable)
+      contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
+    expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined }); // the CLEAR was captured
+    // pure-fn assertion of the consumed state (what mulligan_audit would see post-clear):
+    expect(listCheckpoints([{ type: "label", targetId: "leaf-1", label: undefined }])).not.toContain("anchor");
+  });
+
+  it("(b) a second rewind to the consumed name refuses 'not found'", async () => {
+    const { pi } = makePi();
+    // first rewind consumes "anchor"
+    const { ctx: ctx1 } = makeCtx({
+      entries: [checkpointLabelEntry("anchor")],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    await run(pi, ctx1, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    // second rewind: FRESH ctx whose entries simulate the consumed state (label gone)
+    const { ctx: ctx2 } = makeCtx({ entries: [], contextEntries: [msgEntry(user("u"))] });
+    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    expect(firstText(res2)).toContain(
+      "Mulligan: refused — checkpoint 'anchor' not found on this branch.",
+    );
+  });
+
+  it("(c) re-creating the checkpoint sets a fresh label; a subsequent rewind works", async () => {
+    const { labels, pi } = makePi();
+    // first rewind consumes "x"
+    const { ctx: ctx1 } = makeCtx({
+      entries: [checkpointLabelEntry("x")],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    await run(pi, ctx1, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    // simulate a re-create: a FRESH ctx whose entries contain a new checkpointLabelEntry("x")
+    const { ctx: ctx2 } = makeCtx({
+      entries: [checkpointLabelEntry("x")],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    expect(firstText(res2)).toContain("Mulligan: rewound checkpoint."); // succeeds again
+    expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined }); // the NEW clear was captured
+    expect(labels).toHaveLength(2); // two clears total — one per rewind
+  });
+
+  it("(d) a non-checkpoint rewind does NOT consume — the checkpoint persists", async () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [checkpointLabelEntry("persist")], // a checkpoint exists but won't be touched
+      contextEntries: [msgEntry(user("u")), msgEntry(asst("c1")), msgEntry(result("c1"))], // last_turn resolves
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).toContain("Mulligan: rewound"); // the last_turn rewind succeeded
+    expect(labels).toEqual([]); // NO setLabel call on a non-checkpoint path
+    expect(listCheckpoints([checkpointLabelEntry("persist")])).toContain("persist"); // still active
+  });
+
+  it("(e) a setLabel throw during consumption is swallowed (E13) — rewind still succeeds", async () => {
+    const { appended, pi } = makePi({ throwOnSetLabel: true }); // setLabel throws "setLabel boom"
+    const { ctx } = makeCtx({
+      entries: [checkpointLabelEntry("anchor")],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success (NOT refusal)
+    expect(firstText(res)).not.toContain("refused"); // not inverted to a failure
+    expect(appended).toHaveLength(1); // marker still persisted (E13: clear failure never undoes the rewind)
   });
 });
