@@ -351,6 +351,20 @@ describe("nudges.driftWindowTurns & nudges.highWaterFraction + driftThresholdTok
     }
   });
 
+  it("(c-bis) driftWindowTurns fractional value that floors below 1 (0.5) → falls back to default 3 SILENTLY (BUG-002)", () => {
+    // 0.5 passes coerceNumber's >0 gate (no warn), then Math.floor(0.5)===0 → 0 < 1 → guard falls back to the
+    // default SILENTLY (no warn), exactly mirroring maxRetriesPerPrompt. Before the fix this stored 0, which
+    // collapsed shouldNudge's recentMetrics.slice(0,0) → empty deltas → permanent bloat-only fallback.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({ nudges: { driftWindowTurns: 0.5 } });
+      expect(cfg.nudges.driftWindowTurns).toBe(3); // Math.floor(0.5)===0, 0 < 1 → default (was 0 before the fix)
+      expect(warn).not.toHaveBeenCalled(); // silent fallback, matching maxRetriesPerPrompt (GOTCHA #1)
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("(d) driftWindowTurns invalid ∈ {0,-1,NaN,'abc',Infinity} → 3 + exactly 1 warn naming nudges.driftWindowTurns", () => {
     for (const bad of [0, -1, NaN, "abc", Infinity]) {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

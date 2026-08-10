@@ -98,7 +98,8 @@ export interface MulliganConfig {
      *  a quiet, accurate trip point). */
     driftThresholdTokens: number;
     /** Rolling window (in turns) over which the per-turn token delta is smoothed
-     *  before thresholding (spec/07 §5.1). Positive integer. Default: 3. Consumed
+     *  before thresholding (spec/07 §5.1). Positive integer (>= 1; fractional values that floor below 1
+     *  silently fall back to the default — BUG-002). Default: 3. Consumed
      *  by shouldNudge (P3.M3.T4) + readMarkers recent-metrics window (P3.M3.T3). */
     driftWindowTurns: number;
     /** Fraction of the context window at which the §5.2 high-water annotation
@@ -285,7 +286,7 @@ export function validateConfig(raw: unknown): MulliganConfig {
       v = safeGet(nudgesRaw, "driftWindowTurns");
       if (v !== undefined) {
         const n = coerceNumber("nudges.driftWindowTurns", v, cfg.nudges.driftWindowTurns, true);
-        cfg.nudges.driftWindowTurns = Number.isFinite(n) ? Math.floor(n) : cfg.nudges.driftWindowTurns;
+        cfg.nudges.driftWindowTurns = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.nudges.driftWindowTurns;
       }
       v = safeGet(nudgesRaw, "highWaterFraction");
       if (v !== undefined) {

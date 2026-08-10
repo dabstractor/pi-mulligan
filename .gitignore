@@ -10,9 +10,8 @@ venv/
 .env
 
 # OS-specific files
-.DS_Store*.log
+.DS_Store
+*.log
 *.tmp
 *.bak
 *.swp
-.DS_Store
-*.log
