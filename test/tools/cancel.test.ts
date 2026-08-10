@@ -32,6 +32,10 @@ import {
 } from "../../src/tools/cancel.js";
 import { setConfig } from "../../src/config.js";
 import { clearAll } from "../../src/runtime.js";
+// S3: ShrinkTarget is the structural type for a shrink/cancel `target` selector (imported to type the
+// makeShrinkEntry opts.target param). `as unknown as ShrinkTarget` is NOT needed at the fixture level —
+// a plain object literal with a discriminator key assigns in structurally (no cast), matching shrink.test.ts.
+import type { ShrinkTarget } from "../../src/transforms.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -74,12 +78,17 @@ function makeCtx(opts: {
   sessionId?: string;
   leafId?: string | null;
   entries?: SessionEntry[];
+  /** buildContextEntries() return — the message snapshot the TARGET path flattens (S3). */
+  contextEntries?: SessionEntry[];
   throwOnGetEntries?: boolean;
+  /** a throwing buildContextEntries → resolveTargetUuid's try/catch → null → step-4 no-op (S3). */
+  throwOnBuildContextEntries?: boolean;
 } = {}) {
   const sessionId = opts.sessionId ?? "s1";
   // default to "leaf-1" UNLESS leafId is explicitly passed (incl. null) — lets callers test the null return.
   const scriptedLeafId: string | null = opts.leafId === undefined ? "leaf-1" : opts.leafId;
   const entries = opts.entries ?? [];
+  const contextEntries = opts.contextEntries ?? [];
   const sessionManager = {
     getSessionId() {
       return sessionId;
@@ -90,6 +99,13 @@ function makeCtx(opts: {
     getEntries() {
       if (opts.throwOnGetEntries) throw new Error("getEntries boom");
       return entries;
+    },
+    // S3: the TARGET path calls buildContextEntries() (then flatMaps it via sessionEntryToContextMessages).
+    // Structurally identical to shrink.test.ts's makeCtx arm (the verified precedent). The markerId path
+    // NEVER calls this, so defaulting to [] keeps every existing markerId-path case unchanged.
+    buildContextEntries() {
+      if (opts.throwOnBuildContextEntries) throw new Error("buildContextEntries boom");
+      return contextEntries;
     },
   };
   return { ctx: { sessionManager } as unknown as ExtensionContext };
@@ -129,8 +145,17 @@ function firstText(res: AgentToolResult<CancelDetails>): string {
  * data.id (the uuid that becomes the cancel's targetId) — a bug that forwards the entry id would fail
  * the targetId assertion. Minimal payload: the cancel tool only reads customType + data.id, but we include
  * the envelope fields so the fixture is a realistic CustomEntry (matches the persisted RewindMarker shape).
+ *
+ * S3: `opts.hideEntryIds` lets a rewind COVER a matched message (the rewind-covering check is
+ * `matchedEntryId ∈ data.hideEntryIds`). `opts.seq` parameterizes the LIFO tiebreak (default 1). The legacy
+ * positional `seq` 3rd-arg form (number) is preserved so the existing markerId-path cases compile unchanged.
  */
-function makeRewindEntry(entryId: string, uuid: string, seq = 1): SessionEntry {
+function makeRewindEntry(
+  entryId: string,
+  uuid: string,
+  seqOrOpts: number | { seq?: number; hideEntryIds?: string[] } = {},
+): SessionEntry {
+  const opts = typeof seqOrOpts === "number" ? { seq: seqOrOpts } : seqOrOpts;
   return {
     type: "custom",
     id: entryId,
@@ -152,7 +177,8 @@ function makeRewindEntry(entryId: string, uuid: string, seq = 1): SessionEntry {
         next: "w",
       },
       ledger: { readFiles: [], modifiedFiles: [], bashSideEffects: [] },
-      seq,
+      hideEntryIds: opts.hideEntryIds ?? [],
+      seq: opts.seq ?? 1,
       ts: 1,
     },
   } as unknown as SessionEntry;
@@ -160,8 +186,19 @@ function makeRewindEntry(entryId: string, uuid: string, seq = 1): SessionEntry {
 
 /**
  * A shrink marker entry fixture. DISTINCT entry.id vs data.id(uuid). Minimal payload matching ShrinkMarker.
+ *
+ * S3: `opts.target` parameterizes the shrink's OWN selector (a shrink COVERS the matched message iff
+ * resolving its own target against the snapshot === matchedIndex — so set its target to the same selector
+ * the cancel is using, or one resolving to the same message). `opts.seq` parameterizes the LIFO tiebreak.
+ * The legacy positional `seq` 3rd-arg form (number) is preserved so the existing markerId-path cases compile
+ * unchanged (default target {by_tool_call_id:"call-A"}).
  */
-function makeShrinkEntry(entryId: string, uuid: string, seq = 1): SessionEntry {
+function makeShrinkEntry(
+  entryId: string,
+  uuid: string,
+  seqOrOpts: number | { seq?: number; target?: ShrinkTarget } = {},
+): SessionEntry {
+  const opts = typeof seqOrOpts === "number" ? { seq: seqOrOpts } : seqOrOpts;
   return {
     type: "custom",
     id: entryId,
@@ -173,10 +210,10 @@ function makeShrinkEntry(entryId: string, uuid: string, seq = 1): SessionEntry {
       v: 1,
       kind: "shrink",
       id: uuid,
-      target: { by_tool_call_id: "call-A" },
+      target: opts.target ?? { by_tool_call_id: "call-A" },
       replacement: "(shrink) summary",
       reason: "too big",
-      seq,
+      seq: opts.seq ?? 1,
       ts: 1,
     },
   } as unknown as SessionEntry;
@@ -202,6 +239,45 @@ function makeCancelEntry(targetId: string, seq = 2): SessionEntry {
       ts: 2,
     },
   } as unknown as SessionEntry;
+}
+
+// ── snapshot-entry builders (S3: buildContextEntries() fixtures — shrink.test.ts GOTCHA #12 idiom) ─────
+
+/**
+ * A module-scoped counter for snapshot entry ids (mirrors shrink.test.ts's `entrySeq`). Reset per-test via
+ * `resetSnapshotSeq()` (called from the S3 describe's beforeEach) so two tests can't collide on `e-1`.
+ */
+let entrySeq = 0;
+function resetSnapshotSeq() {
+  entrySeq = 0;
+}
+
+/**
+ * A single message-as-entry in the snapshot (buildContextEntries returns SessionEntry[]; we cast through
+ * `as unknown as SessionEntry`). The tool flattens via the REAL sessionEntryToContextMessages, which returns
+ * [entry.message] for a `{type:"message", message:{...}}` entry (verified Pi shape — GOTCHA #12). We build
+ * the entry by spreading the role + extra fields (toolCallId/toolName/content) into `message`. The entry.id
+ * (e.g. "e-1") is what rewind-covering checks (`matchedEntryId ∈ hideEntryIds`) match against.
+ */
+function msgEntry(role: string, extra: Record<string, unknown> = {}): SessionEntry {
+  entrySeq += 1;
+  return {
+    type: "message",
+    id: `e-${entrySeq}`,
+    parentId: null,
+    timestamp: "",
+    message: { role, ...extra },
+  } as unknown as SessionEntry;
+}
+
+/** Build a toolResult message fixture (role:"toolResult", toolCallId, toolName, content blocks). */
+function toolResult(toolCallId: string, toolName: string, text: string): Record<string, unknown> {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName,
+    content: [{ type: "text", text }],
+  };
 }
 
 // ── config: master enabled for the default happy-path cases (no config.cancel sub-knob exists) ────────
@@ -461,5 +537,375 @@ describe("mulligan_cancel — types (ToolDefinition + CancelParams inference)", 
     const { ctx } = makeCtx();
     const res = await run(pi, ctx, { markerId: "x" });
     expectTypeOf(res).toEqualTypeOf<AgentToolResult<CancelDetails>>();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════
+// S3 / P1.M1.T1.S3 — cancel-by-TARGET resolution (spec/10 §1.11 cases (a)-(g)).
+//
+// The TARGET path (resolveTargetUuid in src/tools/cancel.ts) is the code under test. It builds a message
+// snapshot (buildContextEntries().flatMap(sessionEntryToContextMessages)), resolves params.target → a
+// matched message INDEX (resolveShrinkTarget), maps that index → its ENTRY id (entryIdAtMessageIndex), then
+// scans the marker `entries` (getEntries) for the MOST RECENT active rewind/shrink whose effect COVERS that
+// message (shrink: its OWN data.target resolves to the index; rewind: the index's entry id ∈ data.hideEntryIds;
+// LIFO by data.seq) → that marker's uuid data.id is the cancel's targetId.
+//
+// `contextEntries` = the snapshot (buildContextEntries). `entries` = the markers (getEntries). They are
+// SEPARATE arrays in the fake but ALIGNED by the entry-id invariant (a rewind's hideEntryIds must hold the
+// snapshot entry's id that yields the matched message). DISTINCT entry.id vs data.id(uuid) EVERYWHERE proves
+// the uuid mapping (a bug forwarding the entry id fails the assertion). nextSeq leaks across tests via the
+// shared runtime map → clearAll() in the global beforeEach/afterEach (GOTCHA #8) + resetSnapshotSeq() here.
+//
+// ⚠️ VERIFY-AT-IMPLEMENTATION RESOLUTION (research flagged this): S2's cancel.ts returns the SAME not-found
+// text for BOTH paths — "Mulligan: no active marker found with that id — nothing to cancel." (NOT a separate
+// "...for that target" string). The target-path no-op cases below pin that shared string.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
+  beforeEach(() => resetSnapshotSeq()); // per-test isolation: no two tests collide on `e-1`
+
+  // ── Case (a): by_tool_call_id → single covering marker (shrink OR rewind) ────────────────────────────
+
+  it("(a1) by_tool_call_id: a shrink whose own target resolves to the matched message → covers → retired", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "big log"))], // → msg idx 0, entry id e-1
+      entries: [
+        makeShrinkEntry("entry-sh-1", "uuid-sh-1", {
+          target: { by_tool_call_id: "call-A" }, // shrink's own target resolves to idx 0 === matchedIndex
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(1);
+    expect(appended[0].customType).toBe("mulligan:cancel");
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-1"); // the shrink's uuid
+    expect(firstText(res)).toBe(
+      "Mulligan: marker cancelled. The transform will no longer apply from the next turn on.",
+    );
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  it("(a2) by_tool_call_id: a rewind whose hideEntryIds includes the matched message's ENTRY id → covers → retired", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "big log"))], // msg idx 0, entry id e-1
+      entries: [
+        makeRewindEntry("entry-rw-1", "uuid-rw-1", {
+          hideEntryIds: ["e-1"], // the matched message's ENTRY id → this rewind covers idx 0
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-rw-1"); // the rewind's uuid
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  // ── Case (b): by_tool_name + occurrence → most-recent covering the LAST/FIRST of that name ───────────
+
+  it("(b-last) by_tool_name:'read', occurrence:'last' → covers the SECOND read (idx 1), not the first", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry("toolResult", toolResult("c1", "read", "first")), // idx 0, entry id e-1
+        msgEntry("toolResult", toolResult("c2", "read", "second")), // idx 1, entry id e-2
+      ],
+      entries: [
+        makeShrinkEntry("entry-sh-2", "uuid-sh-2", {
+          target: { by_tool_name: "read", occurrence: "last" }, // resolves to idx 1 === matchedIndex
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "last" } });
+
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-2"); // covers the LAST read
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  it("(b-first) by_tool_name:'read', occurrence:'first' → the selector is HONORED (covers idx 0, not idx 1)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry("toolResult", toolResult("c1", "read", "first")), // idx 0, entry id e-1
+        msgEntry("toolResult", toolResult("c2", "read", "second")), // idx 1, entry id e-2
+      ],
+      entries: [
+        // a shrink whose target resolves to idx 0 (FIRST read) — covers a {occurrence:'first'} cancel
+        makeShrinkEntry("entry-sh-first", "uuid-sh-first", {
+          target: { by_tool_name: "read", occurrence: "first" },
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "first" } });
+
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-first");
+    expect(res.details.cancelled).toBe(true);
+  });
+
+  // ── Case (c): by_content_includes → most-recent covering a message with the substring ────────────────
+
+  it("(c) by_content_includes: a message whose content includes the substring → covering marker retired", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry("toolResult", toolResult("call-A", "bash", 'df -h ... "ENOSPC at /disk"')),
+      ],
+      entries: [
+        makeShrinkEntry("entry-sh-enospc", "uuid-sh-enospc", {
+          target: { by_content_includes: "ENOSPC" }, // resolves to idx 0 === matchedIndex
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_content_includes: "ENOSPC" } });
+
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-enospc");
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  it("(c-neg) by_content_includes with an absent substring → no message matches → no-op (covered in case e)", async () => {
+    // This is the NEGATIVE arm of (c): an unmatched substring drives matchedIndex===null → no marker covers.
+    // Asserted fully as case (e) below (same no-op path); here we just confirm the substring truly doesn't match.
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", 'all good'))],
+      entries: [],
+    });
+
+    await run(pi, ctx, { target: { by_content_includes: "ZZZ-NOT-PRESENT" } });
+    expect(appended).toHaveLength(0); // no match → no marker covers → nothing appended
+  });
+
+  // ── Case (d): several markers cover → MOST RECENT by seq (LIFO); rest stay active ────────────────────
+
+  it("(d1) TWO shrinks both cover → the HIGHER-seq (newer) one is retired; exactly ONE cancel appended", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))], // idx 0, entry id e-1
+      entries: [
+        makeShrinkEntry("entry-sh-old", "uuid-sh-old", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1, // OLDER
+        }),
+        makeShrinkEntry("entry-sh-new", "uuid-sh-new", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 5, // NEWER → wins (LIFO by seq)
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(1); // EXACTLY ONE cancel (the older marker is NOT retired by this call)
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-new"); // higher seq wins
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  it("(d2) cross-marker-type LIFO: a rewind (seq 5) beats a shrink (seq 1) when BOTH cover", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))], // idx 0, entry id e-1
+      entries: [
+        makeShrinkEntry("entry-sh-low", "uuid-sh-low", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+        makeRewindEntry("entry-rw-high", "uuid-rw-high", {
+          hideEntryIds: ["e-1"],
+          seq: 5, // higher seq → wins even though it's a DIFFERENT marker type than the shrink
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-rw-high"); // rewind wins (seq 5 > 1)
+    expect(res.details.cancelled).toBe(true);
+  });
+
+  // ── Case (e): no active marker covers → safe no-op (cancelled:false); nothing appended ───────────────
+
+  it("(e1) target matches a message, but NO marker covers it → no-op (cancelled:false, nothing appended)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))], // matchedIndex=0
+      entries: [
+        // a shrink whose target resolves to a DIFFERENT index (call-B) → does NOT cover idx 0
+        makeShrinkEntry("entry-sh-other", "uuid-sh-other", {
+          target: { by_tool_call_id: "call-B" },
+          seq: 1,
+        }),
+        // a rewind hiding a DIFFERENT entry id (e-9) → does NOT cover the matched entry id e-1
+        makeRewindEntry("entry-rw-other", "uuid-rw-other", {
+          hideEntryIds: ["e-9"],
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(0); // markers EXIST but none COVER → no-op
+    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  it("(e2) target matches NOTHING (matchedIndex null) → no marker can cover → no-op", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-Z", "read", "unrelated"))], // call-A unmatched
+      entries: [
+        makeShrinkEntry("entry-sh-a", "uuid-sh-a", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  it("(e3) empty snapshot (contextEntries:[]) → matchedIndex null → no-op (nothing covers)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [], // no messages → resolveShrinkTarget returns null
+      entries: [
+        makeShrinkEntry("entry-sh-a", "uuid-sh-a", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  // ── Case (f): explicit markerId fallback — does NOT call buildContextEntries (the markerId path) ─────
+  // (markerId-only success/no-op are already covered by Cases 1 & 3 above; this case adds the
+  // markerId-WINS-OVER-target ordering — Decision D1.)
+
+  it("(f) markerId WINS when both target and markerId are given → the markerId marker is retired (NOT the target one)", async () => {
+    const { appended, pi } = makePi();
+    // target would resolve to uuid-sh-target, BUT markerId points at a DIFFERENT marker (uuid-rw-markerId).
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))], // target resolves to idx 0
+      entries: [
+        makeShrinkEntry("entry-sh-target", "uuid-sh-target", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 9, // high seq — would win IF the target path ran
+        }),
+        makeRewindEntry("entry-rw-markerId", "uuid-rw-markerId", { seq: 1 }), // markerId points HERE
+      ],
+    });
+
+    const res = await run(pi, ctx, {
+      target: { by_tool_call_id: "call-A" },
+      markerId: "entry-rw-markerId", // markerId wins → the target path is NEVER consulted
+    });
+
+    expect(appended).toHaveLength(1);
+    // the markerId marker's uuid — NOT the target-resolved shrink's uuid (proves markerId-wins ordering)
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-rw-markerId");
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  // ── Case (g): integrity of the appended cancel entry (layered onto a representative success) ─────────
+
+  it("(g) success appends a well-formed mulligan:cancel: schema/v/kind/targetId(uuid)/seq/ts", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))],
+      entries: [
+        makeShrinkEntry("entry-sh-1", "uuid-sh-1", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(res.details.cancelled).toBe(true);
+    expect(res.details.markerId).toBe("leaf-1"); // the fake's getLeafId
+    expect(appended).toHaveLength(1);
+    expect(appended[0].customType).toBe("mulligan:cancel");
+    const data = appended[0].data as Record<string, unknown>;
+    expect(data.schema).toBe("pi-mulligan");
+    expect(data.v).toBe(1);
+    expect(data.kind).toBe("cancel");
+    expect(data.targetId).toBe("uuid-sh-1"); // the uuid (data.id), NEVER the entry id
+    expect(typeof data.seq).toBe("number"); // stamped by nextSeq (first marker → 1)
+    expect(typeof data.ts).toBe("number");
+    expect(data.ts).toBeLessThanOrEqual(Date.now());
+  });
+
+  // ── Case (g-extra): target-path already-cancelled marker is a safe no-op (idempotency; GOTCHA #7) ────
+
+  it("(g-idempotent) an existing cancel targeting the resolved uuid → no-op (no duplicate cancel appended)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))], // idx 0
+      entries: [
+        makeShrinkEntry("entry-sh-1", "uuid-sh-1", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+        makeCancelEntry("uuid-sh-1"), // an existing cancel whose targetId === the shrink's uuid
+      ],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    expect(appended).toHaveLength(0); // already cancelled → NO duplicate cancel (idempotency)
+    expect(firstText(res)).toBe("Mulligan: that marker is already cancelled.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  // ── Case (g-error): a throwing buildContextEntries → resolveTargetUuid try/catch → null → no-op ──────
+
+  it("(g-error) a throwing buildContextEntries → resolveTargetUuid catches → null → step-4 no-op (never throws)", async () => {
+    // resolveTargetUuid wraps its body in try/catch → null on a throwing buildContextEntries. That null feeds
+    // step 4 (not-found no-op) — NOT the outer refusal (the outer catch only fires for something resolveTargetUuid
+    // doesn't cover). So this is the friendly no-op text, with cancelled:false (E13 — execute never rejects).
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({
+      throwOnBuildContextEntries: true, // buildContextEntries() blows up inside resolveTargetUuid
+      entries: [
+        makeShrinkEntry("entry-sh-1", "uuid-sh-1", {
+          target: { by_tool_call_id: "call-A" },
+          seq: 1,
+        }),
+      ],
+    });
+
+    await expect(run(pi, ctx, { target: { by_tool_call_id: "call-A" } })).resolves.toBeDefined();
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+    expect(appended).toHaveLength(0); // null targetUuid → no-op
+    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
   });
 });

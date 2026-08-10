@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "mulligan_cancel target-based API (headline change)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Rewrite mulligan_cancel to identify the marker by `target` (same hint shape as mulligan_shrink: by_tool_call_id / by_tool_name+occurrence / by_content_includes), with explicit markerId as optional fallback. LIFO: most-recent active marker covering the matched message is retired. Filter side unchanged (drops by uuid data.id).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Rewrite mulligan_cancel (schema + execute + description + tests)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Replace the id-only CancelParams with a target-union + optional markerId. Rewrite cancelExecute's step 3 to resolve the target hint → matched message → covering marker → marker uuid. Update CANCEL_DESC. Add comprehensive target-based tests.",
               "subtasks": [
                 {
@@ -62,7 +62,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Tests for target-based cancel resolution",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -99,7 +99,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Config knob shrink.notifyMaxChars",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/architecture/m2_shrink_operator_echo.md for the exact config.ts insertion points. MulliganConfig.shrink interface is at src/config.ts lines ~46-57; DEFAULT_CONFIG.shrink at lines ~127-130; validateConfig shrink block at lines ~260-263. The pattern is coerceNumber('shrink.<field>', v, cfg.shrink.<field>, true) — true means mustBePositive (>0).\n2. INPUT: The current src/config.ts file (MulliganConfig interface, DEFAULT_CONFIG, validateConfig).\n3. LOGIC: Add `notifyMaxChars: number` to the MulliganConfig.shrink interface (after staleAfterFires). Add `notifyMaxChars: 2048` to DEFAULT_CONFIG.shrink (after staleAfterFires). Add the validation line in validateConfig's shrink block (after staleAfterFires): `v = safeGet(shrinkRaw, 'notifyMaxChars'); if (v !== undefined) cfg.shrink.notifyMaxChars = coerceNumber('shrink.notifyMaxChars', v, cfg.shrink.notifyMaxChars, true);`. JSDoc on the interface field cites spec/09 §3 (pure UI side-channel, zero context cost).\n4. OUTPUT: config.shrink.notifyMaxChars is a validated number (default 2048; invalid values ≤0/non-number → 2048 + warn). Accessible via getConfig().shrink.notifyMaxChars.\n5. DOCS: [Mode A] The interface JSDoc update IS this subtask's inline doc. No separate doc file.",
