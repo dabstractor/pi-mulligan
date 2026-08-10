@@ -558,6 +558,24 @@ async function rewindExecute(
       hideEntryIds = [];
     }
 
+    // (5b) protected-refusal check — spec/08 E3 ("the tool refuses before persisting") + spec/10 §2.1 F-protected
+    //      ("no marker created"). resolveLastTurn (transforms.ts:345) ALREADY refuses the nuclear-first-user case
+    //      by returning { remove: [] } (iFirstUser === iLastUser); resolvePreview surfaces that as k === 0. Act on
+    //      it HERE, before renderNote/persist, so a nuclear last_turn across the FIRST/ONLY user message (the
+    //      original task) refuses instead of persisting a no-op marker + stray note + success text (BUG-006).
+    //      NARROWLY SCOPED: the three-way AND excludes every legitimate K=0 success — last_tool_call_group
+    //      (granularity !== "last_turn") and default last_turn (to_previous_prompt !== true) stay on the success
+    //      path. If resolvePreview threw (catch above → k=0), a nuclear last_turn refuses too (SAFE per E3: when
+    //      in doubt, protect the original task; no existing test regresses — the best-effort tests use
+    //      last_tool_call_group/checkpoint, not nuclear-last_turn). Routes through refuse() so the
+    //      rt.rewindRefusedTurnIndex flag latches (P4.M1.T2.S3) like every other refusal.
+    if (granularity === "last_turn" && params.to_previous_prompt === true && k === 0) {
+      return refuse(
+        "would cross a protected message (to_previous_prompt would rewind across the first/only user message — the original task)",
+        "last_turn",
+      );
+    }
+
     // (6) render note (step 6 — note already validated by step 2; renderNote does NOT re-validate).
     const rendered = renderNote((params.note as NoteInput) ?? ({} as NoteInput), ledger, granularity);
 

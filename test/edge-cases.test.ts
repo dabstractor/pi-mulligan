@@ -444,15 +444,20 @@ describe("E3 — Rewinding across a protected message (filter-side defense)", ()
     expect(out).toBe(msgs); // no-op (the message is protected)
   });
 
-  it("the TOOL persists even for a protected rewind (the filter no-ops; GOTCHA #10)", async () => {
+  it("the TOOL refuses a nuclear protected rewind before persisting (spec/08 E3; spec/10 §2.1 F-protected; BUG-006)", async () => {
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx();
     const tool = makeRewindTool(pi);
-    // A last_turn nuclear rewind on a fresh (no-user-message) snapshot — persists regardless.
+    // A last_turn nuclear rewind (to_previous_prompt:true) on a snapshot with NO user message is the protected
+    // first-user case (iFirstUser===iLastUser → resolveLastTurn returns {remove:[]} → k===0). Step 5b now refuses
+    // BEFORE renderNote/persist (the filter's protectedOk remains defense-in-depth for the non-nuclear cases).
     const res = await tool.execute("rw-prot", rewindParams({ granularity: "last_turn", to_previous_prompt: true }), undefined, undefined, ctx);
-    expect(firstText(res)).toMatch(/rewound|refused/); // tool returned a text result (it does NOT pre-check protected)
-    // The tool persists the marker + note (the filter is what no-ops, not the tool).
-    expect(appended.length + sent.length).toBeGreaterThan(0);
+    expect(firstText(res)).toContain("Mulligan: refused —"); // tool refused before persisting (spec/08 E3)
+    expect(firstText(res)).toContain("would cross a protected message");
+    // F-protected (spec/10 §2.1): NO marker persisted, NO note left.
+    expect(appended).toHaveLength(0); // no mulligan:rewind marker
+    expect(sent).toHaveLength(0); // no mulligan:note
+    expect(res.details).toEqual({ granularity: "last_turn" });
   });
 });
 

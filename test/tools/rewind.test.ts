@@ -426,6 +426,34 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
   });
 });
 
+// ── refusal path 5b: protected message (spec/08 E3; spec/10 §2.1 F-protected) ─────────────────────────
+
+describe("mulligan_rewind — refusal: protected message (step 5b; spec/08 E3, spec/10 §2.1 F-protected)", () => {
+  it("nuclear last_turn (to_previous_prompt:true) on the FIRST/ONLY user message → refusal; NO marker created (BUG-006)", async () => {
+    // Reproduces BUG-006: resolveLastTurn (transforms.ts:345) CORRECTLY returns {remove:[]} for the
+    // nuclear-first-user case (iFirstUser===iLastUser), but rewindExecute treated k===0 as a legitimate K=0
+    // rewind and PERSISTED a no-op marker anyway — violating spec/08 E3 ("refuses before persisting") and
+    // spec/10 §2.1 F-protected ("no marker created"). Step 5b now refuses BEFORE renderNote/persist when
+    // last_turn + to_previous_prompt + k===0. A SINGLE user message is both the first AND latest user message.
+    const { appended, sent, pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry(user("the original task")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn", to_previous_prompt: true }, "call-1");
+    // E3 refusal text (refusal() adds the "Mulligan: refused — " prefix + trailing "."):
+    expect(firstText(res)).toContain("Mulligan: refused —");
+    expect(firstText(res)).toContain("would cross a protected message");
+    // F-protected: NO marker persisted, NO note left (refuse BEFORE step 6 renderNote + step 7 persist):
+    expect(appended).toHaveLength(0); // no mulligan:rewind marker
+    expect(sent).toHaveLength(0); // no mulligan:note
+    expect(res.details).toEqual({ granularity: "last_turn" });
+  });
+});
+
 // ── P4.M1.T2.S3: refused-rewind flag (rt.rewindRefusedTurnIndex) ────────────
 
 describe("mulligan_rewind — refusal latches rt.rewindRefusedTurnIndex (P4.M1.T2.S3)", () => {
@@ -529,9 +557,14 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
 
   it("persisted options.to_previous_prompt === undefined when omitted; === the passed value when set (last_turn)", async () => {
     const { appended, pi } = makePi();
-    // last_turn: one user message at index 0; everything after is the rewind's own unit (excluded) → remove=[] → K=0.
+    // last_turn NUCLEAR (to_previous_prompt:true) with TWO user messages: iFirstUser(0) !== iLastUser(3) → NOT the
+    // protected first-user case (step 5b refuses only a single-user-message nuclear rewind). The rewind's own unit
+    // (call-1) is excluded → resolveLastTurn returns remove=[3] → K=1, marker persists with options.to_previous_prompt===true.
     const { ctx } = makeCtx({
       contextEntries: [
+        msgEntry(user("first prompt")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
         msgEntry(user("please do X")),
         msgEntry(asst("call-1")),
         msgEntry(result("call-1")),
