@@ -52,6 +52,7 @@ import { Type } from "typebox";
 import type { Static } from "typebox";
 import {
   defineTool,
+  sessionEntryToContextMessages, // NEW (S2) — SessionEntry → AgentMessage[] for the target-path snapshot
   type AgentToolResult,
   type ExtensionAPI,
   type ExtensionContext,
@@ -60,6 +61,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { appendCancelMarker } from "../markers.js"; // GOTCHA #8: .js extension (ESM/Bundler resolution)
 import type { CancelMarkerInput } from "../markers.js";
+import { resolveShrinkTarget } from "../transforms.js"; // NEW (S2) — pure resolver (Pi-free; 0 imports → no circular dep)
+import type { ShrinkTarget } from "../transforms.js"; // NEW (S2) — ≡ markers.ts ShrinkTarget ≡ CancelParams.target
+import type { MessageLike } from "../transforms.js"; // NEW (S2) — Pi-free structural message type
 import { getConfig } from "../config.js"; // GOTCHA: read getConfig() ONCE per execute
 
 // ── Parameter schema (spec/05 §5 — Typebox, VERBATIM incl. the markerId description) ──────────────────
@@ -190,6 +194,116 @@ function readOwn(obj: unknown, key: string): unknown {
   }
 }
 
+// ── target-path helpers (S2 / P1.M1.T1.S2 — cancel-by-target resolution) ────
+
+/**
+ * entryIdAtMessageIndex — map a resolved MESSAGE index back to the ENTRY id of the snapshot entry that produced
+ * it (verbatim clone of shrink.ts's module-private helper — it is NOT exported there, so this file keeps its own
+ * copy; D4). Cursor-walks `entries` using the SAME `entries.flatMap(sessionEntryToContextMessages)` mapping that
+ * built `messages`, so entry `e` ↔ messages[cursor..cursor+yield) is EXACT BY CONSTRUCTION (no position math).
+ * Used by the cancel target path to check rewind hideEntryIds membership — those hold ENTRY ids, NOT message
+ * indices (GOTCHA #4), so the matched message index MUST be mapped to its entry id first.
+ *
+ * Defensive: non-array `entries` / non-finite/negative `index` → null; a throwing sessionEntryToContextMessages
+ * → null (alignment indeterminate → safe no-cover). The entry id is read via the LOCAL readOwn (more defensive
+ * than shrink.ts's cast; both correct). Returns null on no-match or a non-string/empty id.
+ */
+function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string | null {
+  if (!Array.isArray(entries) || typeof index !== "number" || !Number.isFinite(index) || index < 0) return null;
+  let cursor = 0;
+  for (const e of entries) {
+    let y: number;
+    try {
+      y = sessionEntryToContextMessages(e).length; // typically 1 (message/custom_message/branch_summary)
+    } catch {
+      return null; // a throwing mapping → alignment indeterminate → null (safe no-cover, E13)
+    }
+    if (index < cursor + y) {
+      const id = readOwn(e, "id");
+      return typeof id === "string" && id.length > 0 ? id : null;
+    }
+    cursor += y;
+  }
+  return null;
+}
+
+/**
+ * resolveTargetUuid — the TARGET path of step 3 (spec/05 §5 step 3 — target-preferred, markerId-wins-when-both).
+ * Resolves `target` against the compaction-aware message snapshot → the matched message index → the MOST RECENT
+ * active rewind/shrink whose effect COVERS that message (LIFO by seq) → that marker's uuid `data.id`. Returns null
+ * when `target` matches nothing OR no active marker covers it (→ step 4 no-op). Mirrors shrink.ts's
+ * resolveTargetEntryId snapshot build (INLINED here — NOT a shared cross-file helper; D4) + the
+ * entryIdAtMessageIndex cursor-walk.
+ *
+ * COVERING RULES (spec/05 §5 step 3 — the covering ternary IS the entire rule):
+ *  - SHRINK covers index i: resolving the shrink's OWN `data.target` against the SAME snapshot yields i (LIVE
+ *    resolution — compaction-robust; NOT `pinnedEntryId`, which is the filter's identity-lock — GOTCHA #5, D3).
+ *  - REWIND covers index i: the matched message's entry id (entryIdAtMessageIndex) is a member of the rewind's
+ *    `data.hideEntryIds` (GOTCHA #4 — hideEntryIds hold ENTRY ids, NOT message indices; a rewind with no/absent
+ *    hideEntryIds covers nothing → skip).
+ *  - LIFO: among covering markers, the one with the HIGHEST `data.seq` wins (latest-issued = likely mistake;
+ *    GOTCHA #6). Non-finite/non-number seq coerces to 0 (a real marker is always stamped, so 0 only affects a
+ *    malformed marker — it loses to any well-formed one).
+ *  - Malformed markers (no/empty uuid, unreadable target/hideEntryIds/seq) are SKIPPED — never throws (the whole
+ *    body is wrapped in try/catch → null; the outer cancelExecute try/catch also covers it, E13).
+ *
+ * `entries` is the step-2 getEntries() result (markers live there, passed in — do NOT re-read getEntries here;
+ * C12 is satisfied once per execute). `snapshotEntries` is a SEPARATE fresh buildContextEntries() read — the
+ * message snapshot + the index→entry mapping MUST come from the SAME surface, so entryIdAtMessageIndex gets
+ * snapshotEntries (NOT entries) for exact alignment (GOTCHA #3).
+ */
+function resolveTargetUuid(
+  ctx: ExtensionContext,
+  entries: SessionEntry[],
+  target: ShrinkTarget,
+): string | null {
+  try {
+    // (i) build the message snapshot (mirror shrink.ts:resolveTargetEntryId — INLINED, not a shared helper).
+    const snapshotEntries = ctx.sessionManager.buildContextEntries();
+    // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free structural
+    // type → the `as unknown as MessageLike[]` double-cast is REQUIRED (GOTCHA #10 — same idiom shrink.ts:220 uses).
+    const messages = snapshotEntries.flatMap((e) => sessionEntryToContextMessages(e)) as unknown as MessageLike[];
+    // (ii) resolve params.target → matched message index (the SAME pure resolver shrink uses; never throws).
+    const matchedIndex = resolveShrinkTarget(messages, target);
+    if (matchedIndex === null) return null; // target matched nothing → no covering marker
+    // (iii) map the matched message index → its entry id (for the rewind hideEntryIds membership check — GOTCHA #4).
+    const matchedEntryId = entryIdAtMessageIndex(snapshotEntries, matchedIndex);
+    // (iv) collect covering markers (active rewind/shrink) + pick the most recent by seq (LIFO).
+    let bestUuid: string | null = null;
+    let bestSeq = -Infinity;
+    for (const e of entries) {
+      const ct = readOwn(e, "customType");
+      if (ct !== "mulligan:rewind" && ct !== "mulligan:shrink") continue; // excludes notes/turn-metric/cancel
+      const data = readOwn(e, "data");
+      const uuid = readOwn(data, "id");
+      if (typeof uuid !== "string" || uuid.length === 0) continue; // malformed marker → skip
+      let covers = false;
+      if (ct === "mulligan:shrink") {
+        const shrinkTarget = readOwn(data, "target");
+        // unknown → ShrinkTarget assertion is allowed; resolveShrinkTarget re-validates isRecord(target) → null.
+        const resolved = resolveShrinkTarget(messages, shrinkTarget as ShrinkTarget);
+        covers = resolved === matchedIndex; // SHRINK: own target resolves to the matched index (live, not pinned)
+      } else {
+        const hideEntryIds = readOwn(data, "hideEntryIds");
+        // REWIND: matched msg's entry id ∈ hidden span (a rewind with no/absent hideEntryIds covers nothing).
+        if (matchedEntryId !== null && Array.isArray(hideEntryIds)) {
+          covers = hideEntryIds.includes(matchedEntryId);
+        }
+      }
+      if (!covers) continue;
+      const seq = readOwn(data, "seq");
+      const seqNum = typeof seq === "number" && Number.isFinite(seq) ? seq : 0;
+      if (seqNum > bestSeq) {
+        bestSeq = seqNum;
+        bestUuid = uuid;
+      }
+    }
+    return bestUuid;
+  } catch {
+    return null; // throwing buildContextEntries/sessionEntryToContextMessages/resolveShrinkTarget → null (E13)
+  }
+}
+
 // ── execute (spec/05 §5 behavior; shared tool convention = never throws) ─────
 
 /**
@@ -198,9 +312,16 @@ function readOwn(obj: unknown, key: string): unknown {
  *      NO config.cancel sub-knob (GOTCHA #6 — retraction is a safety hatch, always on when mulligan is on).
  *   2. read getEntries() FRESH (step 2; C12): try/catch → [] on throw (defense-in-depth; the outer try/catch
  *      also covers this, but an explicit fallback keeps the scan deterministic on a throwing getEntries).
- *   3. find the target entry (step 3): scan for entry.id === params.markerId AND customType ∈
- *      {"mulligan:rewind","mulligan:shrink"} (excludes notes/turn-metric/cancel); read data.id (uuid) via
- *      readOwn; a non-string/empty uuid → skip (malformed marker).
+ *   3. resolve the marker to retire (step 3; target-preferred, markerId-wins-when-both — Decision D1): if
+ *      `params.markerId` is a non-empty string, scan entries for entry.id===markerId ∧ customType∈
+ *      {rewind,shrink} → read data.id (uuid) [MARKERID PATH, verbatim — the only path the existing tests use].
+ *      ELSE if `params.target`, build the message snapshot (buildContextEntries().flatMap(
+ *      sessionEntryToContextMessages)), resolveShrinkTarget → matched index, then pick the MOST RECENT active
+ *      rewind/shrink whose effect COVERS that message (shrink: its own data.target resolves to the index;
+ *      rewind: the index's entry id ∈ data.hideEntryIds; LIFO by seq) → read data.id (uuid) [TARGET PATH,
+ *      resolveTargetUuid]. ELSE (neither) targetUuid stays null → step 4 no-op (fail-open; Decision D2 — no new
+ *      refusal path). A non-string/empty/malformed uuid → not found (step 4). Either path yields targetUuid
+ *      (the marker's uuid data.id) or null; both feed the UNCHANGED steps 4-7.
  *   4. not-found no-op (step 4): return the "no active marker found" no-op text + details:{cancelled:false};
  *      appendCancelMarker NOT called.
  *   5. already-cancelled check (step 5; GOTCHA #7 idempotency): re-scan ALL entries for customType===
@@ -238,22 +359,33 @@ async function cancelExecute(
       entries = [];
     }
 
-    // (3) find the target entry (spec/05 §5 step 3 — CRITICAL GOTCHA #1, the markerId→uuid mapping).
-    //     The agent passed the ENTRY id; we MAP it to the marker's uuid `data.id`, which is what readMarkers
-    //     drops by (cancelledIds holds uuids, never entry ids). customType ∈ {rewind,shrink} excludes notes
-    //     (customType "mulligan:note"), turn-metric, and other cancels automatically. readOwn every field.
+    // (3) resolve the marker to retire (spec/05 §5 step 3 — target-preferred, markerId-wins-when-both; Decision D1).
+    //     markerId path: when markerId is present + non-empty, it is AUTHORITATIVE ("markerId wins if both given";
+    //     also the sole path for markerId-only calls). target path: resolve target → matched message → covering
+    //     marker (shrink|rewind, LIFO by seq) → uuid. Either yields targetUuid (the marker's data.id uuid) or null;
+    //     both feed the UNCHANGED steps 4-7.
     let targetUuid: string | null = null;
-    for (const e of entries) {
-      if (readOwn(e, "id") !== params.markerId) continue;
-      const ct = readOwn(e, "customType");
-      if (ct !== "mulligan:rewind" && ct !== "mulligan:shrink") continue;
-      const data = readOwn(e, "data");
-      const uuid = readOwn(data, "id");
-      if (typeof uuid === "string" && uuid.length > 0) {
-        targetUuid = uuid; // the uuid `data.id` of the rewind/shrink being cancelled
-        break;
+    if (typeof params.markerId === "string" && params.markerId.length > 0) {
+      // (3a) MARKERID PATH (verbatim current logic — preserved byte-for-byte so existing tests pass unchanged;
+      //     GOTCHA #2). The agent passed the ENTRY id; we MAP it to the marker's uuid `data.id` (what readMarkers
+      //     drops by — cancelledIds holds uuids, never entry ids; CRITICAL GOTCHA #1).
+      for (const e of entries) {
+        if (readOwn(e, "id") !== params.markerId) continue;
+        const ct = readOwn(e, "customType");
+        if (ct !== "mulligan:rewind" && ct !== "mulligan:shrink") continue;
+        const data = readOwn(e, "data");
+        const uuid = readOwn(data, "id");
+        if (typeof uuid === "string" && uuid.length > 0) {
+          targetUuid = uuid; // the uuid `data.id` of the rewind/shrink being cancelled
+          break;
+        }
       }
+    } else if (params.target) {
+      // (3b) TARGET PATH — resolve target → covering marker → uuid (resolveTargetUuid never throws → null on
+      //     no-match; step 2's getEntries() `entries` is passed in — buildContextEntries() is read fresh inside).
+      targetUuid = resolveTargetUuid(ctx, entries, params.target);
     }
+    // else: neither markerId nor target → targetUuid stays null → step 4 no-op (Decision D2 — no new refusal).
 
     // (4) not-found no-op (spec/05 §5 step 4; E21 (d) — safe no-op, never throws). appendCancelMarker NOT called.
     if (targetUuid === null) {
