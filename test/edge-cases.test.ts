@@ -983,18 +983,18 @@ describe("E17 — Two shrinks target the same message (last-wins by seq, not ins
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("E18 — Model ignores the nudges (advisory text — a suggestion, not a force)", () => {
-  it("renderDriftNudge: the text SUGGESTS consider rewind/shrink (it does not force anything)", () => {
+  it("renderDriftNudge: the text SUGGESTS rewind/shrink (it does not force anything)", () => {
     const text = renderDriftNudge({ deltaTokens: 4000, bloatHits: [] } as never);
-    expect(text).toContain("consider");
+    expect(text).toContain("call");
     // The nudge names the tools (advisory) — D3.
     expect(text.includes("mulligan_rewind") || text.includes("mulligan_shrink")).toBe(true);
   });
 
   it("the nudge is TEXT only (no behavioral hook) — it cannot force the model", () => {
     // injectNudge (in nudges.ts) appends an EPHEMERAL mulligan:nudge CustomMessage to a COPY of messages;
-    // it NEVER calls a tool or mutates state. We assert the text shape is advisory (lowercase "consider").
+    // it NEVER calls a tool or mutates state. We assert the text shape is advisory (lowercase "call").
     const text = renderDriftNudge({ deltaTokens: 5000, bloatHits: [{ toolName: "read", approxTokens: 1000 }] } as never);
-    expect(text.toLowerCase()).toContain("consider");
+    expect(text.toLowerCase()).toContain("call");
     expect(text).toMatch(/mulligan_rewind|mulligan_shrink/);
   });
 });

@@ -401,11 +401,9 @@ describe("renderNote — types", () => {
 // APPENDED below the S1 validateNote + S2 renderNote tests, which are UNCHANGED.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The two FIXED tail lines of the drift nudge (spec/07 §2) — reused across every drift case. */
-const DRIFT_TAIL = [
-  "If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).",
-  "Run `mulligan_audit` for a breakdown.",
-];
+/** The FIXED tail of the drift nudge (spec/07 §2) — appended after "<lead>." in every drift case. */
+const DRIFT_TAIL =
+  ". If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.";
 
 describe("renderBloatReminder — spec/07 §1 pinned format", () => {
   it("8 KB result → 'This result added ~8 KB …'; leading \n---\n; no trailing newline", () => {
@@ -474,25 +472,29 @@ describe("renderBloatReminder — snapshot-style (spec/10 §1.8-style)", () => {
   });
 });
 
-describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tails FIXED)", () => {
-  it("delta only (4200 tokens) → 'added ~4.2k tokens'; no bloat clause; no trailing newline", () => {
+describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tail FIXED)", () => {
+  it("delta only (4200 tokens) → 'added ~4.2k tokens'; no bloat clause; no trailing newline; single physical line", () => {
     const out = renderDriftNudge({ deltaTokens: 4200, bloatHits: [] });
-    expect(out).toBe(["[mulligan] Previous turn added ~4.2k tokens to your context.", ...DRIFT_TAIL].join("\n"));
+    expect(out).toBe("Previous turn added ~4.2k tokens to your context" + DRIFT_TAIL);
     expect(out.endsWith("\n")).toBe(false);
     expect(out).not.toContain("bloated");
+    expect(out).not.toContain("[mulligan]");
+    expect(out).not.toContain("consider");
+    expect(out).not.toContain("\n");
   });
 
-  it("delta + 1 bloat hit → '… and produced 1 bloated result' (singular)", () => {
+  it("delta + 1 bloat hit → delta WINS, bloat dropped (no 'and produced …')", () => {
     const out = renderDriftNudge({
       deltaTokens: 5000,
       bloatHits: [{ toolName: "read", approxTokens: 7680 }],
     });
-    expect(out).toBe(
-      ["[mulligan] Previous turn added ~5k tokens to your context and produced 1 bloated result.", ...DRIFT_TAIL].join("\n"),
-    );
+    expect(out).toBe("Previous turn added ~5k tokens to your context" + DRIFT_TAIL);
+    expect(out).not.toContain("bloated"); // GOTCHA #4 — delta path never mentions bloat
+    expect(out).not.toContain("[mulligan]");
+    expect(out).not.toContain("consider");
   });
 
-  it("delta + 3 bloat hits → '… and produced 3 bloated results' (plural)", () => {
+  it("delta + 3 bloat hits → delta WINS, bloat dropped (no 'and produced …')", () => {
     const out = renderDriftNudge({
       deltaTokens: 8000,
       bloatHits: [
@@ -501,7 +503,10 @@ describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tai
         { toolName: "read", approxTokens: 3000 },
       ],
     });
-    expect(out).toContain("[mulligan] Previous turn added ~8k tokens to your context and produced 3 bloated results.");
+    expect(out).toContain("Previous turn added ~8k tokens to your context.");
+    expect(out).not.toContain("bloated"); // GOTCHA #4 — delta path never mentions bloat
+    expect(out).not.toContain("[mulligan]");
+    expect(out).not.toContain("consider");
   });
 
   it("null delta + 2 bloat hits (first turn) → bloat LEADS as 'Previous turn produced 2 bloated results' (GOTCHA #6)", () => {
@@ -512,16 +517,19 @@ describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tai
         { toolName: "bash", approxTokens: 1024 },
       ],
     });
-    expect(out).toBe(["[mulligan] Previous turn produced 2 bloated results.", ...DRIFT_TAIL].join("\n"));
+    expect(out).toBe("Previous turn produced 2 bloated results" + DRIFT_TAIL);
     expect(out).not.toContain("added ~"); // the delta clause is DROPPED, not rendered as "~0k"
+    expect(out).not.toContain("[mulligan]");
+    expect(out).not.toContain("consider");
   });
 
   it("null delta + empty bloat (defensive, unreachable via shouldNudge) → neutral fallback line", () => {
     const out = renderDriftNudge({ deltaTokens: null, bloatHits: [] });
-    expect(out).toBe(["[mulligan] Previous turn changed your context.", ...DRIFT_TAIL].join("\n"));
+    expect(out).toBe("Previous turn changed your context" + DRIFT_TAIL);
+    expect(out).not.toContain("[mulligan]");
   });
 
-  it("the two tail lines are FIXED and present in EVERY case", () => {
+  it("the tail is FIXED and present in EVERY case", () => {
     const cases: DriftNudgeInput[] = [
       { deltaTokens: 4200, bloatHits: [] },
       { deltaTokens: 5000, bloatHits: [{ toolName: "read", approxTokens: 7680 }] },
@@ -530,8 +538,7 @@ describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tai
     ];
     for (const c of cases) {
       const out = renderDriftNudge(c);
-      expect(out).toContain(DRIFT_TAIL[0]);
-      expect(out).toContain(DRIFT_TAIL[1]);
+      expect(out).toContain(DRIFT_TAIL);
     }
   });
 });
@@ -562,7 +569,7 @@ describe("renderDriftNudge — rounding & pluralization", () => {
 describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
   it("a null metric passed as DriftNudgeInput → neutral fallback, not a throw", () => {
     expect(() => renderDriftNudge(null as unknown as DriftNudgeInput)).not.toThrow();
-    expect(renderDriftNudge(null as unknown as DriftNudgeInput)).toContain("[mulligan] Previous turn changed your context.");
+    expect(renderDriftNudge(null as unknown as DriftNudgeInput)).toContain("Previous turn changed your context.");
   });
 
   it("an array metric → neutral fallback, not a throw", () => {
@@ -598,17 +605,15 @@ describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
     );
     expect(() => renderDriftNudge(trap)).not.toThrow();
     // every read throws → delta null + bloat [] → neutral fallback
-    expect(renderDriftNudge(trap)).toContain("[mulligan] Previous turn changed your context.");
+    expect(renderDriftNudge(trap)).toContain("Previous turn changed your context.");
   });
 });
 
 describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
   it("representative drift-only nudge (~4.2k tokens)", () => {
-    expect(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toMatchInlineSnapshot(`
-      "[mulligan] Previous turn added ~4.2k tokens to your context.
-      If that growth was wasteful, consider \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result).
-      Run \`mulligan_audit\` for a breakdown."
-    `);
+    expect(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toMatchInlineSnapshot(
+      '"Previous turn added ~4.2k tokens to your context. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown."',
+    );
   });
 
   it("representative first-turn bloat-only nudge (null delta + 2 hits)", () => {
@@ -620,11 +625,9 @@ describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
           { toolName: "bash", approxTokens: 1024 },
         ],
       }),
-    ).toMatchInlineSnapshot(`
-      "[mulligan] Previous turn produced 2 bloated results.
-      If that growth was wasteful, consider \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result).
-      Run \`mulligan_audit\` for a breakdown."
-    `);
+    ).toMatchInlineSnapshot(
+      '"Previous turn produced 2 bloated results. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown."',
+    );
   });
 });
 

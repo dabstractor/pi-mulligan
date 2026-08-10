@@ -230,7 +230,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Nudge text simplification + §5.3 alignment",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Simplify renderBloatReminder (drop threshold arg, new text) and renderDriftNudge (drop [mulligan] prefix + bloat clause). Align suppressCheck JSDoc to spec/07 §5.3 and confirm the negative test.",
           "tasks": [
             {
@@ -262,14 +262,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Drift nudge text (drop prefix + bloat clause)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Remove the [mulligan] prefix and the bloat clause from the delta-available path of renderDriftNudge.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "renderDriftNudge rewrite",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/architecture/m4_nudge_text_simplification.md for the exact current vs target text. Current renderDriftNudge at src/notes.ts ~line 322: emits [mulligan] prefix on first line + a 4-branch if/else over (delta!=null) × (bloat). The spec (spec/07 §2 renderDriftNudge) shows the delta-available path as a single line with NO bloat clause and NO [mulligan] prefix.\n2. INPUT: The current src/notes.ts renderDriftNudge function and its JSDoc.\n3. LOGIC:\n   (a) Remove the [mulligan] prefix from the output (was `[mulligan] ${firstLine}.`).\n   (b) Collapse the first-line if/else:\n     - When delta != null (normal path): `Previous turn added ~<delta>k tokens to your context. If that growth was wasteful, call \\`mulligan_rewind\\` (undo the turn) or \\`mulligan_shrink\\` (compact a result); run \\`mulligan_audit\\` for a breakdown.` — single line, NO bloat mention.\n     - When delta == null AND bloat > 0 (no-delta fallback): `Previous turn produced <N> bloated result(s). If that growth was wasteful, call \\`mulligan_rewind\\` (undo the turn) or \\`mulligan_shrink\\` (compact a result); run \\`mulligan_audit\\` for a breakdown.` — KEEPS a bloat-aware lead so the fallback still has signal.\n     - Both empty (totality fallback, unreachable via shouldNudge): keep a deterministic string.\n   (c) Update the JSDoc: FORMAT block + the 'bloat counts are cosmetic / never rendered' note.\n   (d) Keep kTokens/readDelta/readBloatHits + never-throws discipline unchanged. resultWord still used for the no-delta fallback.\n4. OUTPUT: renderDriftNudge renders the new text (no prefix, no bloat clause when delta available). The delta-available path is a single condensed line.\n5. DOCS: [Mode A] The JSDoc FORMAT block update IS the doc. No separate doc file.",
@@ -287,14 +287,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "§5.3 align + test (suppressCheck already implements it)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "suppressCheck already functionally implements §5.3 (ts-window suppression). Align its JSDoc to cite §5.3 explicitly and confirm/extend the negative test.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "suppressCheck JSDoc + test align to §5.3",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/architecture/m4_nudge_text_simplification.md. suppressCheck at src/nudges.ts ~line 390 already returns true (suppress) iff a rewind/shrink marker's ts falls in (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. Its JSDoc currently cites spec/07 §2 'Edge cases' but NOT §5.3. The mechanism (ts-window vs seq-based) is an acknowledged 'simple heuristic' — do NOT rewrite it to be seq-based.\n2. INPUT: The current src/nudges.ts suppressCheck function and its JSDoc (~line 367-390).\n3. LOGIC:\n   (a) Update the suppressCheck JSDoc to cite spec/07 §5.3 explicitly (not just §2 'Edge cases'). State the §5.3 framing: 'hard rule — drift nudge MUST NOT fire for a turn in which the agent already issued a rewind/shrink, regardless of delta or bloatHit'.\n   (b) Confirm/extend the negative test for spec/10 F-nudge-drift §5.3: a turn that produces a >threshold result AND shrinks/rewinds it in the same turn does NOT fire the drift nudge next turn. If the existing suppressCheck test already covers this (it keys on marker ts in-window), just assert the §5.3 acceptance (a)/(b)/(c) explicitly: (a) turn with >threshold result + shrink → no drift nudge; (b) turn with >threshold result + no action → fires normally; (c) turn with rewind → no drift nudge. Look in test/drift_nudge.test.ts and test/filter.test.ts.\n   (c) Do NOT rewrite suppressCheck to be seq-based unless a test reveals the ts-window mis-fires.\n4. OUTPUT: Updated suppressCheck JSDoc citing §5.3. Explicit §5.3 acceptance tests passing.\n5. DOCS: [Mode A] The suppressCheck JSDoc update IS the doc. No separate doc file.",

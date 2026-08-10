@@ -281,18 +281,22 @@ export function renderBloatReminder(toolName: string, bytes: number): string {
  * handler injects as a NON-persisted `mulligan:nudge` custom message (via injectNudge — spec/06 §1 + spec/07 §2)
  * when the previous turn grew context over threshold OR produced bloated results. ~25–40 tokens, only when it fires.
  *
- * FORMAT (spec/07 §2 — the FIRST line VARIES by input; the two tail lines are FIXED in all cases):
- *     [mulligan] <first line>.
- *     If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).
- *     Run `mulligan_audit` for a breakdown.
- * <first line> is an explicit if/else over (delta != null) × (bloat non-empty) — the bloat clause's SUBJECT differs
- * by position (see GOTCHA #6):
- *   - delta only:        "Previous turn added ~<k> tokens to your context"
- *   - delta + bloat:     "Previous turn added ~<k> tokens to your context and produced <N> bloated result(s)"
- *   - bloat only (null): "Previous turn produced <N> bloated result(s)"
- *   - both empty:        "Previous turn changed your context"   (unreachable via shouldNudge; totality fallback)
+ * FORMAT (spec/07 §2 — VERBATIM; a SINGLE physical string with NO embedded "\n"; the LEAD varies by input,
+ * the tail after "<lead>." is FIXED in all cases):
+ *     <lead>. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.
+ * <lead> is a 3-branch selection (delta WINS regardless of bloat):
+ *   - delta != null:         "Previous turn added ~<k> tokens to your context"   (NO bloat mention)
+ *   - delta == null, bloat>0: "Previous turn produced <N> bloated <resultWord>"   (the only bloat path)
+ *   - both empty:            "Previous turn changed your context"                 (unreachable; totality fallback)
  * <k> = kTokens(delta) (delta/1000, 1 decimal: 4200→"4.2k", 3000→"3k"); <N> = bloatHits.length;
- * result(s) = resultWord(N) (1→"result", else "results"). NO trailing newline.
+ * resultWord = resultWord(N) (1→"result", else "results"). NO [mulligan] prefix. NO trailing newline.
+ * NO embedded newline. The "consider"→"call" + "; run"-joined tail condenses the old 3-line form to one line.
+ *
+ * BLOAT IS COSMETIC ON THE DELTA PATH: pendingBloatHits are collected at tool_result time and are NOT subtracted
+ * when a later mulligan_rewind/shrink hides those results, so a bloat count on the delta path could surface stale
+ * figures (a since-shrunk result re-announced one turn later). The delta path therefore NEVER renders bloat —
+ * bloat is retained ONLY as the no-baseline fallback LEAD (first turn / post-reload, deltaTokens===null), where
+ * it is the sole available signal. (Per spec/07 §2 edge cases: the rough edge is closed at the rendering layer too.)
  *
  * DEFENSIVE — NEVER throws (fail-open nudge handler; spec/07 §2; E13). deltaTokens/bloatHits are read via readOwn
  * + isRecord/Array.isArray guards (mirrors S2's readLedgerList); a malformed/throwing-Proxy metric renders
@@ -302,26 +306,20 @@ export function renderBloatReminder(toolName: string, bytes: number): string {
  * is dropped and bloat leads.
  *
  * @param metric the drift metric projection (DriftNudgeInput — deltaTokens + bloatHits)
- * @returns the nudge string (3 lines joined by "\n"; NO trailing newline)
+ * @returns the nudge string (a SINGLE physical line; NO embedded "\n"; NO trailing newline)
  */
 export function renderDriftNudge(metric: DriftNudgeInput): string {
   const delta = readDelta(metric);
   const hits = readBloatHits(metric);
-  let firstLine: string;
-  if (delta != null && hits.length > 0) {
-    firstLine = `Previous turn added ~${kTokens(delta)} tokens to your context and produced ${hits.length} bloated ${resultWord(hits.length)}`;
-  } else if (delta != null) {
-    firstLine = `Previous turn added ~${kTokens(delta)} tokens to your context`;
+  let lead: string;
+  if (delta != null) {
+    lead = `Previous turn added ~${kTokens(delta)} tokens to your context`;
   } else if (hits.length > 0) {
-    firstLine = `Previous turn produced ${hits.length} bloated ${resultWord(hits.length)}`;
+    lead = `Previous turn produced ${hits.length} bloated ${resultWord(hits.length)}`;
   } else {
-    firstLine = "Previous turn changed your context"; // unreachable via shouldNudge; totality fallback
+    lead = "Previous turn changed your context"; // unreachable via shouldNudge; totality fallback
   }
-  return [
-    `[mulligan] ${firstLine}.`,
-    "If that growth was wasteful, consider `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result).",
-    "Run `mulligan_audit` for a breakdown.",
-  ].join("\n");
+  return `${lead}. If that growth was wasteful, call \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result); run \`mulligan_audit\` for a breakdown.`;
 }
 
 // ── S3 module-private helpers (mirror S2's readLedgerList; reuse S1's isRecord/readOwn) ─────────────

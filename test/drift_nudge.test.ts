@@ -152,7 +152,8 @@ describe("injectNudge — pure append, ephemeral (spec/07 §2)", () => {
     const result = injectNudge([], metric({ deltaTokens: 4200, bloatHits: [{ toolName: "read", approxTokens: 2100 }] }));
     const last = result[0] as Record<string, unknown>;
     expect(typeof last.content).toBe("string");
-    expect((last.content as string).startsWith("[mulligan]")).toBe(true);
+    expect((last.content as string).startsWith("Previous turn")).toBe(true);
+    expect((last.content as string)).not.toContain("[mulligan]");
   });
 
   it("does NOT stack when called repeatedly on the ORIGINAL input (ephemeral / recomputed each fire)", () => {
