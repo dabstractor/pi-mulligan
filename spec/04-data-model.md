@@ -32,22 +32,21 @@ All `customType` strings are namespaced under `mulligan:`. The `customType` is t
 
 ### 2.1 `NoteInput` — what the agent passes to `mulligan_rewind`
 
-All four fields are **required and non-empty** (enforced by the tool; see `@05-tools.md`). Free text, but each field has a mandated purpose. This structure is the primary defense against confabulation (D/D17): the resumed model is told explicitly what happened, what to avoid, what the true state is, and what to do next.
+All three fields are **required and non-empty** (enforced by the tool; see `@05-tools.md`). Free text, but each field has a mandated purpose. This structure is the primary defense against confabulation (D/D17): the resumed model is told explicitly what happened (and what to avoid), what the true state is, and what to do next.
 
 ```ts
 interface NoteInput {
-  /** What went wrong, concretely. Past tense. e.g. "Ran `grep -r auth .` and
-   *  dumped ~40k tokens of output I didn't need." */
+  /** What went wrong, concretely (past tense), AND the lesson — what to avoid
+   *  doing again. Generalize the lesson. e.g. "Ran `grep -r auth .` and dumped
+   *  ~40k tokens I didn't need; don't run repo-wide grep without -l or piping
+   *  to head — use the built-in grep tool which truncates." */
   what_happened: string;
 
-  /** What NOT to do again. Imperative. e.g. "Do not run grep without --quiet,
-   *  -c, or piping to head; prefer the built-in grep tool which truncates." */
-  avoid: string;
-
-  /** The current TRUE world state as of the rewind — files changed, commands
-   *  run, decisions made on the abandoned span. This is the state-ledger that
-   *  prevents redoing side-effectful work. The tool AUGMENTS this with a
-   *  deterministic file ledger (see §3) before rendering. */
+  /** The current TRUE world state as of the rewind — task progress, decisions,
+   *  and conclusions. This is the state-ledger that prevents redoing work. The
+   *  tool AUGMENTS this with a deterministic file ledger (see §3) that
+   *  auto-captures files/commands, so focus this field on what the ledger
+   *  cannot: decisions and where the task stands. */
   true_current_state: string;
 
   /** The immediate next action to take on resume. Imperative. e.g. "Re-run the
@@ -83,8 +82,6 @@ The tool composes the note the model sees from `NoteInput` + `FileLedger`:
 
 **What happened:** <what_happened>
 
-**Avoid:** <avoid>
-
 **Current true state:** <true_current_state>
 
 <files-read>
@@ -103,7 +100,7 @@ git commit -m "wip"
 **Next:** <next>
 ```
 
-The `<files-read>` / `<files-modified>` / `<bash-side-effects>` block tags mirror Pi's compaction summary convention, so a model accustomed to compaction summaries parses them naturally. If a ledger list is empty, omit its block. The agent-supplied `true_current_state` text is rendered as-is (the agent may already mention files; the ledger is the authoritative extracted set, presented separately for machine-readability).
+The `<files-read>` / `<files-modified>` / `<bash-side-effects>` block tags mirror Pi's compaction summary convention, so a model accustomed to compaction summaries parses them naturally. If a ledger list is empty, omit its block. The agent-supplied `true_current_state` text is rendered as-is (rendered verbatim; the ledger is the authoritative file/command set, presented separately — so focus this field on decisions and task progress, not files the ledger already covers).
 
 `renderNote(note: NoteInput, ledger: FileLedger, granularity: Granularity): string` is pure and unit-tested with snapshot-style cases.
 

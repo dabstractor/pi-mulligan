@@ -43,7 +43,7 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 - A known string yields a stable estimate (snapshot test).
 
 ### 1.8 `renderNote` / field validation
-- All four fields present → renders with ledger blocks; empty ledger lists → their blocks omitted.
+- All three fields present → renders with ledger blocks; empty ledger lists → their blocks omitted.
 - Any empty field → validation refuses (returns a structured error, not a rendered note).
 - Snapshot tests for representative notes.
 
@@ -84,7 +84,7 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 |---|---|---|
 | **F-rewind-core** | inject a canary `CustomMessage` at `session_start`; prompt the agent to call `mulligan_rewind(granularity:"last_tool_call_group")` after a bloated tool call | `context.fire` log shows canary present then dropped on the next inference (`context.filter before:N after:N-1`); a second assistant message is produced (auto-prompt); session JSONL has `mulligan:rewind` + `mulligan:note` entries |
 | **F-shrink-persist** | prompt agent to call a tool returning a large canary result, then `mulligan_shrink` it | next inference's filtered view shows the replacement; session JSONL toolResult is the original (shrink is a view-substitution, not a JSONL rewrite — **assert the original is still on disk and the substitution appears in the filtered cache**) |
-| **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended bloat reminder ("This result added ~…"); `turn-metric` records `bloatHit:true` |
+| **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended bloat reminder ("~… KB added to your context…"); `turn-metric` records `bloatHit:true` |
 | **F-nudge-drift** | sustained growth: 3 consecutive turns each adding ~4k tokens | after the 3rd turn the next inference's filtered view ends with a `mulligan:nudge` custom message (ephemeral; NOT in session JSONL). Negatives MUST also pass: a single ~8k-token turn amid small turns does NOT fire, and a single >threshold result with ~0 net growth does NOT fire the drift nudge (it only triggers Nudge A); and a turn that produces a >threshold result AND shrinks/rewinds it in the same turn does NOT fire the drift nudge next turn (§5.3 — Nudge A and B are non-overlapping) |
 | **F-protected** | attempt `mulligan_rewind(granularity:"last_turn", to_previous_prompt:true)` when it's the first user message | tool returns refusal text; no marker created |
 | **F-maxdepth** | create 5 rewinds, attempt a 6th | 6th refuses with depth message |

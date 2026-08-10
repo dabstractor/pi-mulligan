@@ -39,10 +39,10 @@ pi.on("tool_result", async (event, ctx) => {
 ### `renderBloatReminder(toolName, bytes)`
 ```md
 
-This result added ~<KB> KB to your context. If you don't need the full output, call `mulligan_shrink` with a summary or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole call was a mistake.
+~<KB> KB added to your context. `mulligan_shrink` to summarize, or `mulligan_rewind` if the whole call was a mistake.
 ```
 
-The reminder is **appended**, not replacing — the agent may genuinely need the full output right now; the hint is about *future turns*. It is a single line; modest token cost (~30 tokens) incurred once, only when the threshold is crossed.
+The reminder is **appended**, not replacing — the agent may genuinely need the full output right now; the hint is about *future turns*. It is a single line; modest token cost (~20 tokens) incurred once, only when the threshold is crossed.
 
 ### Threshold default & calibration
 - Default `bloatThresholdBytes = 16384` (16 KB ≈ 4k tokens in-context), deliberately **below** Pi's built-in 50 KB truncation cap so Mulligan catches meaningful-but-not-catastrophic results that slip under the built-in cap. The previous default was 8192 (8 KB); it was raised after observation showed 8 KB nagging on every routine source-file read (9–17 KB) — i.e. firing on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.).
@@ -129,7 +129,7 @@ function injectNudge(messages: AgentMessage[], metric: TurnMetric): AgentMessage
 ```
 `renderDriftNudge`:
 ```md
-Previous turn added ~<delta>k tokens to your context. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.
+Previous turn added ~<delta>k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.
 ```
 
 ### Why this is zero-extra-requests

@@ -13,7 +13,7 @@
 ## 1. `mulligan_rewind`
 
 ### Purpose
-The "mulligan." Shed recent context the agent produced by mistake (a bloated tool interaction, or a whole wrong-direction turn) and leave itself a structured note so the resumed attempt is better-informed. The hidden content disappears from the model's view from the next turn on (permanently) but remains on disk and visible in `/tree`. **The structured self-authored note is Mulligan's flagship UX** — it is what turns a hide into a *better-informed retry*: the resumed model reads `what_happened`/`avoid`/`true_current_state`/`next` and re-plans, rather than blindly repeating the discarded work.
+The "mulligan." Shed recent context the agent produced by mistake (a bloated tool interaction, or a whole wrong-direction turn) and leave itself a structured note so the resumed attempt is better-informed. The hidden content disappears from the model's view from the next turn on (permanently) but remains on disk and visible in `/tree`. **The structured self-authored note is Mulligan's flagship UX** — it is what turns a hide into a *better-informed retry*: the resumed model reads `what_happened`/`true_current_state`/`next` and re-plans, rather than blindly repeating the discarded work.
 
 ### When the agent should use it
 After a tool interaction whose output was far larger than useful, or after realizing a recent turn pursued a wrong approach. The cost of a rewind (a short note + tiny overhead) is far smaller than carrying the bloat for the rest of the task. **Do not** rewind trivial spans — if nothing material was wasted, keep going.
@@ -26,14 +26,12 @@ import { Type } from "typebox";
 const RewindParams = Type.Object({
   note: Type.Object({
     what_happened: Type.String({ description:
-      "Past tense: what specifically went wrong and wasted context. Be concrete." }),
-    avoid: Type.String({ description:
-      "Imperative: what NOT to do again on resume." }),
+      "Past tense: what went wrong and wasted context — and what to avoid doing again. Be concrete; generalize the lesson." }),
     true_current_state: Type.String({ description:
-      "The TRUE current state as of this rewind — files changed, commands run, decisions made on the span being discarded. This prevents redoing work. (A deterministic file ledger is auto-appended.)" }),
+      "The TRUE current state as of this rewind — task progress, decisions, and conclusions (files/commands are auto-captured in the ledger below). This prevents redoing work." }),
     next: Type.String({ description:
       "Imperative: the immediate next action to take when you resume." }),
-  }, { description: "The note your resumed self will read. All four fields required." }),
+  }, { description: "The note your resumed self will read. All three fields required." }),
 
   granularity: Type.Union([
     Type.Literal("last_tool_call_group"),
@@ -64,7 +62,7 @@ const RewindParams = Type.Object({
 
 ### Behavior (step by step)
 1. **Validate config:** if `config.rewind.enabled === false`, return a refusal text. (Allows the human to disable.)
-2. **Validate note:** all four `note.*` fields are non-empty after trim. Else return `"Mulligan: refused — note fields must all be non-empty."` (The structured note is the confabulation defense; half-hearted notes are rejected.)
+2. **Validate note:** all three `note.*` fields are non-empty after trim. Else return `"Mulligan: refused — note fields must all be non-empty."` (The structured note is the confabulation defense; half-hearted notes are rejected.)
 3. **Validate granularity/target:**
    - `last_tool_call_group` / `last_turn`: always valid (the filter resolves them; if there is nothing to rewind, the filter no-ops and the tool still reports success but with K=0 — see step 7).
    - `checkpoint`: the named checkpoint MUST exist on the current branch (scan `getEntries()` for a label `mulligan:checkpoint:<name>`). Else refuse.
@@ -90,8 +88,7 @@ The tool records a **spec**, not absolute indices. The filter resolves the spec 
 // Agent calls:
 mulligan_rewind({
   note: {
-    what_happened: "Ran `grep -r auth .` which returned ~38k tokens I didn't need.",
-    avoid: "Don't run repo-wide grep without -l or piping to head; use the built-in grep tool which truncates.",
+    what_happened: "Ran `grep -r auth .` which returned ~38k tokens I didn't need; don't run repo-wide grep without -l or piping to head — use the built-in grep tool which truncates.",
     true_current_state: "No files changed yet this turn. Had only just started the auth-bug search.",
     next: "Re-run as `grep -rl auth src/` then read only src/auth/session.ts."
   },
@@ -322,7 +319,7 @@ pi.registerTool({ name:"mulligan_cancel", label:"Mulligan Cancel", description: 
 Each `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the four factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCheckpointTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. The summary block above shows the equivalent object-literal form for readability.
 
 ### Description strings (craft carefully — they drive LLM usage)
-- **Rewind:** `"Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The hidden content disappears from your view permanently (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message."`
+- **Rewind:** `"Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message."`
 - **Shrink:** `"Replace a specific past tool result with a compact summary you provide, in your view, going forward. Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in context (just with your summary as its result)."`
 - **Checkpoint:** `"Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot."`
 - **Audit:** `"Show a token breakdown of the context you're currently carrying (what the model actually sees), flag the biggest contributors, and list active Mulligan markers. Use this to decide whether to rewind or shrink."`

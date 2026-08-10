@@ -110,7 +110,7 @@ mutation from a tool is impossible by type, not just convention.
 2. **Note authorship & structure (D4).** Agent prose vs generated summary vs
    hybrid. Pi already has a strong summary generator + structured format
    (Goal/Progress/Decisions/Critical-Context + read/modified files). Enforce
-   structured fields (`what_happened`, `avoid`, `true_current_state`, `next`)?
+   structured fields (`what_happened`, `true_current_state`, `next`)?
 3. **Preventive layer (D7).** A `tool_result` hook that auto-truncates/summarizes
    big results *before* they're stored. Now trivially implementable (proven hook).
    Auto-truncate-to-pointer vs auto-summarize vs advisory-only? Built-in tools or

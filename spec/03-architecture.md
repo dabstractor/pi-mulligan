@@ -74,11 +74,11 @@ Key helpers:
 ```
 1. Agent decides its last tool-call group was a mistake.
 2. Agent calls mulligan_rewind({
-     note: { what_happened, avoid, true_current_state, next },
+     note: { what_happened, true_current_state, next },
      granularity: "last_tool_call_group"
    }).
 3. Tool:
-   a. validates the note fields (all four MUST be non-empty — see @05-tools.md).
+   a. validates the note fields (all three MUST be non-empty — see @05-tools.md).
    b. resolves the target range NOW is not possible (the tool must not read the
       message list — see §2.1). Instead it records the granularity + a timestamp
       + a "turn index at call time" snapshot, and lets the FILTER resolve it
