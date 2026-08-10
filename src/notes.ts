@@ -246,12 +246,11 @@ export interface DriftNudgeInput {
  * renderBloatReminder — Nudge A's text (spec/07-preventive-and-nudges.md §1). Composes the short reminder the
  * tool_result handler APPENDS to a result's content when its byte size exceeds the threshold. The returned string
  * is the `text` of a `{type:"text"}` content block appended via `[...(event.content ?? []), {type:"text",
- * text:reminder}]`. ~30 tokens, incurred once per bloated result; advisory (D3) — appended, not replacing.
+ * text:reminder}]`. ~20 tokens, incurred once per bloated result; advisory (D3) — appended, not replacing.
  *
  * FORMAT (spec/07 §1 — VERBATIM; leading "\n---\n" is a markdown horizontal rule; single line):
- *     \n---\nThis result added ~<KB> KB to your context. If you don't need the full output, call
- *     `mulligan_shrink` with a summary or `mulligan_rewind(granularity:"last_tool_call_group")` if
- *     the whole call was a mistake.
+ *     \n---\n~<KB> KB added to your context. `mulligan_shrink` to summarize, or `mulligan_rewind`
+ *     if the whole call was a mistake.
  * <KB> = bytesToKb(bytes). NO [mulligan] prefix, NO threshold mention, NO "stays on disk" clause.
  * NO trailing newline.
  *
@@ -268,7 +267,7 @@ export interface DriftNudgeInput {
  */
 export function renderBloatReminder(toolName: string, bytes: number): string {
   const resultKb = bytesToKb(bytes);
-  return `\n---\nThis result added ~${resultKb} KB to your context. If you don't need the full output, call \`mulligan_shrink\` with a summary or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole call was a mistake.`;
+  return `\n---\n~${resultKb} KB added to your context. \`mulligan_shrink\` to summarize, or \`mulligan_rewind\` if the whole call was a mistake.`;
 }
 
 /**
@@ -278,14 +277,14 @@ export function renderBloatReminder(toolName: string, bytes: number): string {
  *
  * FORMAT (spec/07 §2 — VERBATIM; a SINGLE physical string with NO embedded "\n"; the LEAD varies by input,
  * the tail after "<lead>." is FIXED in all cases):
- *     <lead>. If that growth was wasteful, call `mulligan_rewind` (undo the turn) or `mulligan_shrink` (compact a result); run `mulligan_audit` for a breakdown.
+ *     <lead>. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.
  * <lead> is a 3-branch selection (delta WINS regardless of bloat):
  *   - delta != null:         "Previous turn added ~<k> tokens to your context"   (NO bloat mention)
  *   - delta == null, bloat>0: "Previous turn produced <N> bloated <resultWord>"   (the only bloat path)
  *   - both empty:            "Previous turn changed your context"                 (unreachable; totality fallback)
  * <k> = kTokens(delta) (delta/1000, 1 decimal: 4200→"4.2k", 3000→"3k"); <N> = bloatHits.length;
  * resultWord = resultWord(N) (1→"result", else "results"). NO [mulligan] prefix. NO trailing newline.
- * NO embedded newline. The "consider"→"call" + "; run"-joined tail condenses the old 3-line form to one line.
+ * NO embedded newline. The tail is a terse "If wasteful, … to undo / compact a result." suggestion; no `mulligan_audit` clause (§2 dropped it).
  *
  * BLOAT IS COSMETIC ON THE DELTA PATH: pendingBloatHits are collected at tool_result time and are NOT subtracted
  * when a later mulligan_rewind/shrink hides those results, so a bloat count on the delta path could surface stale
@@ -314,7 +313,7 @@ export function renderDriftNudge(metric: DriftNudgeInput): string {
   } else {
     lead = "Previous turn changed your context"; // unreachable via shouldNudge; totality fallback
   }
-  return `${lead}. If that growth was wasteful, call \`mulligan_rewind\` (undo the turn) or \`mulligan_shrink\` (compact a result); run \`mulligan_audit\` for a breakdown.`;
+  return `${lead}. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result.`;
 }
 
 // ── S3 module-private helpers (mirror S2's readLedgerList; reuse S1's isRecord/readOwn) ─────────────

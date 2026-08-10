@@ -89,21 +89,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Nudge text re-shortening",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Both context-riding renderers in notes.ts emit terser text. Pure text + JSDoc in notes.ts; assertion updates in notes.test.ts. Depends on M1 because both edit src/notes.ts (disjoint functions — M1 = note machinery, M2 = nudge renderers).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "renderBloatReminder + renderDriftNudge text + tests",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Rewrite both renderer bodies to the new shorter text forms. Update JSDoc FORMAT blocks. Update test assertions and inline snapshots in notes.test.ts.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Renderer text + JSDocs (renderBloatReminder + renderDriftNudge)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -126,7 +126,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Nudge text test assertions (notes.test.ts)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
