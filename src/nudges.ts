@@ -257,9 +257,11 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
 }
 
 /**
- * NUDGE_TURN_WINDOW_MS — the heuristic time window for suppressCheck (spec/07 §2 "Edge cases": suppress if a
- * rewind/shrink marker was created "during the metric's turn"). 10 minutes: a generous bound on a single agent
- * turn's wall-clock duration. A marker created during the turn that produced the metric falls inside
+ * NUDGE_TURN_WINDOW_MS — the heuristic time window for suppressCheck, which implements spec/07 §5.3 (REQUIRED,
+ * hard rule: suppress the drift nudge for a turn in which the agent already rewound/shrunk). §5.3 promotes the
+ * spec/07 §2 "Edge cases" ts-window heuristic to a hard rule; the window bounds "during the metric's turn" as
+ * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. 10 minutes: a generous bound on a single agent turn's wall-clock
+ * duration. A marker created during the turn that produced the metric falls inside
  * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]; markers from earlier turns fall outside. EXPORTED so tests can
  * reference the exact boundary. Best-effort by design (spec/07 §2 frames suppress as a "Simple heuristic"; the
  * whole nudge subsystem is best-effort). NOT config in v1 (config.ts is frozen by sibling PRPs); a future
@@ -364,11 +366,16 @@ export function injectNudge(messages: MessageLike[], metric: TurnMetric): Messag
 }
 
 /**
- * suppressCheck — Nudge B Phase 2 suppress heuristic (spec/07 §2 "Edge cases": "avoid nagging after the agent
- * already acted"). PURE: returns true (suppress the nudge) iff ANY rewind or shrink marker was created during the
- * metric's turn, approximated as: some marker.ts falls in the half-open window
- * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. Returns false otherwise (no markers / all older than the window /
- * marker ts in the future).
+ * suppressCheck — Nudge B Phase 2 suppress gate, implementing spec/07 §5.3 (REQUIRED, hard rule): the drift nudge
+ * MUST NOT fire for a turn in which the agent already issued a mulligan:rewind or mulligan:shrink that addressed
+ * the bloat/drift the nudge would describe — REGARDLESS of delta or bloatHit. §5.3 promotes the earlier spec/07
+ * §2 "Edge cases" ts-window heuristic ("avoid nagging after the agent already acted") to a hard rule; the
+ * MECHANISM is unchanged (an acknowledged "Simple heuristic" per spec/07 §2 — NOT seq-based). PURE: returns true
+ * (suppress the nudge) iff ANY rewind or shrink marker was created during the metric's turn, approximated as:
+ * some marker.ts falls in the half-open window (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. Returns false
+ * otherwise (no markers / all older than the window / marker ts in the future). Call site (filter.ts): the nudge
+ * fires iff `shouldNudge(recentMetrics, config) && !suppressCheck(markers.metric, markers)` — suppressCheck is
+ * the §5.3 gate AFTER shouldNudge (§5.1), composing with the E22 refusal-suppression rule.
  *
  * WHY a window, not a pure upper bound (GOTCHA #7): at nudge-fire time, readMarkers returns the LATEST metric + ALL
  * accumulated markers. A turn-N marker AND a turn-(N-1) marker both have ts <= metric.ts (the metric is the most-

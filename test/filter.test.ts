@@ -450,6 +450,7 @@ describe("contextHandler — disabled pass-through, transform+cache, fail-open (
     expect(pipelineCalls[1].branchEntries).toHaveLength(1);                      // saw the NEW branch
   });
 
+  // §5.3 acceptance (b): >threshold + no action → fires normally (integration-level mirror).
   it("injects the drift nudge when shouldNudge(metric) is true and not suppressed", () => {
     const { pi } = makePi();
     pipelineReturn = [{ role: "user", content: "P" }];
@@ -464,6 +465,8 @@ describe("contextHandler — disabled pass-through, transform+cache, fail-open (
     expect(typeof last.content).toBe("string");
   });
 
+  // §5.3 acceptance (c): >threshold + same-turn rewind → suppressed (integration-level mirror).
+  //     (§5.3 acceptance (a) [shrink] is covered at the unit tier in test/drift_nudge.test.ts.)
   it("does NOT inject the drift nudge when suppressed by a same-turn rewind marker", () => {
     const { pi } = makePi();
     pipelineReturn = [{ role: "user", content: "P" }];

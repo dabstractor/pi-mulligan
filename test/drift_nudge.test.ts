@@ -169,7 +169,7 @@ describe("injectNudge — pure append, ephemeral (spec/07 §2)", () => {
 
 // ── suppressCheck ───────────────────────────────────────────────────────────────────────────
 
-describe("suppressCheck — suppress heuristic window (spec/07 §2 Edge cases)", () => {
+describe("suppressCheck — §5.3 hard-rule suppress window (mechanism: ts-window; spec/07 §5.3, origin §2)", () => {
   const T = 1_000_000;
 
   it("returns false when there are no markers", () => {
@@ -216,6 +216,54 @@ describe("suppressCheck — suppress heuristic window (spec/07 §2 Edge cases)",
     // metric.ts = NaN → metricTs = 0 → lo = −window. A marker at ts=0 is in (−window, 0] → suppress.
     const m = metric({ ts: Number.NaN });
     expect(suppressCheck(m, { rewinds: [rewind(1, 0)], shrinks: [] })).toBe(true);
+  });
+});
+
+describe("suppressCheck — spec/07 §5.3 hard rule (acceptance a/b/c): drift nudge MUST NOT fire when the agent already acted", () => {
+  // §5.3: "if [the marker set created during the metric's turn] is non-empty, [the drift nudge] returns false
+  // for that metric REGARDLESS of delta or bloatHit". The IMPLEMENTATION delegates this to suppressCheck (a
+  // separate gate AFTER shouldNudge in filter.ts:319). The §5.3 NET nudge decision is
+  // `shouldNudge(recentMetrics, config) && !suppressCheck(metric, markers)` — the guard these tests assert.
+  // (Pure helpers — no Pi; the spec/10 F-nudge-drift §5.3 integration scenario is the real-pi mirror, already
+  // in test/integration/.)
+
+  // A sustained-growth window whose moving average (7000) exceeds the threshold (6000) → shouldNudge true.
+  // newest-first (highest seq at index 0); delta-only path (bloat irrelevant when delta data exists).
+  const driftWindow = (): TurnMetric[] => [
+    { schema:"pi-mulligan", v:1, kind:"turn-metric", seq:3, ts:3, deltaTokens:7000, bloatHit:false,
+      bloatHits:[], grewOverThreshold:false, turnIndex:3 } as TurnMetric,
+    { schema:"pi-mulligan", v:1, kind:"turn-metric", seq:2, ts:2, deltaTokens:7000, bloatHit:false,
+      bloatHits:[], grewOverThreshold:false, turnIndex:2 } as TurnMetric,
+    { schema:"pi-mulligan", v:1, kind:"turn-metric", seq:1, ts:1, deltaTokens:7000, bloatHit:false,
+      bloatHits:[], grewOverThreshold:false, turnIndex:1 } as TurnMetric,
+  ];
+  const cfg = (): MulliganConfig =>
+    ({ nudges: { driftWindowTurns: 3, driftThresholdTokens: 6000 } } as MulliganConfig);
+  const latest = (): TurnMetric => driftWindow()[0]; // seq 3, ts 3 — bounds the suppress window
+
+  it("(a) >threshold window + same-turn SHRINK → net nudge decision is FALSE (no drift nudge)", () => {
+    const sameTurnShrink = shrink(1, latest().ts); // ts === metric.ts → in (ts−window, ts] → suppress
+    const fire = shouldNudge(driftWindow(), cfg()) &&
+                 !suppressCheck(latest(), { rewinds: [], shrinks: [sameTurnShrink] });
+    expect(shouldNudge(driftWindow(), cfg())).toBe(true);           // would fire on growth alone
+    expect(suppressCheck(latest(), { rewinds: [], shrinks: [sameTurnShrink] })).toBe(true); // suppressed
+    expect(fire).toBe(false);                                      // §5.3 (a): net NO nudge
+  });
+
+  it("(b) >threshold window + NO action → net nudge decision is TRUE (fires normally)", () => {
+    const fire = shouldNudge(driftWindow(), cfg()) &&
+                 !suppressCheck(latest(), { rewinds: [], shrinks: [] });
+    expect(shouldNudge(driftWindow(), cfg())).toBe(true);           // growth fires
+    expect(suppressCheck(latest(), { rewinds: [], shrinks: [] })).toBe(false); // no marker → not suppressed
+    expect(fire).toBe(true);                                       // §5.3 (b): fires
+  });
+
+  it("(c) >threshold window + same-turn REWIND → net nudge decision is FALSE (no drift nudge)", () => {
+    const sameTurnRewind = rewind(1, latest().ts); // ts === metric.ts → in (ts−window, ts] → suppress
+    const fire = shouldNudge(driftWindow(), cfg()) &&
+                 !suppressCheck(latest(), { rewinds: [sameTurnRewind], shrinks: [] });
+    expect(suppressCheck(latest(), { rewinds: [sameTurnRewind], shrinks: [] })).toBe(true); // suppressed
+    expect(fire).toBe(false);                                      // §5.3 (c): net NO nudge
   });
 });
 
