@@ -251,44 +251,29 @@ export interface DriftNudgeInput {
  * renderBloatReminder — Nudge A's text (spec/07-preventive-and-nudges.md §1). Composes the short reminder the
  * tool_result handler APPENDS to a result's content when its byte size exceeds the threshold. The returned string
  * is the `text` of a `{type:"text"}` content block appended via `[...(event.content ?? []), {type:"text",
- * text:reminder}]`. ~40 tokens, incurred once per bloated result; advisory (D3) — appended, not replacing.
+ * text:reminder}]`. ~30 tokens, incurred once per bloated result; advisory (D3) — appended, not replacing.
  *
- * FORMAT (spec/07 §1 — VERBATIM; the leading "\n" + "---" is a markdown horizontal rule separating the reminder
- * from the result body above it; body lines have SPEC-pinned soft line breaks — do NOT reflow):
- *     \n---\n
- *     [mulligan] This result is ~<KB> KB in your context (threshold <T> KB).
- *     If you don't need the full output going forward, call `mulligan_shrink` with a
- *     summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole
- *     call was a mistake. (The hidden/shrunk content stays on disk for the human.)
- * <KB> = bytesToKb(bytes); <T> = bytesToKb(thresholdBytes). NO trailing newline.
+ * FORMAT (spec/07 §1 — VERBATIM; leading "\n---\n" is a markdown horizontal rule; single line):
+ *     \n---\nThis result added ~<KB> KB to your context. If you don't need the full output, call
+ *     `mulligan_shrink` with a summary or `mulligan_rewind(granularity:"last_tool_call_group")` if
+ *     the whole call was a mistake.
+ * <KB> = bytesToKb(bytes). NO [mulligan] prefix, NO threshold mention, NO "stays on disk" clause.
+ * NO trailing newline.
  *
  * `toolName` is ACCEPTED (the handler passes event.toolName) but is NOT interpolated into the v1 text (the spec
- * text has no <toolName> placeholder) — RESERVED for future personalization, hence the `_` prefix. This mirrors
- * tokens.ts `estimateTokens(messages, _model?: unknown)` — the SAME convention for an accepted-but-unused param.
+ * text has no <toolName> placeholder) — RESERVED for future personalization. Named `toolName` without underscore
+ * per spec/07 §1 signature; bare-unused is safe — no noUnusedParameters, no eslint (GOTCHA #1).
  *
- * DEFENSIVE — NEVER throws (fail-open nudge handler; spec/07 §1; E13). Non-finite/negative bytes or thresholdBytes
- * render as 0 KB (a public helper may receive arbitrary input; resultBytes never yields these but the guard keeps
- * the function total).
+ * DEFENSIVE — NEVER throws (fail-open nudge handler; spec/07 §1; E13). Non-finite/negative bytes render as 0 KB
+ * (a public helper may receive arbitrary input; resultBytes never yields these but the guard keeps the function total).
  *
- * @param _toolName       the tool that produced the result (ACCEPTED, NOT used in v1 text; reserved for future use)
- * @param bytes           the result's UTF-8 byte size (from resultBytes — spec/07 §1)
- * @param thresholdBytes  the configured bloat threshold in bytes (config.nudges.bloatThresholdBytes, default 16384)
- * @returns the reminder string (leading "\n---\n" + 4-line body; NO trailing newline)
+ * @param toolName  the tool that produced the result (ACCEPTED, NOT used in v1 text; reserved for future use)
+ * @param bytes     the result's UTF-8 byte size (from resultBytes — spec/07 §1)
+ * @returns the reminder string (leading "\n---\n" + single-line body; NO trailing newline)
  */
-export function renderBloatReminder(
-  _toolName: string,
-  bytes: number,
-  thresholdBytes: number,
-): string {
+export function renderBloatReminder(toolName: string, bytes: number): string {
   const resultKb = bytesToKb(bytes);
-  const thresholdKb = bytesToKb(thresholdBytes);
-  const body = [
-    `[mulligan] This result is ~${resultKb} KB in your context (threshold ${thresholdKb} KB).`,
-    "If you don't need the full output going forward, call `mulligan_shrink` with a",
-    'summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole',
-    "call was a mistake. (The hidden/shrunk content stays on disk for the human.)",
-  ].join("\n");
-  return `\n---\n${body}`;
+  return `\n---\nThis result added ~${resultKb} KB to your context. If you don't need the full output, call \`mulligan_shrink\` with a summary or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole call was a mistake.`;
 }
 
 /**

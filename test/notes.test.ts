@@ -408,41 +408,38 @@ const DRIFT_TAIL = [
 ];
 
 describe("renderBloatReminder — spec/07 §1 pinned format", () => {
-  it("8 KB result at an 8 KB threshold → '~8 KB … (threshold 8 KB)'; leading \\n---\\n; no trailing newline", () => {
-    const out = renderBloatReminder("read", 8192, 8192);
+  it("8 KB result → 'This result added ~8 KB …'; leading \n---\n; no trailing newline", () => {
+    const out = renderBloatReminder("read", 8192);
     expect(out).toBe(
-      "\n---\n" +
-        [
-          "[mulligan] This result is ~8 KB in your context (threshold 8 KB).",
-          "If you don't need the full output going forward, call `mulligan_shrink` with a",
-          'summary, or `mulligan_rewind(granularity:"last_tool_call_group")` if the whole',
-          "call was a mistake. (The hidden/shrunk content stays on disk for the human.)",
-        ].join("\n"),
+      "\n---\nThis result added ~8 KB to your context. If you don't need the full output, call `mulligan_shrink` with a summary or `mulligan_rewind(granularity:\"last_tool_call_group\")` if the whole call was a mistake.",
     );
     expect(out.startsWith("\n---\n")).toBe(true);
-    expect(out.endsWith("\n")).toBe(false); // GOTCHA #3 — no trailing newline
+    expect(out.endsWith("\n")).toBe(false); // no trailing newline
   });
 
-  it("30 KB result (the spec's '30 KB read') at 8 KB threshold → '~30 KB … (threshold 8 KB)'", () => {
-    const out = renderBloatReminder("read", 30720, 8192);
-    expect(out).toContain("[mulligan] This result is ~30 KB in your context (threshold 8 KB).");
+  it("30 KB result (the spec's '30 KB read') → 'This result added ~30 KB …'", () => {
+    const out = renderBloatReminder("read", 30720);
+    expect(out).toContain("This result added ~30 KB to your context.");
   });
 
   it("bytes round to the nearest KB (8704 bytes = 8.5 KB → '~9 KB')", () => {
-    const out = renderBloatReminder("bash", 8704, 8192);
-    expect(out).toContain("This result is ~9 KB in your context (threshold 8 KB).");
+    const out = renderBloatReminder("bash", 8704);
+    expect(out).toContain("This result added ~9 KB to your context.");
   });
 
-  it("body text is VERBATIM (backticks, the granularity literal, the soft line breaks — GOTCHA #13)", () => {
-    const out = renderBloatReminder("read", 8192, 8192);
-    expect(out).toContain("call `mulligan_shrink` with a\nsummary, or");
+  it("body text is VERBATIM (backticks, the granularity literal, 'summary or' — no comma — GOTCHA #13)", () => {
+    const out = renderBloatReminder("read", 8192);
+    expect(out).toContain("call `mulligan_shrink` with a summary or");
     expect(out).toContain('`mulligan_rewind(granularity:"last_tool_call_group")`');
-    expect(out).toContain("(The hidden/shrunk content stays on disk for the human.)");
+    // regression guards: the three removed phrases MUST be absent
+    expect(out).not.toContain("[mulligan]");
+    expect(out).not.toContain("threshold");
+    expect(out).not.toContain("stays on disk");
   });
 
   it("toolName is accepted but NOT interpolated into the v1 text (GOTCHA #4)", () => {
-    const a = renderBloatReminder("read", 8192, 8192);
-    const b = renderBloatReminder("grep", 8192, 8192);
+    const a = renderBloatReminder("read", 8192);
+    const b = renderBloatReminder("grep", 8192);
     expect(a).toBe(b); // identical regardless of toolName — the spec text has no tool-name placeholder
     expect(a).not.toContain("read");
     expect(a).not.toContain("grep");
@@ -451,34 +448,28 @@ describe("renderBloatReminder — spec/07 §1 pinned format", () => {
 
 describe("renderBloatReminder — defensive (NEVER throws / bad numbers → 0 KB — GOTCHA #5/#7)", () => {
   it("NaN bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", NaN, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
+    expect(renderBloatReminder("read", NaN)).toContain("This result added ~0 KB to your context.");
   });
   it("negative bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", -100, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
+    expect(renderBloatReminder("read", -100)).toContain("This result added ~0 KB to your context.");
   });
   it("Infinity bytes → '~0 KB'", () => {
-    expect(renderBloatReminder("read", Infinity, 8192)).toContain("This result is ~0 KB in your context (threshold 8 KB).");
-  });
-  it("non-finite threshold → 'threshold 0 KB'", () => {
-    expect(renderBloatReminder("read", 8192, NaN)).toContain("(threshold 0 KB).");
+    expect(renderBloatReminder("read", Infinity)).toContain("This result added ~0 KB to your context.");
   });
   it("never throws on any number input", () => {
-    expect(() => renderBloatReminder("read", NaN, NaN)).not.toThrow();
-    expect(() => renderBloatReminder("read", -Infinity, Infinity)).not.toThrow();
+    expect(() => renderBloatReminder("read", NaN)).not.toThrow();
+    expect(() => renderBloatReminder("read", -Infinity)).not.toThrow();
   });
 });
 
 describe("renderBloatReminder — snapshot-style (spec/10 §1.8-style)", () => {
   // toMatchInlineSnapshot() with no argument: vitest AUTO-WRITES the snapshot on first run (GOTCHA #12).
   // If your vitest version requires it, run `npx vitest run -u` once, then `npx vitest run`.
-  it("representative 30 KB read at an 8 KB threshold", () => {
-    expect(renderBloatReminder("read", 30720, 8192)).toMatchInlineSnapshot(`
+  it("representative 30 KB read", () => {
+    expect(renderBloatReminder("read", 30720)).toMatchInlineSnapshot(`
       "
       ---
-      [mulligan] This result is ~30 KB in your context (threshold 8 KB).
-      If you don't need the full output going forward, call \`mulligan_shrink\` with a
-      summary, or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole
-      call was a mistake. (The hidden/shrunk content stays on disk for the human.)"
+      This result added ~30 KB to your context. If you don't need the full output, call \`mulligan_shrink\` with a summary or \`mulligan_rewind(granularity:"last_tool_call_group")\` if the whole call was a mistake."
     `);
   });
 });
@@ -639,7 +630,7 @@ describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
 
 describe("renderers — types", () => {
   it("renderBloatReminder returns a string", () => {
-    expectTypeOf(renderBloatReminder("read", 8192, 8192)).toEqualTypeOf<string>();
+    expectTypeOf(renderBloatReminder("read", 8192)).toEqualTypeOf<string>();
   });
 
   it("renderDriftNudge returns a string", () => {

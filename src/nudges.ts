@@ -130,7 +130,7 @@ export function bloatReminderHandler(
     const threshold = bloatThresholdFor(event.toolName, config);
     if (bytes < threshold) return; // under threshold → pass-through, NO recording
 
-    const reminder = renderBloatReminder(event.toolName, bytes, threshold);
+    const reminder = renderBloatReminder(event.toolName, bytes);
     // GOTCHA #2: TextContent|ImageContent are NOT re-exported by the pi package → use the indexed-access
     // type ToolResultEvent["content"][number]. APPEND, never replace (GOTCHA #7) — original blocks preserved.
     const block: ToolResultContentBlock = { type: "text", text: reminder };

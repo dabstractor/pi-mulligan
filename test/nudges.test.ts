@@ -288,7 +288,7 @@ describe("over-threshold result — APPEND reminder + record bloat hit (spec/07 
     expect(content.slice(0, origBlocks.length)).toEqual(origBlocks);
   });
 
-  it("the appended block is {type:'text', text: renderBloatReminder(toolName,bytes,threshold)} EXACTLY (reuse)", () => {
+  it("the appended block is {type:'text', text: renderBloatReminder(toolName,bytes)} EXACTLY (reuse)", () => {
     const ctx = makeCtx({ sessionId: "reuse" });
     const event = makeEvent("read", OVER_TEXT);
     const res = bloatReminderHandler(event, ctx);
@@ -296,7 +296,7 @@ describe("over-threshold result — APPEND reminder + record bloat hit (spec/07 
     const appended = content[content.length - 1];
     expect(appended.type).toBe("text");
     // reuse the COMPLETE helper — the reminder text must equal it byte-for-byte (no reimplementation)
-    expect(appended.text).toBe(renderBloatReminder("read", OVER_BYTES, READ_THRESHOLD));
+    expect(appended.text).toBe(renderBloatReminder("read", OVER_BYTES));
   });
 
   it("records a bloat hit {toolName, approxTokens: approxTokens(bytes)} in rt.pendingBloatHits (GOTCHA #4)", () => {
