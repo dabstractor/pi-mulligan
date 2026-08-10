@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Consolidate the rewind note to three fields",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The `avoid` field is removed from `NoteInput`; its lesson folds into `what_happened`. Update the schema, the renderer, validation, the rewind tool's typebox schema + description, the RWIND_DESC string, and all fixtures/assertions in the affected test files.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Note consolidation (notes.ts note machinery + rewind.ts schema + tests)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Remove `avoid` from the NoteInput type, the NOTE_FIELDS array, renderNote's **Avoid:** line, readNoteField's key union, and every JSDoc/format reference. Update the RewindParams typebox schema and RWIND_DESC. Update all test fixtures and assertions across notes.test.ts, rewind.test.ts, and edge-cases.test.ts.",
               "subtasks": [
                 {
@@ -66,7 +66,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Tests for the three-field note (notes.test.ts + rewind.test.ts + edge-cases.test.ts)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1.5,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -89,21 +89,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Nudge text re-shortening",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Both context-riding renderers in notes.ts emit terser text. Pure text + JSDoc in notes.ts; assertion updates in notes.test.ts. Depends on M1 because both edit src/notes.ts (disjoint functions — M1 = note machinery, M2 = nudge renderers).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "renderBloatReminder + renderDriftNudge text + tests",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Rewrite both renderer bodies to the new shorter text forms. Update JSDoc FORMAT blocks. Update test assertions and inline snapshots in notes.test.ts.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Renderer text + JSDocs (renderBloatReminder + renderDriftNudge)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -126,7 +126,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Nudge text test assertions (notes.test.ts)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

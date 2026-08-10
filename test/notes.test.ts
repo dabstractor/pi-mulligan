@@ -14,16 +14,17 @@ import type { Granularity } from "../src/config.js";
 
 // No beforeEach needed: notes.ts has NO module-scoped mutable state (pure functions + constants only).
 
-/** A fully-valid note (all four fields non-empty) — a realistic spec/04 §2.1 example. */
+/** A fully-valid note (all three fields non-empty) — a realistic spec/04 §2.1 example. S3: the former
+ *  4th field was collapsed into `what_happened` (the lesson now rides with what went wrong), per S1's 3-field contract. */
 const VALID_NOTE: NoteInput = {
-  what_happened: "Ran `grep -r auth .` and dumped ~40k tokens of output I didn't need.",
-  avoid: "Do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.",
+  what_happened:
+    "Ran `grep -r auth .` and dumped ~40k tokens of output I didn't need; do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.",
   true_current_state: "No files were modified on the abandoned span.",
   next: "Re-run the search as `grep -rl auth src/` and read only the 3 relevant files.",
 };
 
 describe("validateNote — spec/05 §1 step 2 + spec/08 E9 + spec/10 §1.8 contract (pinned)", () => {
-  it("all four fields present + non-empty → { valid: true } (no reason)", () => {
+  it("all three fields present + non-empty → { valid: true } (no reason)", () => {
     const r = validateNote(VALID_NOTE);
     expect(r.valid).toBe(true);
     expect(r.reason).toBeUndefined();
@@ -39,7 +40,7 @@ describe("validateNote — spec/05 §1 step 2 + spec/08 E9 + spec/10 §1.8 contr
 });
 
 describe("validateNote — every field is independently required (any empty/whitespace → invalid)", () => {
-  const FIELDS = ["what_happened", "avoid", "true_current_state", "next"] as const;
+  const FIELDS = ["what_happened", "true_current_state", "next"] as const;
 
   for (const field of FIELDS) {
     it(`empty ${field} → invalid with the pinned reason (E9)`, () => {
@@ -64,7 +65,7 @@ describe("validateNote — non-string / missing fields → invalid (typeof check
   });
 
   it("a field set to null → invalid", () => {
-    const r = validateNote({ ...VALID_NOTE, avoid: null as unknown as string });
+    const r = validateNote({ ...VALID_NOTE, true_current_state: null as unknown as string });
     expect(r.valid).toBe(false);
   });
 
@@ -84,7 +85,7 @@ describe("validateNote — the reason is the SINGLE spec-pinned string (GOTCHA #
   it("every failure returns the SAME reason (no per-field variation)", () => {
     const a = validateNote({ ...VALID_NOTE, what_happened: "" });
     const b = validateNote({ ...VALID_NOTE, next: "  " });
-    const c = validateNote({ ...VALID_NOTE, avoid: null as unknown as string });
+    const c = validateNote({ ...VALID_NOTE, true_current_state: null as unknown as string });
     expect(a.reason).toBe(NOTE_INVALID_REASON);
     expect(b.reason).toBe(NOTE_INVALID_REASON);
     expect(c.reason).toBe(NOTE_INVALID_REASON);
@@ -95,7 +96,6 @@ describe("validateNote — trim does not over-reject genuinely-valid content", (
   it("fields with leading/trailing whitespace but real content → valid", () => {
     const r = validateNote({
       what_happened: "  went down a rabbit hole  ",
-      avoid: " don't grep without filters ",
       true_current_state: " scratch.ts was created ",
       next: " delete scratch.ts and restart ",
     });
@@ -104,7 +104,7 @@ describe("validateNote — trim does not over-reject genuinely-valid content", (
   });
 
   it("single-character fields are valid (non-empty after trim)", () => {
-    const r = validateNote({ what_happened: "x", avoid: "y", true_current_state: "z", next: "w" });
+    const r = validateNote({ what_happened: "x", true_current_state: "z", next: "w" });
     expect(r.valid).toBe(true);
   });
 });
@@ -145,10 +145,9 @@ describe("validateNote — defensive (NEVER throws — GOTCHA #3)", () => {
 });
 
 describe("types", () => {
-  it("NoteInput has exactly the four required string fields (spec/04 §2.1)", () => {
+  it("NoteInput has exactly the three required string fields (spec/04 §2.1 — S3: the former 4th field folded into what_happened)", () => {
     expectTypeOf<NoteInput>().toEqualTypeOf<{
       what_happened: string;
-      avoid: string;
       true_current_state: string;
       next: string;
     }>();
@@ -184,8 +183,6 @@ describe("renderNote — spec/04 §2.3 pinned format", () => {
         "",
         `**What happened:** ${VALID_NOTE.what_happened}`,
         "",
-        `**Avoid:** ${VALID_NOTE.avoid}`,
-        "",
         `**Current true state:** ${VALID_NOTE.true_current_state}`,
         "",
         `**Next:** ${VALID_NOTE.next}`,
@@ -211,8 +208,6 @@ describe("renderNote — spec/04 §2.3 pinned format", () => {
         "## 🔄 Mulligan rewind (last_tool_call_group)",
         "",
         `**What happened:** ${VALID_NOTE.what_happened}`,
-        "",
-        `**Avoid:** ${VALID_NOTE.avoid}`,
         "",
         `**Current true state:** ${VALID_NOTE.true_current_state}`,
         "",
@@ -279,9 +274,7 @@ describe("renderNote — snapshot-style cases (spec/10 §1.8)", () => {
     expect(renderNote(VALID_NOTE, ledger, "last_turn")).toMatchInlineSnapshot(`
       "## 🔄 Mulligan rewind (last_turn)
 
-      **What happened:** Ran \`grep -r auth .\` and dumped ~40k tokens of output I didn't need.
-
-      **Avoid:** Do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.
+      **What happened:** Ran \`grep -r auth .\` and dumped ~40k tokens of output I didn't need; do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.
 
       **Current true state:** No files were modified on the abandoned span.
 
@@ -305,9 +298,7 @@ describe("renderNote — snapshot-style cases (spec/10 §1.8)", () => {
     expect(renderNote(VALID_NOTE, EMPTY_LEDGER, "last_tool_call_group")).toMatchInlineSnapshot(`
       "## 🔄 Mulligan rewind (last_tool_call_group)
 
-      **What happened:** Ran \`grep -r auth .\` and dumped ~40k tokens of output I didn't need.
-
-      **Avoid:** Do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.
+      **What happened:** Ran \`grep -r auth .\` and dumped ~40k tokens of output I didn't need; do not run grep without --quiet, -c, or piping to head; prefer the built-in grep tool which truncates.
 
       **Current true state:** No files were modified on the abandoned span.
 
@@ -320,7 +311,6 @@ describe("renderNote — field values rendered AS-IS (no escaping/transform)", (
   it("fields containing markdown / backticks / quotes are interpolated verbatim", () => {
     const note: NoteInput = {
       what_happened: "ran `grep -r auth .` → ~38k tokens",
-      avoid: "don't run wide grep; use **-l** or pipe to `head`",
       true_current_state: "no files changed; \"scratch.ts\" not created",
       next: "re-run as `grep -rl auth src/`",
     };

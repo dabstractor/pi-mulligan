@@ -283,7 +283,7 @@ function rewindEntryData(seq: number): Record<string, unknown> {
     granularity: "last_tool_call_group",
     options: {},
     seq,
-    note: { what_happened: "p", avoid: "h", true_current_state: "n", next: "e" },
+    note: { what_happened: "p", true_current_state: "n", next: "e" },
     ledger: {},
     ts: 1,
   };
@@ -301,10 +301,10 @@ function checkpointLabelEntry(name: string): SessionEntry {
   } as unknown as SessionEntry;
 }
 
-/** The canonical valid 4-field note (validateNote accepts). */
+/** The canonical valid 3-field note (validateNote accepts). */
 const VALID_NOTE = {
-  what_happened: "Ran a repo-wide grep that dumped ~38k tokens.",
-  avoid: "Don't grep without -l; use the built-in grep tool which truncates.",
+  what_happened:
+    "Ran a repo-wide grep that dumped ~38k tokens; don't grep without -l; use the built-in grep tool which truncates.",
   true_current_state: "No files changed on the abandoned span.",
   next: "Re-run as grep -rl auth src/ and read only the 3 relevant files.",
 };
@@ -681,8 +681,8 @@ describe("E9 — Note field validation failure", () => {
     expect(sent).toHaveLength(0); // note NOT left
   });
 
-  it("whitespace-only in EACH of the 4 fields → all refused, nothing persisted", async () => {
-    for (const field of ["what_happened", "avoid", "true_current_state", "next"] as const) {
+  it("whitespace-only in EACH of the 3 fields → all refused, nothing persisted", async () => {
+    for (const field of ["what_happened", "true_current_state", "next"] as const) {
       const { appended, sent, pi } = makePi();
       const { ctx } = makeCtx();
       const tool = makeRewindTool(pi);
@@ -698,7 +698,7 @@ describe("E9 — Note field validation failure", () => {
   it("validateNote directly: a valid note → valid:true; an empty field → valid:false", () => {
     expect(validateNote(VALID_NOTE).valid).toBe(true);
     expect(validateNote({ ...VALID_NOTE, next: "" }).valid).toBe(false);
-    expect(validateNote({ ...VALID_NOTE, avoid: "  " }).valid).toBe(false);
+    expect(validateNote({ ...VALID_NOTE, true_current_state: "  " }).valid).toBe(false);
   });
 });
 

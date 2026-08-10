@@ -122,8 +122,8 @@ const REWIND_DATA: RewindMarkerInput = {
   options: { to_previous_prompt: false },
   excludeToolCallId: "call-rewind-self",
   note: {
-    what_happened: "Ran a repo-wide grep that dumped ~38k tokens.",
-    avoid: "Don't grep without -l; use the built-in grep tool which truncates.",
+    what_happened:
+      "Ran a repo-wide grep that dumped ~38k tokens; don't grep without -l; use the built-in grep tool which truncates.",
     true_current_state: "No files changed on the abandoned span.",
     next: "Re-run as grep -rl auth src/ and read only the 3 relevant files.",
   },

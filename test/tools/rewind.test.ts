@@ -48,11 +48,11 @@ afterEach(() => {
   setConfig(undefined);
 });
 
-// ── the canonical valid note (4 non-empty fields) ────────────────────────────
+// ── the canonical valid note (3 non-empty fields — S3: the former 4th field folded into what_happened) ──
 
 const VALID_NOTE = {
-  what_happened: "Ran a repo-wide grep that dumped ~38k tokens.",
-  avoid: "Don't grep without -l; use the built-in grep tool which truncates.",
+  what_happened:
+    "Ran a repo-wide grep that dumped ~38k tokens; don't grep without -l; use the built-in grep tool which truncates.",
   true_current_state: "No files changed on the abandoned span.",
   next: "Re-run as grep -rl auth src/ and read only the 3 relevant files.",
 };
@@ -288,7 +288,7 @@ describe("mulligan_rewind — registration metadata (spec/05 §5)", () => {
 
   it("description is the spec/05 §5 verbatim string", () => {
     expect(REWIND_DESC).toBe(
-      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The hidden content disappears from your view permanently (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.",
+      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.",
     );
   });
 
@@ -329,9 +329,9 @@ describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
 describe("mulligan_rewind — refusal: invalid note (step 2; E9)", () => {
   it.each([
     ["empty what_happened", { ...VALID_NOTE, what_happened: "" }],
-    ["whitespace-only avoid", { ...VALID_NOTE, avoid: "   " }],
-    ["empty true_current_state", { ...VALID_NOTE, true_current_state: "" }],
-    ["whitespace-only next", { ...VALID_NOTE, next: "\t\n" }],
+    ["whitespace-only true_current_state", { ...VALID_NOTE, true_current_state: "   " }],
+    ["empty next", { ...VALID_NOTE, next: "" }],
+    ["whitespace-only what_happened", { ...VALID_NOTE, what_happened: "\t\n" }],
   ])("rejects %s → NOTE_INVALID_REASON refusal; no persistence", async (_label, note) => {
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx();
@@ -842,7 +842,6 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
     const args = {} as RewindArgs;
     expectTypeOf(args.note).toEqualTypeOf<{
       what_happened: string;
-      avoid: string;
       true_current_state: string;
       next: string;
     }>();
