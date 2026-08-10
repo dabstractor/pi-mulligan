@@ -364,8 +364,12 @@ export interface NoteDetails {
  * CRITICAL (C8 / GOTCHA #2): do NOT pass `options.triggerTurn:true` — leaveNote runs from inside a tool (we are
  * mid-turn); the default mid-turn behavior is correct. The wrapper passes ONLY the message object (no second arg).
  *
- * `display:true` (spec/04 §3) so the note is visible in the UI transcript (/tree). `content` is the rendered note
- * string (notes.renderNote output).
+ * `display:true` (spec/04 §3; spec/05 §1 step 6) is DELIBERATE: it surfaces the note to the OPERATOR as well as
+ * the model — the human sees exactly what the model told its resumed self via the rewind note (visible in the UI
+ * transcript, /tree). This is the rewind counterpart of shrink's replacement echo (`ctx.ui.notify` in shrink.ts
+ * step 5b): every self-directed payload is operator-visible, mirroring the note's in-context role for the resumed
+ * model (spec/05 §1 Purpose — "the structured self-authored note is Mulligan's flagship UX"). `content` is the
+ * rendered note string (notes.renderNote output).
  *
  * Returns void. NEVER throws (markers.ts hot-path discipline, matching appendRewindMarker/appendShrinkMarker/
  * appendTurnMetric): a throwing `sendMessage` is swallowed (GOTCHA #1). This is SAFE because the rewind marker — the

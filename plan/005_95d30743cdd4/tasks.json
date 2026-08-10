@@ -85,7 +85,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Operator-visible payloads: shrink echo + rewind-note rationale",
-          "status": "Researching",
+          "status": "Complete",
           "description": "mulligan_shrink now surfaces the replacement to the operator via ctx.ui.notify (zero context cost); the tool result stays terse ('Matched: yes/no.'). New config knob shrink.notifyMaxChars (default 2048). Rewind-note display:true rationale comment aligned to spec.",
           "tasks": [
             {
@@ -153,14 +153,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Rewind-note display:true rationale (trivial doc)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The code already passes display:true (markers.ts:383). Add/expand the JSDoc comment to state spec/05 §1 step 6's rationale. No behavior change, no test change.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Comment alignment for display:true rationale",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified at src/markers.ts ~line 378-383: leaveNote() already passes display:true via pi.sendMessage({ customType: 'mulligan:note', content, display: true, details }). The comment above it explains it surfaces to the UI transcript but does NOT cite spec/05 §1 step 6's rationale (deliberate operator visibility — the rewind counterpart of shrink's replacement echo).\n2. INPUT: The current src/markers.ts leaveNote() function and its JSDoc (~line 360-390).\n3. LOGIC: Expand the JSDoc comment on the `display: true` line (or the leaveNote function doc) to state: display:true is DELIBERATE — it surfaces the note to the operator (the human sees exactly what the model told its resumed self via the rewind note); this is the rewind counterpart of shrink's replacement echo (ctx.ui.notify). Cite spec/05 §1 step 6 (the bolded display:true note) and spec/05 §1 Purpose ('flagship UX'). No code change, no test change.\n4. OUTPUT: Updated JSDoc comment on leaveNote() in src/markers.ts.\n5. DOCS: [Mode A] this comment IS the doc — no separate doc file.",
@@ -193,7 +193,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Checkpoint consumption hook in rewind.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/architecture/m3_checkpoint_expiry.md for the verified LabelEntry structure and consumption hook design. Key findings: LabelEntry has { type:'label', targetId:string, label:string|undefined } — calling pi.setLabel(targetId, undefined) clears the label. listCheckpoints (audit.ts:324) scans for label.startsWith('mulligan:checkpoint:') → clearing makes it disappear. checkpointExists (rewind.ts:293) checks the same → second rewind to consumed name refuses 'not found'. pi is available in rewindExecute via the makeRewindTool(pi) factory closure. The persist step is at rewind.ts ~line 547 (step 7); the success return is at ~line 560 (step 9).\n2. INPUT: The current src/tools/rewind.ts execute body (checkpoint-granularity path: step 3 checkpointExists check ~line 462; step 7 persist ~line 547; step 9 return ~line 560). pi is captured via the factory closure.\n3. LOGIC: After the successful persist (step 7, ~line 547) and BEFORE the return (step 9), ONLY on the `granularity === 'checkpoint'` success path, add a consumption hook:\n   - Scan ctx.sessionManager.getEntries() for a LabelEntry where label === `mulligan:checkpoint:${params.checkpoint}`.\n   - Read its targetId via readOwn.\n   - Call pi.setLabel(targetId, undefined) to clear the label.\n   - Wrap in try/catch (E13 — a label-clear failure must never undo the rewind; the rewind marker is already persisted).\n   - Use the existing readOwn helper in rewind.ts (if rewind.ts doesn't have one, it has checkpointExists which reads entries defensively — follow the same defensive pattern).\n   - After clearing, audit.ts:listCheckpoints naturally drops it (label is no longer a string starting with the prefix), and checkpointExists returns false on the next rewind attempt (label gone → 'not found' refusal).\n   MOCKING: In tests, makePi must capture setLabel calls; makeCtx scripts getEntries() to include LabelEntry fixtures.\n4. OUTPUT: A consumed checkpoint no longer appears in mulligan_audit; a second rewind to it refuses 'not found'; re-creating (mulligan_checkpoint again) sets a fresh label and works.\n5. DOCS: [Mode A] Add an inline comment at the consumption hook citing spec/05 §3 step 5 ('Auto-expiry on consumption'). No separate doc file.",
