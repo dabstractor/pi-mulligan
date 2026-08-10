@@ -65,34 +65,81 @@ import { getConfig } from "../config.js"; // GOTCHA: read getConfig() ONCE per e
 // ── Parameter schema (spec/05 §5 — Typebox, VERBATIM incl. the markerId description) ──────────────────
 
 /**
- * CancelParams — the typebox parameter schema for `mulligan_cancel` (spec/05 §5, verbatim incl. the field
- * description — the LLM reads it). The agent passes the ENTRY id it received as `details.markerId` from an
- * earlier `mulligan_rewind` or `mulligan_shrink`. The tool maps that entry id → the marker's uuid `data.id`
- * (CRITICAL GOTCHA #1). EXPORTED for tests + the index.ts wiring step.
+ * CancelParams — the typebox parameter schema for `mulligan_cancel` (spec/05 §5, verbatim incl. every field
+ * description — the LLM reads them). The agent identifies the marker to retract via `target` (the SAME
+ * hint shape `mulligan_shrink` uses — resolved live each turn, robust to compaction) OR via an explicit
+ * `markerId` fallback (the ENTRY id received as `details.markerId` from an earlier rewind/shrink; the tool
+ * maps that entry id → the marker's uuid `data.id`, CRITICAL GOTCHA #1).
+ *
+ * DECISION D1 — BOTH `target` and `markerId` are `Type.Optional`. The spec's literal schema shows `target`
+ * unwrapped (→ structurally required), but its own prose says "At least one MUST be present" and acceptance-(a)
+ * (E21) says cancel works "by target OR by explicit markerId". A required `target` would make `markerId`-ALONE
+ * schema-invalid, and Pi's tool runtime rejects schema-invalid calls BEFORE execute runs — silently breaking
+ * the documented fallback. The behavioral prose is authoritative, so both params are Optional here and "at
+ * least one MUST be present" is enforced in `cancelExecute` (S2 / P1.M1.T1.S2). Side benefit: every existing
+ * `{markerId:'…'}` test continues to typecheck and pass unchanged. EXPORTED for tests + index.ts wiring.
+ *
+ * The `target` union is STRUCTURALLY IDENTICAL to `ShrinkParams.target` (src/tools/shrink.ts) — same 3 arms,
+ * same discriminators (`by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`), same literal
+ * set for `occurrence`. ONLY the description strings differ. This parity is a HARD requirement: S2 hands
+ * `params.target` to `resolveShrinkTarget(messages, target)` (transforms.ts:758, `ShrinkTarget`-typed), so a
+ * divergent union would break that handoff's typecheck.
  */
-export const CancelParams = Type.Object({
-  markerId: Type.String({
+export const CancelParams = Type.Object(
+  {
+    target: Type.Optional(
+      Type.Union(
+        [
+          Type.Object({
+            by_tool_call_id: Type.String({ description: "The toolCallId of a message the marker affected." }),
+          }),
+          Type.Object({
+            by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
+            occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]),
+          }),
+          Type.Object({
+            by_content_includes: Type.String({
+              description: "Match a marker whose affected message(s) include this substring.",
+            }),
+          }),
+        ],
+        {
+          description:
+            "How to identify the marker to cancel — the SAME hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired.",
+        },
+      ),
+    ),
+    markerId: Type.Optional(
+      Type.String({
+        description:
+          "Optional explicit fallback: the markerId returned by mulligan_rewind/mulligan_shrink in details.markerId. If both target and markerId are given, markerId wins.",
+      }),
+    ),
+  },
+  {
     description:
-      "The marker id to cancel (the markerId value returned by mulligan_rewind or mulligan_shrink in details.markerId).",
-  }),
-});
+      "Cancel accepts a `target` (preferred) or an explicit `markerId` (fallback). At least one MUST be present.",
+  },
+);
 
-/** CancelArgs — the inferred execute-time params type. EXPORTED for ergonomics/tests. */
+/** CancelArgs — the inferred execute-time params type (`{ target?: <union>; markerId?: string }`). EXPORTED for ergonomics/tests. */
 export type CancelArgs = Static<typeof CancelParams>;
 
-// ── The LLM-facing description string (spec/05 §5 — copy VERBATIM) ────────────
+// ── The LLM-facing description string (spec/05 §6 — copy VERBATIM) ────────────
 
 /**
- * CANCEL_DESC — the LLM-facing description (spec/05 §5 "Description strings", Mode A LLM-facing docs). This
+ * CANCEL_DESC — the LLM-facing description (spec/05 §6 "Description strings", Mode A LLM-facing docs). This
  * string IS the tool's documentation. Copy verbatim — it drives LLM usage. Cost/benefit framing mirrors the
  * other four tools.
  */
 export const CANCEL_DESC =
   "Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when " +
   "you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken " +
-  "transform would apply on every turn for the rest of the session. Pass the markerId you received in details " +
-  "when you issued the marker. The transform stops applying from the next turn on (cancelled markers stay on " +
-  "disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op.";
+  "transform would apply on every turn for the rest of the session. Identify the marker by `target` " +
+  "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — " +
+  "the most recent marker affecting that content is retired; or pass an explicit `markerId` if you have one. " +
+  "The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). " +
+  "Cancelling a non-existent or already-cancelled marker is a safe no-op.";
 
 // ── Result builders (always include `details` — CRITICAL GOTCHA #3) ──────────
 

@@ -382,13 +382,15 @@ describe("mulligan_cancel — registration metadata (spec/05 §5)", () => {
     expect(tool.description).toBe(CANCEL_DESC);
   });
 
-  it("description is the spec/05 §5 verbatim string", () => {
+  it("description is the spec/05 §6 verbatim string", () => {
     expect(CANCEL_DESC).toBe(
       "Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when " +
         "you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken " +
-        "transform would apply on every turn for the rest of the session. Pass the markerId you received in details " +
-        "when you issued the marker. The transform stops applying from the next turn on (cancelled markers stay on " +
-        "disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op.",
+        "transform would apply on every turn for the rest of the session. Identify the marker by `target` " +
+        "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — " +
+        "the most recent marker affecting that content is retired; or pass an explicit `markerId` if you have one. " +
+        "The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). " +
+        "Cancelling a non-existent or already-cancelled marker is a safe no-op.",
     );
   });
 
@@ -447,9 +449,11 @@ describe("mulligan_cancel — types (ToolDefinition + CancelParams inference)", 
     expectTypeOf(tool.name).toEqualTypeOf<string>();
   });
 
-  it("CancelArgs (Static<typeof CancelParams>) is { markerId: string }", () => {
+  it("CancelArgs (Static<typeof CancelParams>) is { target?: <union>; markerId?: string } (Decision D1)", () => {
     const args = {} as CancelArgs;
-    expectTypeOf(args.markerId).toEqualTypeOf<string>();
+    // Both target and markerId are Optional per Decision D1 (markerId-ALONE must remain a valid call).
+    expectTypeOf(args.markerId).toEqualTypeOf<string | undefined>();
+    expectTypeOf(args.target).toEqualTypeOf<CancelArgs["target"]>();
   });
 
   it("execute returns AgentToolResult<CancelDetails>", async () => {
