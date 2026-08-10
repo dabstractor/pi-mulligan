@@ -555,6 +555,45 @@ async function rewindExecute(
     const markerId = appendRewindMarker(pi, ctx, payload as RewindMarkerInput); // cast: frozen type omits checkpoint
     leaveNote(pi, rendered, markerId ?? toolCallId); // GOTCHA #10: entry id; fallback toolCallId
 
+    // (7b) checkpoint consumption — spec/05 §3 step 5 ("Auto-expiry on consumption (REQUIRED)").
+    //      ONLY on the checkpoint-granularity success path (step 7 persist + leaveNote already completed).
+    //      A checkpoint label (`mulligan:checkpoint:<name>`) is consumed by the rewind that targets it: clear
+    //      the label so a second rewind by the same name can't re-target stale state (single-source downstream
+    //      effect). Mirrors checkpointExists' defensive scan style (inline `(e as {...})` casts, per-entry
+    //      try/catch — no readOwn/isRecord import). E13: the clear is best-effort and its own try/catch — a
+    //      label-clear failure must never undo the rewind (the marker is already persisted at step 7).
+    if (granularity === "checkpoint") {
+      try {
+        const needle = `mulligan:checkpoint:${params.checkpoint}`;
+        let entries: unknown;
+        try {
+          entries = ctx.sessionManager.getEntries();
+        } catch {
+          entries = undefined;
+        }
+        if (Array.isArray(entries)) {
+          for (const e of entries) {
+            if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+            let isMatch = false;
+            let targetId: unknown = undefined;
+            try {
+              const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
+              isMatch = ee.type === "label" && ee.label === needle;
+              targetId = ee.targetId;
+            } catch {
+              continue;
+            }
+            if (isMatch && typeof targetId === "string" && targetId.length > 0) {
+              pi.setLabel(targetId, undefined);
+            }
+            break;
+          }
+        }
+      } catch {
+        // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
+      }
+    }
+
     // (8) mutation warning (step 7 / E5) — VERBATIM (spec/08 E5) iff configured + the ledger shows side effects.
     const hasWarning =
       config.rewind.requireMutationWarning &&
