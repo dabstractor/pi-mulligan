@@ -1284,4 +1284,33 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // active again → succeeds
     expect(listCheckpoints(ctx.sessionManager.getEntries())).toContain("x");
   });
+
+  it("(i) [regression BUG-001] two targets share a checkpoint name → BOTH cleared (no break)", async () => {
+    // Reproduces BUG-001: Pi's labelsById is Map<targetId,label> with NO cross-target uniqueness, so when a
+    // checkpoint name is set on two distinct targets BOTH carry the label. The old consumption loop cleared
+    // ONLY the first-found (oldest) target then `break`ed, leaving the survivor labeled → checkpointExists
+    // stayed true → a second rewind succeeded instead of refusing "not found" (spec/05 §3 step 5 violation).
+    const { labels, pi } = makePi();
+    // Two label entries with the same name on DIFFERENT targetIds (both currently active):
+    const { ctx } = makeCtx({
+      entries: [
+        checkpointLabelEntry("x", "msg-a"), // targetA (older); resolveCheckpoint scans REVERSE → targets msg-b
+        checkpointLabelEntry("x", "msg-b"), // targetB (newer)
+      ],
+      contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op (success path)
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
+    // BUG-001 contract: BOTH targets cleared (the old code cleared only msg-a, then broke):
+    expect(labels).toContainEqual({ entryId: "msg-a", label: undefined });
+    expect(labels).toContainEqual({ entryId: "msg-b", label: undefined });
+    // A second rewind by the same name refuses "not found" (both targets now consumed):
+    const { ctx: ctx2 } = makeCtx({
+      entries: [checkpointLabelEntry("x", "msg-a"), checkpointLabelEntry("x", "msg-b")],
+      labels: { "msg-a": undefined, "msg-b": undefined }, // override → simulate post-consumption (both cleared)
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    expect(firstText(res2)).toContain("Mulligan: refused — checkpoint 'x' not found on this branch.");
+  });
 });

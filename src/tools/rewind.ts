@@ -583,12 +583,23 @@ async function rewindExecute(
     //      ONLY on the checkpoint-granularity success path (step 7 persist + leaveNote already completed).
     //      A checkpoint label (`mulligan:checkpoint:<name>`) is consumed by the rewind that targets it: clear
     //      the label so a second rewind by the same name can't re-target stale state (single-source downstream
-    //      effect). Mirrors checkpointExists' defensive scan style (inline `(e as {...})` casts, per-entry
-    //      try/catch — no readOwn/isRecord import). E13: the clear is best-effort and its own try/catch — a
-    //      label-clear failure must never undo the rewind (the marker is already persisted at step 7).
+    //      effect). Mirrors checkpointExists' pattern EXACTLY (this file, lines ~302-336): (1) collect candidate
+    //      targetIds from raw label entries whose label string === needle; (2) confirm each via
+    //      getLabel(id)===needle (Pi's latest-wins map — undefined once a clear follows the set); (3) clear each
+    //      CURRENTLY-active target. There is NO break: Pi's labelsById is Map<targetId,label> with NO
+    //      cross-target uniqueness, so when the same name is set on two targets BOTH carry the label and BOTH
+    //      must be cleared or checkpointExists stays true via the survivor (BUG-001 — the old
+    //      break-after-first-clear cleared only the oldest target, while resolveCheckpoint targets the newest).
+    //      Defensive inline `(e as {...})` casts + per-entry try/catch (no readOwn/isRecord import — matches
+    //      the file's idiom). E13: best-effort, own try/catch + per-candidate try/catch — a label-clear failure
+    //      must never undo the rewind (the marker is already persisted at step 7).
     if (granularity === "checkpoint") {
       try {
         const needle = `mulligan:checkpoint:${params.checkpoint}`;
+        // (1) collect candidate targetIds whose raw label string === needle (a cleared checkpoint still has
+        //     the historical set entry in the raw stream; getLabel below confirms current activity). Set → a
+        //     target set twice (or cleared-then-reset) is collected once.
+        const candidates = new Set<string>();
         let entries: unknown;
         try {
           entries = ctx.sessionManager.getEntries();
@@ -598,21 +609,23 @@ async function rewindExecute(
         if (Array.isArray(entries)) {
           for (const e of entries) {
             if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
-            let isMatch = false;
-            let targetId: unknown = undefined;
             try {
               const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
-              isMatch = ee.type === "label" && ee.label === needle;
-              targetId = ee.targetId;
+              if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+                candidates.add(ee.targetId);
+              }
             } catch {
-              continue;
+              // skip a throwing-Proxy entry
             }
-            if (isMatch && typeof targetId === "string" && targetId.length > 0) {
-              pi.setLabel(targetId, undefined);
-              break; // BUG-001 fix (validation 1a): clear THEN stop — the unconditional `break` ran after
-                     // the FIRST entry (often a user message), so the label-clear was never reached in a
-                     // realistic multi-entry session. Break ONLY after a successful clear.
-            }
+          }
+        }
+        // (2) clear each candidate whose CURRENT getLabel still maps to the needle (latest-wins; only
+        //     ACTUALLY-active targets are cleared — a historical entry already cleared maps to undefined).
+        for (const id of candidates) {
+          try {
+            if (ctx.sessionManager.getLabel(id) === needle) pi.setLabel(id, undefined);
+          } catch {
+            // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
           }
         }
       } catch {
