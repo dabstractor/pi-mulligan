@@ -286,11 +286,25 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
 }
 
 /**
- * checkpointExists — the checkpoint-existence check (step 3, E10). Scan `ctx.sessionManager.getEntries()` for an
- * entry where `type === "label" && label === \`mulligan:checkpoint:${name}\``; return found. Defensive (never
- * throws; a malformed name naturally returns false). Module-local.
+ * checkpointExists — the checkpoint-existence check (step 3, E10). A checkpoint is ACTIVE iff its label
+ * currently maps to the `mulligan:checkpoint:<name>` string in Pi's LATEST-WINS label map. That map is
+ * append-only in the raw entry stream (a `setLabel(id, undefined)` appends a clear entry), so scanning raw
+ * `getEntries()` for a string match would find the HISTORICAL label even after it was consumed (validation
+ * issue 1b). Pi's `ctx.sessionManager.getLabel(id)` applies the latest-wins semantics: it returns `undefined`
+ * once a clear entry follows the set, which is exactly the consumed state we must refuse. We therefore walk
+ * raw entries to discover candidate `label` targets, then ask `getLabel(targetId)` whether each is CURRENTLY
+ * active. Defensive (never throws — a throwing getEntries/getLabel/Proxy trap → false). Module-local.
+ *
+ * @param ctx  the Pi ExtensionContext (getEntries to discover candidates; getLabel for latest-wins resolution)
+ * @param name the checkpoint name (the suffix after `mulligan:checkpoint:`)
+ * @returns true iff some entry's label target currently maps to `mulligan:checkpoint:<name>`
  */
 function checkpointExists(ctx: ExtensionContext, name: string): boolean {
+  const needle = `mulligan:checkpoint:${name}`;
+  // Collect candidate targetIds from raw label entries whose label string === needle (a cleared checkpoint
+  // still has the historical set entry in the raw stream, so we discover the candidate here and confirm via
+  // getLabel below). Use a Set so a target cleared-then-reset is checked once.
+  const candidates = new Set<string>();
   let entries: unknown;
   try {
     entries = ctx.sessionManager.getEntries();
@@ -298,15 +312,25 @@ function checkpointExists(ctx: ExtensionContext, name: string): boolean {
     return false; // never let the existence check throw
   }
   if (!Array.isArray(entries)) return false;
-  const needle = `mulligan:checkpoint:${name}`;
   for (const e of entries) {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      if ((e as { type?: unknown }).type === "label" && (e as { label?: unknown }).label === needle) {
-        return true;
+      const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
+      if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+        candidates.add(ee.targetId);
       }
     } catch {
       // skip a throwing-Proxy entry
+    }
+  }
+  if (candidates.size === 0) return false;
+  // Confirm ACTIVITY via Pi's latest-wins map (validation issue 1b): getLabel returns the CURRENT label,
+  // undefined once a clear entry follows the set. getLabel is part of ReadonlySessionManager (always present).
+  for (const id of candidates) {
+    try {
+      if (ctx.sessionManager.getLabel(id) === needle) return true;
+    } catch {
+      // a throwing getLabel → treat this candidate as inactive (never throw on the tool hot path)
     }
   }
   return false;
@@ -585,8 +609,10 @@ async function rewindExecute(
             }
             if (isMatch && typeof targetId === "string" && targetId.length > 0) {
               pi.setLabel(targetId, undefined);
+              break; // BUG-001 fix (validation 1a): clear THEN stop — the unconditional `break` ran after
+                     // the FIRST entry (often a user message), so the label-clear was never reached in a
+                     // realistic multi-entry session. Break ONLY after a successful clear.
             }
-            break;
           }
         }
       } catch {

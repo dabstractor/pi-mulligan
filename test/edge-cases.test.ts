@@ -207,6 +207,26 @@ function makeCtx(opts: {
       if (opts.throwOnGetEntries) throw new Error("getEntries boom");
       return entries;
     },
+    // getLabel — Pi's LATEST-WINS label map (validation issue 1b): a clear entry ({label:undefined}) deletes
+    // the target from the in-memory map, so getLabel returns undefined for a CONSUMED checkpoint. checkpointExists
+    // consults this; derive it from the raw entries by keeping the LAST label per targetId.
+    getLabel(id: string) {
+      let current: string | undefined = undefined;
+      let seen = false;
+      for (const e of entries) {
+        if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+        try {
+          const ee = e as { type?: unknown; targetId?: unknown; label?: unknown };
+          if (ee.type === "label" && ee.targetId === id) {
+            seen = true;
+            current = typeof ee.label === "string" ? ee.label : undefined;
+          }
+        } catch {
+          // skip a throwing-Proxy entry
+        }
+      }
+      return seen ? current : undefined;
+    },
     getBranch() {
       if (opts.throwOnGetBranch) throw new Error("getBranch boom");
       return branch;

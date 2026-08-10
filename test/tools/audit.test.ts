@@ -193,8 +193,11 @@ function msgEntry(role: string, extra: Record<string, unknown> = {}): SessionEnt
   } as unknown as SessionEntry;
 }
 
-/** A label entry for a checkpoint (spec/04 §6): label = "mulligan:checkpoint:<name>". */
-function checkpointEntry(name: string, targetId = "leaf-1"): SessionEntry {
+/** A label entry for a checkpoint (spec/04 §6): label = "mulligan:checkpoint:<name>".
+ *  Each checkpoint labels a DISTINCT target entry (mirrors production: a checkpoint is set on whatever entry
+ *  is current when mulligan_checkpoint runs, so two checkpoints have different targetIds). The default
+ *  targetId is derived from the name so two checkpoints coexist in the latest-wins map (validation issue 1b). */
+function checkpointEntry(name: string, targetId = `leaf-${name}`): SessionEntry {
   entrySeq += 1;
   return {
     type: "label",
@@ -853,6 +856,35 @@ describe("mulligan_audit — pure helpers (describeMessage / buildCallLookup / l
       { type: "custom", customType: "mulligan:rewind" }, // not a label
     ];
     expect(listCheckpoints(entries)).toEqual(["before-x", "before-y"]);
+  });
+
+  // REGRESSION (validation issue #1b): listCheckpoints must honor Pi's latest-wins label semantics — a consumed
+  // checkpoint (cleared by a rewind) appends a {label: undefined} entry to the raw stream, and the historical
+  // SET entry persists alongside it. Scanning for any string match would wrongly keep listing the consumed name.
+  it("listCheckpoints drops a CONSUMED checkpoint (latest-wins: clear entry follows the set)", () => {
+    const entries = [
+      checkpointEntry("anchor", "t1"), // SET: mulligan:checkpoint:anchor on t1
+      { type: "label", targetId: "t1", label: undefined }, // CLEAR: consumed by a rewind
+    ];
+    expect(listCheckpoints(entries)).toEqual([]); // consumed → NOT listed in mulligan_audit
+  });
+
+  it("listCheckpoints resurrects a re-set checkpoint (set, clear, set-again under same name)", () => {
+    const entries = [
+      checkpointEntry("x", "t1"), // set
+      { type: "label", targetId: "t1", label: undefined }, // cleared
+      { type: "label", targetId: "t1", label: "mulligan:checkpoint:x" }, // re-set (re-created)
+    ];
+    expect(listCheckpoints(entries)).toEqual(["x"]); // latest-wins → active again
+  });
+
+  it("listCheckpoints keeps an OTHER checkpoint when one is consumed (per-target latest-wins)", () => {
+    const entries = [
+      checkpointEntry("before-x", "t1"),
+      checkpointEntry("before-y", "t2"),
+      { type: "label", targetId: "t1", label: undefined }, // only 'before-x' consumed
+    ];
+    expect(listCheckpoints(entries)).toEqual(["before-y"]); // before-x cleared, before-y still active
   });
 
   it("messageBytes: string content → UTF-8 byte length (multibyte-aware)", () => {

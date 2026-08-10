@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 5,
+  "summary": "Automated gates fully green (tsc clean, 943/943 unit tests, 14/14 smoke); code review found the checkpoint auto-expiry-on-consumption feature is non-functional (two compounding defects) plus 4 minor hygiene/doc/test-gap items."
+}

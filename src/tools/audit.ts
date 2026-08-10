@@ -333,13 +333,32 @@ export function listCheckpoints(entries: unknown[]): string[] {
   const names: string[] = [];
   if (!Array.isArray(entries)) return names;
   const PREFIX = "mulligan:checkpoint:";
+  // Step 1: build the latest-wins map of targetId → label (a clear entry sets undefined, overwriting a prior
+  // set — mirrors Pi's `_buildIndex`). Scanning raw entries for any string match would surface the HISTORICAL
+  // label even after consumption (validation issue 1b: a consumed checkpoint would wrongly stay listed).
+  const latest = new Map<string, unknown>();
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    if (readOwn(entry, "type") !== "label") continue;
+    const targetId = readOwn(entry, "targetId");
+    if (typeof targetId !== "string" || targetId.length === 0) continue; // no target → not a checkpoint label
+    latest.set(targetId, readOwn(entry, "label")); // last writer wins (undefined on a clear entry)
+  }
+  // Step 2: emit active checkpoint names in order of FIRST occurrence (deterministic). A name is active only if
+  // its target's FINAL (latest-wins) value is STILL that exact label string (not cleared later).
+  const seen = new Set<string>();
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
     if (readOwn(entry, "type") !== "label") continue;
     const label = readOwn(entry, "label");
-    if (typeof label !== "string") continue;
-    if (label.startsWith(PREFIX)) {
-      names.push(label.slice(PREFIX.length));
+    if (typeof label !== "string" || !label.startsWith(PREFIX)) continue;
+    const targetId = readOwn(entry, "targetId");
+    if (typeof targetId !== "string" || targetId.length === 0) continue;
+    if (latest.get(targetId) !== label) continue; // cleared/re-set since → not active
+    const name = label.slice(PREFIX.length);
+    if (!seen.has(name)) {
+      seen.add(name);
+      names.push(name);
     }
   }
   return names;

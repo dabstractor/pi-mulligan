@@ -252,7 +252,7 @@ Mulligan is deliberately minimal. These are the four things it deliberately does
 
 ## 8. License
 
-**MIT** (per `spec/SPEC.md`). Adding a top-level `LICENSE` file with the MIT text is recommended but not yet present in this repo.
+**MIT** (per `spec/SPEC.md`). The MIT text is in the top-level [`LICENSE`](./LICENSE) file.
 
 ---
 

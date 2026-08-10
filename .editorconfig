@@ -1,0 +1,19 @@
+# EditorConfig — keeps contributors on the same basic formatting (prevents whitespace/line-ending drift).
+# pi-mulligan is hand-formatted by discipline; this enforces the lowest-common-denominator conventions
+# (see VERIFICATION.md issue #3 — full eslint/prettier CI is intentionally not added to avoid churning
+# the clean hand-formatted diff; .editorconfig covers the most common drift vectors with zero dependencies).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{md,mdx}]
+trim_trailing_whitespace = false
+
+[*.mjs]
+indent_size = 2

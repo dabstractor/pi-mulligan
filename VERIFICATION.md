@@ -19,7 +19,7 @@
 | 3 | `mulligan:nudge` provably never persisted | grep smoke session JSONL for persisted `customType:"mulligan:nudge"` | **0** persisted nudge messages in any smoke session | ✅ |
 | 4 | `config.enabled=false` → pure no-op | grep the 5 master-switch gates + disabled unit tests | **5 gates present** (filter/rewind/shrink/nudges×2) + **115 disabled-path tests green** | ✅ |
 | 5 | Intentional filter exception doesn't break a turn | `filter.test.ts -t fail-open` + smoke `F-failopen` | **10 fail-open tests green** + F-failopen PASS | ✅ |
-| 6 | README documents install, the four tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **4 *_DESC verbatim + 12-knob table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** | ✅ |
+| 6 | README documents install, the five agent-callable tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **5 *_DESC verbatim + 20-knob config table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** (rewind, shrink, checkpoint, audit, cancel) | ✅ |
 | + | typebox schemas compile | `npx tsc --noEmit` | **exit 0** (strict + skipLibCheck; typebox `Type.Object` schemas compile) | ✅ |
 | + | zero-config smoke load (`spec/11` §2 Step 9) | `pi -e ./src/index.ts -p "Reply with the single word: ok"` | **no load error**; model responded `ok` | ✅ |
 
@@ -146,7 +146,7 @@ first clean run. No `src/` or `README.md` edits were made.
 - `test/` — untouched. The 4 edge-case tests that were red at PRP-research time (E5
   mutation-warning + E13 fail-open ×3 in `edge-cases.test.ts`) were resolved by P1.M7.T3.S1,
   which is now Complete; `npm test` is 671/671.
-- `README.md` — untouched (S1's output is fully accurate: 4 *_DESC verbatim, 12-knob table
+- `README.md` — untouched (S1's output is fully accurate: 5 *_DESC verbatim, 20-knob config table
   matches `DEFAULT_CONFIG`, Disabling note POST-E14 consistent, zero-config claim true).
 - Final cleanup — none needed: `src/` contains only the single intentional `warnConfig`
   `console.warn` (`config.ts:311`, the documented v1 warn seam — GOTCHA #10); no stray

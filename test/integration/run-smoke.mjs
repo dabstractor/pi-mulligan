@@ -165,6 +165,27 @@ function countLabel(entries, labelPrefix) {
 }
 
 /**
+ * labelActive — Pi's LATEST-WINS label resolution applied to the raw entry stream (validation issue #1b/#5).
+ * A `setLabel(id, undefined)` appends a `{type:"label", targetId, label:undefined}` clear entry; Pi's
+ * `_buildIndex` then deletes the id from its in-memory map, so getLabel(id) returns undefined for a CONSUMED
+ * checkpoint. We mirror that here: walk entries in order, keep the LAST `label` per targetId (undefined on a
+ * clear), and return true iff SOME target's final value is exactly `label` (the checkpoint is still active).
+ */
+function labelActive(entries, label) {
+  const latest = new Map();
+  for (const e of entries) {
+    if (e.type !== "label") continue;
+    const id = e.targetId;
+    if (typeof id !== "string" || id.length === 0) continue;
+    latest.set(id, e.label); // last writer wins (undefined on a clear entry)
+  }
+  for (const v of latest.values()) {
+    if (v === label) return true;
+  }
+  return false;
+}
+
+/**
  * hasText — true if any session entry's stringified form includes the needle (for "original canary still on disk").
  */
 function entryIncludes(entries, needle) {
@@ -358,6 +379,11 @@ function assertCheckpoint({ smoke, piRes }) {
   if (entries.length > 0) {
     assert(results, "JSONL has label mulligan:checkpoint:alpha", countLabel(entries, "mulligan:checkpoint:alpha") >= 1, "");
     assert(results, "JSONL has mulligan:rewind (custom)", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
+    // REGRESSION (validation issue #1b/#5): the checkpoint 'alpha' was CONSUMED by the rewind — a clear entry
+    // must follow the set, so Pi's latest-wins label map no longer lists it active. The raw SET entry still
+    // exists on disk (audit trail), which is why the countLabel>=1 assertion above still holds; this assertion
+    // closes the test-gap that masked the broken auto-expiry by checking the CONSUMED state directly.
+    assert(results, "checkpoint 'alpha' CONSUMED by rewind (auto-expiry; spec/05 §3 step 5)", !labelActive(entries, "mulligan:checkpoint:alpha"), "checkpoint still active post-rewind");
     assertGlobalInvariants(results, entries);
   } else {
     assert(results, "JSONL available", false, "session JSONL missing — model may have timed out");

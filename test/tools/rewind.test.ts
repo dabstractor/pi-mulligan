@@ -112,6 +112,10 @@ function makeCtx(opts: {
   /** Script ctx.getContextUsage() so the (4c) context-fraction guard can read `.contextWindow`. ABSENT → the
    *  method is NOT attached → computeFilteredTotal returns windowTokens:0 → (4c) SKIPPED (no regression). */
   contextUsage?: { contextWindow: number };
+  /** Override the latest-wins label map that `getLabel(id)` returns, bypassing the derive-from-entries walk.
+   *  Keys are targetIds; values are label strings (or undefined for a consumed/cleared target). Lets a test
+   *  force the post-consumption state directly (validation issue 1b). */
+  labels?: Record<string, string | undefined>;
   throwOnGetEntries?: boolean;
   throwOnGetBranch?: boolean;
   throwOnBuildContext?: boolean;
@@ -133,6 +137,32 @@ function makeCtx(opts: {
     getEntries() {
       if (opts.throwOnGetEntries) throw new Error("getEntries boom");
       return entries;
+    },
+    // getLabel — Pi's LATEST-WINS label map (validation issue 1b): a `setLabel(id, undefined)` appends a clear
+    // entry, and `_buildIndex` deletes the id from its in-memory map, so getLabel returns undefined for a
+    // CONSUMED checkpoint. We mirror that here by walking `entries` and keeping the LAST `label` per targetId
+    // (undefined on a clear entry). checkpointExists consults this so the existence check reflects consumption.
+    // Optional `opts.labels` (a targetId→label override map) lets a test force the post-consumption state
+    // directly without re-deriving from entries.
+    getLabel(id: string) {
+      if (opts.labels && Object.prototype.hasOwnProperty.call(opts.labels, id)) {
+        return opts.labels[id];
+      }
+      let current: string | undefined = undefined;
+      let seen = false;
+      for (const e of entries) {
+        if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+        try {
+          const ee = e as { type?: unknown; targetId?: unknown; label?: unknown };
+          if (ee.type === "label" && ee.targetId === id) {
+            seen = true;
+            current = typeof ee.label === "string" ? ee.label : undefined;
+          }
+        } catch {
+          // skip a throwing-Proxy entry
+        }
+      }
+      return seen ? current : undefined;
     },
     getBranch() {
       if (opts.throwOnGetBranch) throw new Error("getBranch boom");
@@ -1183,5 +1213,75 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success (NOT refusal)
     expect(firstText(res)).not.toContain("refused"); // not inverted to a failure
     expect(appended).toHaveLength(1); // marker still persisted (E13: clear failure never undoes the rewind)
+  });
+
+  // ── REGRESSION (validation issues #1a + #1b + #5): realistic multi-entry consumption ────────────────
+  // The original suite masked two defects because scenario (a) used a SINGLE-element `entries` array where the
+  // checkpoint label was entries[0] (so the buggy unconditional `break` happened to work) and scenario (b)
+  // simulated the consumed state by swapping in a FRESH ctx instead of reflecting the clear in the SAME session.
+  // These three tests use a REALISTIC multi-entry session (user msg, assistant, toolResult, THEN the checkpoint
+  // label — i.e. the label is NOT entries[0]) and assert the full consumption contract end-to-end.
+
+  it("(f) [regression 1a] a checkpoint rewind clears the label when the label is NOT the first entry", async () => {
+    // Reproduces validation issue #1a: the buggy unconditional `break` exited the loop after entries[0] (a user
+    // message), so pi.setLabel was never reached when the checkpoint label came later in the stream.
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("what files exist?")), // entries[0] — a user message (NOT the checkpoint)
+        msgEntry(asst("call-1")), // entries[1] — assistant turn
+        msgEntry(result("call-1")), // entries[2] — tool result
+        checkpointLabelEntry("anchor"), // entries[3] — the checkpoint label (the buggy loop never reached here)
+      ],
+      contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
+    // The label-clear MUST have been captured (the buggy code recorded 0 setLabel calls here).
+    expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined });
+  });
+
+  it("(g) [regression 1b] listCheckpoints drops a consumed checkpoint; a second rewind by name refuses", async () => {
+    // Reproduces validation issue #1b: even with the loop fixed, scanning raw entries for a string match would
+    // re-surface the HISTORICAL label after the clear entry was appended. Pi's getLabel (latest-wins) returns
+    // undefined once a clear follows the set — checkpointExists + listCheckpoints must honor that.
+    const { labels, pi } = makePi();
+    // A realistic session WITH the clear entry appended (what getEntries() looks like AFTER consumption):
+    //   [user, asst, toolResult, <checkpoint set>, ..., <checkpoint clear>]
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("what files exist?")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+        checkpointLabelEntry("anchor"), // the historical SET entry (string label)
+        { type: "label", targetId: "leaf-1", label: undefined }, // the CLEAR entry (consumption)
+      ],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    // (1) checkpointExists must see this checkpoint as CONSUMED → a rewind by the same name refuses.
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    expect(firstText(res)).toContain(
+      "Mulligan: refused — checkpoint 'anchor' not found on this branch.",
+    );
+    // (2) listCheckpoints (the mulligan_audit surface) must NOT list a consumed checkpoint.
+    expect(listCheckpoints(ctx.sessionManager.getEntries())).not.toContain("anchor");
+    // (3) no clear should have been recorded (the rewind refused before step 7b).
+    expect(labels).toHaveLength(0);
+  });
+
+  it("(h) [regression 1b] a re-set checkpoint (set, clear, set-again) is active again", async () => {
+    // The latest-wins map must RESURRECT a cleared target when it's re-set under the same name (re-create flow).
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [
+        checkpointLabelEntry("x"), // set
+        { type: "label", targetId: "leaf-1", label: undefined }, // cleared (consumed)
+        { type: "label", targetId: "leaf-1", label: "mulligan:checkpoint:x" }, // re-set (re-created)
+      ],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // active again → succeeds
+    expect(listCheckpoints(ctx.sessionManager.getEntries())).toContain("x");
   });
 });
