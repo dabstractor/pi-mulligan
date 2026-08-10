@@ -1,36 +1,62 @@
 {
   "name": "pi-mulligan",
   "version": "0.1.0",
+  "description": "Autonomous, token-cheap context self-rewind for a Pi coding agent — shed context produced by mistake and redo a turn with a self-authored note.",
   "type": "module",
-  "main": "src/index.ts",
+  "license": "MIT",
+  "author": "Dustin Schultz (https://github.com/dabstractor)",
+  "homepage": "https://github.com/dabstractor/pi-mulligan#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dabstractor/pi-mulligan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dabstractor/pi-mulligan/issues"
+  },
   "keywords": [
     "pi-package",
+    "pi-extension",
     "pi",
     "pi-coding-agent",
     "retry",
     "context",
-    "pi-extension",
+    "context-window",
     "ai",
     "agents",
     "cli"
   ],
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
     ]
   },
-  "dependencies": {
+  "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "typebox": "1.3.11",
+    "@types/node": "^22",
     "typescript": "^5",
-    "vitest": "^1",
-    "@types/node": "^22"
+    "vitest": "^1"
   },
   "scripts": {
     "test": "vitest run",
     "smoke": "node test/integration/run-smoke.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test"
   }
 }
