@@ -19,8 +19,11 @@
  * - It is the ONLY place Mulligan deliberately re-runs `filterPipeline` — and ONLY on the rare E16 fallback
  *   (no cached view yet: audit called before any inference this session). This isolation keeps the
  *   "one transform pipeline" invariant (spec/04 §4) intact: the audit never invents a second transform.
- * - NO config gate (GOTCHA #4): there is no `config.audit.enabled` switch and the audit does NOT refuse when
- *   `config.enabled === false`. The audit is always-on diagnostics (read-only). Mirror checkpoint GOTCHA #4.
+ * - config.enabled gate (E14 + D5, BUG-005): the audit gates on the MASTER `config.enabled` switch and refuses
+ *   "Mulligan is disabled" when it is false — the SAME gate rewind/shrink/cancel have (spec/08 E14 "the
+ *   extension is a no-op"). When disabled, the context handler is pass-through (the model sees the UNFILTERED
+ *   view), so running filterPipeline here would report a TRANSFORMED view the model does NOT see (D5 violation).
+ *   There is still NO `config.audit.enabled` SUB-switch — the audit gates on the master only (like the others).
  * - CRITICAL GOTCHA #1: every `AgentToolResult<T>` return path includes a `details` field (spec/05 §4's
  *   `{ content:[...] }`-only return shape is a SIMPLIFICATION — `details` is REQUIRED by the Pi type; this
  *   file is strict-typechecked by tsconfig, unlike spec/reference/looper-smoke.proto.ts). We surface a small
@@ -145,6 +148,27 @@ function readOwn(obj: unknown, key: string): unknown {
 function readStr(obj: unknown, key: string): string | undefined {
   const v = readOwn(obj, key);
   return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * refusal — build the shared "Mulligan: refused — <reason>." result (spec/05 shared convention; mirrors
+ * shrink.ts:132 / cancel.ts:166). The details object is the disabled/low-confidence AuditDetails (all
+ * counts zero, top empty) — REQUIRED on every return path (CRITICAL GOTCHA #1). NEVER throws. Module-private.
+ */
+function refusal(reason: string): AgentToolResult<AuditDetails> {
+  return {
+    content: [{ type: "text" as const, text: `Mulligan: refused — ${reason}.` }],
+    details: {
+      totalTokens: 0,
+      confidence: "low",
+      source: "fallback",
+      nRewinds: 0,
+      nShrinks: 0,
+      nCheckpoints: 0,
+      nCancelled: 0,
+      top: [],
+    },
+  };
 }
 
 /** Truncate a string to `max` chars with an ellipsis; pass-through for non-strings (returns ""). */
@@ -526,6 +550,9 @@ export function computeFilteredTotal(ctx: ExtensionContext): { totalTokens: numb
 
 /**
  * auditExecute — the tool body. Steps (spec/05 §4 "Behavior" 1–5):
+ *   0. config.enabled gate (E14, BUG-005): if the master switch is off, refuse "Mulligan is disabled" BEFORE
+ *      any session access (D5: when disabled the model sees the unfiltered view; reporting a transformed view
+ *      would mislead).
  *   1. Resolve the FILTERED view:
  *      - PRIMARY: rt.lastFiltered (the filter's cached output) when it is a non-null array → source="cached",
  *        confidence = config.audit.estimateConfidence.
@@ -551,6 +578,10 @@ async function auditExecute(
 ): Promise<AgentToolResult<AuditDetails>> {
   try {
     const config = getConfig();
+    // BUG-005 (spec/08 E14 + D5): when the master switch is off the context handler is pass-through — the
+    // model sees the UNFILTERED view. Running filterPipeline here would report a TRANSFORMED view the model
+    // does NOT see (D5 violation). Refuse BEFORE any session access, matching rewind/shrink/cancel (E14).
+    if (!config.enabled) return refusal("Mulligan is disabled");
     const sessionId = ctx.sessionManager.getSessionId(); // read FRESH (C12)
     const rt = getRuntime(sessionId);
 

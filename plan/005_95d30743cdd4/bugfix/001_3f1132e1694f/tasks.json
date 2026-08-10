@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Remediation — pi-mulligan BUG-001 through BUG-006",
-      "status": "Researching",
+      "status": "Ready",
       "description": "Fix six verified bugs in the pi-mulligan extension: one Major (checkpoint consumption clearing wrong target on duplicate labels) and five Minor (config integer validation gaps, empty-needle resolver match, audit disabled-state inconsistency, and nuclear-rewind persisting no-op markers). All bugs are in edge cases not covered by the existing 949-test suite. The fixes are surgical, following established patterns (the maxRetriesPerPrompt integer-guard precedent, the tool-layer refusal convention, and defense-in-depth in the pure resolver tier).",
       "milestones": [
         {
@@ -155,21 +155,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Audit Tool Consistency (BUG-005)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Add a config.enabled gate to mulligan_audit's auditExecute so that when the extension is disabled, the audit either reports the UNFILTERED view or refuses — rather than running filterPipeline and reporting a transformed view that does not match what the model actually sees. The rewind/shrink/cancel tools all gate on config.enabled; audit is the lone inconsistency.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Add config.enabled gate to mulligan_audit (BUG-005)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "auditExecute in src/tools/audit.ts has no config.enabled check at the top. When config.enabled===false, the context handler is pass-through (model sees unfiltered context), but audit's fallback path runs filterPipeline and reports markers as active + a filtered total — actively misleading the agent about what the model sees (D5 violation). Add a config.enabled gate.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Add config.enabled gate to auditExecute that reports the unfiltered view when disabled",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_95d30743cdd4/bugfix/001_3f1132e1694f/architecture/bug_verification.md §BUG-005 and architecture/spec_requirements.md §BUG-005. The auditExecute function in src/tools/audit.ts (line 545) reads `const config = getConfig()` at the top of the try block but does NOT check `config.enabled`. The source comment at line 23 says 'NO config gate (GOTCHA #4): ... The audit is always-on diagnostics (read-only).' However, when disabled, the model sees UNFILTERED context (contextHandler returns immediately at filter.ts line 455) but audit's E16-fallback path runs filterPipeline and reports the transformed view — violating D5 (honest bookkeeping) and E14 ('the extension is a no-op').\n2. INPUT: The auditExecute function in src/tools/audit.ts (lines 545-570). The function already reads `const config = getConfig()` at the top of the try block. The other tools refuse with 'Mulligan is disabled' when config.enabled is false (rewind.ts line 478, shrink.ts line 286, cancel.ts line 350). The AuditDetails interface requires specific fields on every return path. The refusal text convention is: 'Mulligan: refused — <reason>.'\n3. LOGIC: Add a config.enabled check IMMEDIATELY after reading config (after `const config = getConfig()`) and BEFORE the `const sessionId = ctx.sessionManager.getSessionId()` line. When config.enabled is false, the audit should report the UNFILTERED view (build the report from buildContextEntries WITHOUT filterPipeline), NOT refuse — because the audit's value is showing the agent what's in context, and when disabled that IS the unfiltered view. IMPLEMENTATION:\n  // BUG-005 fix: when disabled, the model sees the UNFILTERED view (contextHandler is pass-through).\n  // Report that view honestly (D5) — do NOT run filterPipeline (which would show a transformed view\n  // the model does NOT see, actively misleading the agent).\n  if (!config.enabled) {\n    const entries = ctx.sessionManager.buildContextEntries();\n    const filtered = entriesToMessages(entries);\n    const totalTokens = estimateTokens(filtered as unknown as Parameters<typeof estimateTokens>[0]).tokens;\n    const top = Math.min(8, filtered.length);\n    const callLookup = buildCallLookup(filtered);\n    // ... build rows from UNFILTERED messages (same logic as the normal path, just without filterPipeline)\n    // ... render with 0 active markers (markers are NOT applied when disabled)\n    // ... source='fallback', confidence='low'\n    // ... nRewinds=0, nShrinks=0, nCheckpoints=0, nCancelled=0\n  }\n  ALTERNATIVE (simpler, acceptable): refuse with 'Mulligan is disabled' matching the other tools. This is less useful (the agent gets no diagnostic) but is consistent with E14 ('tools refuse with Mulligan is disabled'). Choose this if the full unfiltered report is too complex for a 1-SP subtask. The PRD says 'either add a gate that reports the unfiltered view / refuses.'\n  RECOMMENDED: Use the simpler refusal approach (`return refusal('Mulligan is disabled')`) for consistency with the other tools and to stay within 1 SP. The unfiltered-report approach can be a future enhancement.\n4. OUTPUT: The modified src/tools/audit.ts file. When config.enabled===false, auditExecute returns `{ content: [{ type: 'text', text: 'Mulligan: refused — Mulligan is disabled.' }], details: { totalTokens: 0, confidence: 'low', source: 'fallback', nRewinds: 0, nShrinks: 0, nCheckpoints: 0, nCancelled: 0, top: [] } }`. It does NOT run filterPipeline or report a transformed view. When enabled, behavior is unchanged.\n5. DOCS: [Mode A] Update the source comment at audit.ts line 23 (currently 'NO config gate (GOTCHA #4)') to reflect the new behavior: the audit now gates on config.enabled for consistency with E14 + D5. Also update the auditExecute JSDoc to note the config.enabled gate. This rides WITH the work.",
@@ -187,21 +187,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Sync changeset-level documentation",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Final cross-cutting documentation task. Update README.md and VERIFICATION.md to reflect the six bug fixes. Per SOW §5 Mode B, this task depends on ALL implementing subtasks and runs last.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Sync changeset-level documentation for BUG-001 through BUG-006",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Update README.md and VERIFICATION.md to document the six bug fixes: checkpoint consumption now clears all duplicate-target labels; config integer validation is tightened for driftWindowTurns/maxActive/staleAfterFires; resolveShrinkTarget rejects empty needles; audit respects config.enabled; and nuclear last_turn on the first user message is refused before persisting.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Update VERIFICATION.md and README.md with bug fix summaries",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

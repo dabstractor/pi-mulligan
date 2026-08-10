@@ -976,3 +976,45 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
   });
 });
 
+// ── config.enabled === false: refusal gate (BUG-005; spec/08 E14 + D5) ───────────────────────────────
+
+describe("mulligan_audit — config.enabled === false (BUG-005; spec/08 E14, D5)", () => {
+  beforeEach(() => setConfig({ enabled: false })); // master switch off (merges with defaults)
+
+  it("refuses 'Mulligan is disabled' with zeroed details; does NOT run filterPipeline / report a transformed view", async () => {
+    const { calls, ctx } = makeCtx();
+    // Seed the cache so we can PROVE the disabled path ignores it (D5: no transformed view is computed).
+    getRuntime("s1").lastFiltered = [userMsg("seeded but must be ignored when disabled")];
+    const res = await run(ctx, { top: 8 });
+    // E14 refusal text (refusal() adds the "Mulligan: refused — " prefix + trailing "."):
+    expect(firstText(res)).toBe("Mulligan: refused — Mulligan is disabled.");
+    // The disabled-path AuditDetails (the contract OUTPUT — all counts zero, top empty, no `error`):
+    expect(res.details).toEqual({
+      totalTokens: 0,
+      confidence: "low",
+      source: "fallback",
+      nRewinds: 0,
+      nShrinks: 0,
+      nCheckpoints: 0,
+      nCancelled: 0,
+      top: [],
+    });
+    // D5 proof: the gate fires BEFORE any session access — no sessionManager method is called, so NO
+    // transformed view (filterPipeline/buildContextEntries/getBranch) is ever computed when disabled.
+    expect(calls).not.toContain("getSessionId");
+    expect(calls).not.toContain("buildContextEntries");
+    expect(calls).not.toContain("getBranch");
+  });
+
+  it("re-enabling (config.enabled === true) restores normal behavior — the gate is not sticky", async () => {
+    // Proves the gate is a runtime read, not a cached/latched state.
+    setConfig({ enabled: true });
+    const { ctx } = makeCtx();
+    getRuntime("s1").lastFiltered = [userMsg("hello world this is a short user message")];
+    const res = await run(ctx, { top: 8 });
+    expect(res.details.source).toBe("cached"); // back on the normal PRIMARY path
+    expect(firstText(res)).toContain("## Mulligan audit — context you are currently carrying");
+    expect(firstText(res)).not.toContain("Mulligan is disabled");
+  });
+});
+
