@@ -85,14 +85,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Operator-visible payloads: shrink echo + rewind-note rationale",
-          "status": "Planned",
+          "status": "Researching",
           "description": "mulligan_shrink now surfaces the replacement to the operator via ctx.ui.notify (zero context cost); the tool result stays terse ('Matched: yes/no.'). New config knob shrink.notifyMaxChars (default 2048). Rewind-note display:true rationale comment aligned to spec.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "mulligan_shrink operator echo + terse result",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add the shrink.notifyMaxChars config knob. Change the success return text to the terse form. Add ctx.ui.notify echo after persisting.",
               "subtasks": [
                 {
@@ -132,7 +132,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Tests for shrink echo + config validation",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1",
@@ -153,14 +153,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Rewind-note display:true rationale (trivial doc)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The code already passes display:true (markers.ts:383). Add/expand the JSDoc comment to state spec/05 §1 step 6's rationale. No behavior change, no test change.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Comment alignment for display:true rationale",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified at src/markers.ts ~line 378-383: leaveNote() already passes display:true via pi.sendMessage({ customType: 'mulligan:note', content, display: true, details }). The comment above it explains it surfaces to the UI transcript but does NOT cite spec/05 §1 step 6's rationale (deliberate operator visibility — the rewind counterpart of shrink's replacement echo).\n2. INPUT: The current src/markers.ts leaveNote() function and its JSDoc (~line 360-390).\n3. LOGIC: Expand the JSDoc comment on the `display: true` line (or the leaveNote function doc) to state: display:true is DELIBERATE — it surfaces the note to the operator (the human sees exactly what the model told its resumed self via the rewind note); this is the rewind counterpart of shrink's replacement echo (ctx.ui.notify). Cite spec/05 §1 step 6 (the bolded display:true note) and spec/05 §1 Purpose ('flagship UX'). No code change, no test change.\n4. OUTPUT: Updated JSDoc comment on leaveNote() in src/markers.ts.\n5. DOCS: [Mode A] this comment IS the doc — no separate doc file.",

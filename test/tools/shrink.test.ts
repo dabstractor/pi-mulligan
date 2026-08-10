@@ -625,3 +625,64 @@ describe("mulligan_shrink — types (ToolDefinition + ShrinkParams inference)", 
     expectTypeOf(res).toEqualTypeOf<AgentToolResult<ShrinkDetails>>();
   });
 });
+
+// ── operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5) ─────────────────────
+// P1.M2.T1.S3: locks the S2 contract — terse result never echoes the replacement, and the
+// replacement reaches the HUMAN via ctx.ui.notify (zero-context-cost) iff ctx.hasUI, capped at
+// config.shrink.notifyMaxChars (default 2048).
+describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", () => {
+  // shared matched:yes setup — clone of the by_tool_call_id matched case (see L279-289).
+  // hasUI defaults to true (matches ctx.hasUI in TUI/RPC modes).
+  const matchedYes = ({ hasUI = true }: { hasUI?: boolean } = {}) => {
+    const { appended, pi } = makePi();
+    const { ctx, notifyCalls } = makeCtx({
+      leafId: "leaf-9",
+      hasUI,
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "big log..."))],
+    });
+    const target = { by_tool_call_id: "call-A" };
+    return { appended, pi, ctx, notifyCalls, target };
+  };
+
+  it("(a) success result text is the terse form and does NOT echo the replacement", async () => {
+    const { pi, ctx, target } = matchedYes();
+    const replacement = "COMPACT-9f2a only keep the summary"; // distinctive; must NOT appear in the result
+    const res = await run(pi, ctx, { target, replacement });
+    expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+    // echoing the replacement into the result would re-bloat context — the tool's whole purpose. Guard it:
+    expect(firstText(res)).not.toContain(replacement);
+  });
+
+  it("(b) notifies the operator with the replacement when hasUI:true; silent when hasUI:false", async () => {
+    const replacement = "the bug is on line 42";
+
+    // hasUI:true → the replacement reaches the human at zero context cost (spec/05 §2 step 5)
+    {
+      const { pi, ctx, notifyCalls } = matchedYes({ hasUI: true });
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
+      expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+      expect(notifyCalls).toHaveLength(1);
+      expect(notifyCalls[0].message).toContain(replacement); // replacement is in the toast
+      expect(notifyCalls[0].type).toBe("info");
+    }
+
+    // hasUI:false → no user to show; notify is a no-op (print/JSON mode)
+    {
+      const { pi, ctx, notifyCalls } = matchedYes({ hasUI: false });
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
+      expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+      expect(notifyCalls).toHaveLength(0);
+    }
+  });
+
+  it("(c) notify text is capped at notifyMaxChars (default 2048): replacement>2048 → '…(<N> chars total)'", async () => {
+    const replacement = "X".repeat(3000); // > default 2048 → capped in the toast
+    const { pi, ctx, notifyCalls } = matchedYes({ hasUI: true });
+    await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
+    expect(notifyCalls).toHaveLength(1);
+    // cap suffix present — U+2026 ellipsis "…", NOT three dots (see Known Gotchas)
+    expect(notifyCalls[0].message).toContain(`…(${replacement.length} chars total)`);
+    // the FULL uncapped replacement is NOT in the toast (it was actually truncated to 2048 chars):
+    expect(notifyCalls[0].message).not.toContain(replacement);
+  });
+});

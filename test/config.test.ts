@@ -527,3 +527,49 @@ describe("rewind.maxRetriesPerPrompt & rewind.abortContextFraction (P4.M1.T3.S1 
     expect(cfg.rewind.requireMutationWarning).toBe(true);
   });
 });
+
+// ── shrink.notifyMaxChars (P1.M2.T1.S3 / spec/09 §4) ─────────────────────────────────────
+// Mirrors the shrink.maxActive & shrink.staleAfterFires block. validateConfig coerces with
+// coerceNumber(field, v, default, mustBePositive:true): invalid (<=0 / non-finite / non-numeric) → 2048 + warn.
+describe("shrink.notifyMaxChars (P1.M2.T1.S3 / spec/09 §4)", () => {
+  it("(a) passes through a valid value", () => {
+    expect(validateConfig({ shrink: { notifyMaxChars: 100 } }).shrink.notifyMaxChars).toBe(100);
+  });
+
+  it("(b) defaults to 2048 with NO warn when absent", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ shrink: {} }).shrink.notifyMaxChars).toBe(2048);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) boundary 1 is valid (threshold must be >0)", () => {
+    expect(validateConfig({ shrink: { notifyMaxChars: 1 } }).shrink.notifyMaxChars).toBe(1);
+  });
+
+  it("(d) leaves the other shrink fields unchanged when only notifyMaxChars is set", () => {
+    const cfg = validateConfig({ shrink: { enabled: false, notifyMaxChars: 100 } });
+    expect(cfg.shrink).toEqual({ enabled: false, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 100 });
+  });
+
+  it("(e) invalid values fall back to 2048 with exactly one warn naming the field", () => {
+    for (const bad of [0, -1, "x", NaN, Infinity] as unknown[]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cfg = validateConfig({ shrink: { notifyMaxChars: bad } });
+        expect(cfg.shrink.notifyMaxChars).toBe(2048);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("shrink.notifyMaxChars");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(type) shrink.notifyMaxChars is a required number", () => {
+    expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("notifyMaxChars").toEqualTypeOf<number>();
+  });
+});
