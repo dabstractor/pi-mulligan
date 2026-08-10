@@ -75,11 +75,15 @@ function makeCtx(opts: {
   throwOnGetSessionId?: boolean;
   throwOnGetLeafId?: boolean;
   throwOnBuildContextEntries?: boolean;
+  /** Whether dialog-capable UI is available (ctx.hasUI). Default: true. */
+  hasUI?: boolean;
 } = {}) {
   const sessionId = opts.sessionId ?? "s1";
   // default to "leaf-1" UNLESS leafId is explicitly passed (incl. null) — lets callers test the null return.
   const scriptedLeafId: string | null = opts.leafId === undefined ? "leaf-1" : opts.leafId;
   const contextEntries = opts.contextEntries ?? [];
+  // Recorded ctx.ui.notify calls (P1.M2.T1.S2 operator echo). Existing `const { ctx } = makeCtx(...)` still works.
+  const notifyCalls: { message: string; type?: string }[] = [];
   const sessionManager = {
     getSessionId() {
       if (opts.throwOnGetSessionId) throw new Error("getSessionId boom");
@@ -94,7 +98,16 @@ function makeCtx(opts: {
       return contextEntries;
     },
   };
-  return { ctx: { sessionManager } as unknown as ExtensionContext };
+  const ctx = {
+    sessionManager,
+    hasUI: opts.hasUI ?? true,
+    ui: {
+      notify(message: string, type?: string) {
+        notifyCalls.push({ message, type });
+      },
+    },
+  } as unknown as ExtensionContext;
+  return { ctx, notifyCalls };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -252,7 +265,7 @@ describe("mulligan_shrink — structurally-impossible-target refusal (spec/05 §
     const { ctx } = makeCtx({ contextEntries: [] });
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "x" });
     expect(appended).toHaveLength(1); // persisted (no-match is NOT a refusal — E8)
-    expect(firstText(res)).toContain("(Matched now: no)");
+    expect(firstText(res)).toContain("Matched: no");
   });
 });
 
@@ -272,9 +285,7 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
     const res = await run(pi, ctx, { target, replacement });
 
     // feedback text VERBATIM (spec/05 §2) with the yes slot filled
-    expect(firstText(res)).toBe(
-      "Mulligan: shrink recorded. Matched message will show the replacement from the next turn on. (Matched now: yes)",
-    );
+    expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
     expect(res.details).toEqual({ matched: true, markerId: "leaf-9" });
 
     // persistence payload (spec/04 §4; appendShrinkMarker stamps envelope + id + seq + ts over the caller payload)
@@ -308,7 +319,7 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
         target: { by_tool_name: "read", occurrence: "last" },
         replacement: "summary",
       });
-      expect(firstText(res)).toContain("(Matched now: yes)");
+      expect(firstText(res)).toContain("Matched: yes");
       expect(res.details).toEqual({ matched: true, markerId: "leaf-1" });
       expect(appended[0].data).toMatchObject({ target: { by_tool_name: "read", occurrence: "last" } });
     }
@@ -320,7 +331,7 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
         target: { by_tool_name: "read", occurrence: "first" },
         replacement: "summary",
       });
-      expect(firstText(res)).toContain("(Matched now: yes)");
+      expect(firstText(res)).toContain("Matched: yes");
       expect(res.details).toEqual({ matched: true, markerId: "leaf-1" });
     }
   });
@@ -331,7 +342,7 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
       contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", 'df -h ... "ENOSPC at /disk"'))],
     });
     const res = await run(pi, ctx, { target: { by_content_includes: "ENOSPC" }, replacement: "(shrink) disk full" });
-    expect(firstText(res)).toContain("(Matched now: yes)");
+    expect(firstText(res)).toContain("Matched: yes");
     expect(res.details).toEqual({ matched: true, markerId: "leaf-1" });
     expect(appended[0].data).toMatchObject({
       target: { by_content_includes: "ENOSPC" },
@@ -414,7 +425,7 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
       const res = await run(pi, ctx, { target, replacement: "x" });
       expect(appended).toHaveLength(1); // the marker WAS appended; we just can't report its id
       expect(res.details).toEqual({ matched: true, markerId: null });
-      expect(firstText(res)).toContain("(Matched now: yes)");
+      expect(firstText(res)).toContain("Matched: yes");
     }
   });
 });
@@ -433,7 +444,7 @@ describe("mulligan_shrink — no-match-is-NOT-a-refusal + best-effort failure (E
       target: { by_tool_call_id: "does-not-exist" }, // non-empty → structurally valid; currently unmatched
       replacement: "summary",
     });
-    expect(firstText(res)).toContain("(Matched now: no)");
+    expect(firstText(res)).toContain("Matched: no");
     expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
     expect(appended).toHaveLength(1); // the marker STILL persists (E8 — retried next inference by the filter)
     // FINDING 3: no match at creation → NO pinnedEntryId (the filter will fall back to live resolution)
@@ -446,7 +457,7 @@ describe("mulligan_shrink — no-match-is-NOT-a-refusal + best-effort failure (E
       contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", "unrelated output"))],
     });
     const res = await run(pi, ctx, { target: { by_content_includes: "ZZZ-NOT-PRESENT" }, replacement: "summary" });
-    expect(firstText(res)).toContain("(Matched now: no)");
+    expect(firstText(res)).toContain("Matched: no");
     expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
     expect(appended).toHaveLength(1);
   });
@@ -455,7 +466,7 @@ describe("mulligan_shrink — no-match-is-NOT-a-refusal + best-effort failure (E
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ throwOnBuildContextEntries: true }); // snapshot blows up
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "summary" });
-    expect(firstText(res)).toContain("(Matched now: no)"); // match try/catch → false
+    expect(firstText(res)).toContain("Matched: no"); // match try/catch → false
     expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
     expect(appended).toHaveLength(1); // a throwing match NEVER blocks persistence (E13 — never block)
   });
@@ -476,7 +487,7 @@ describe("mulligan_shrink — never throws (spec/05 shared tool convention; GOTC
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "x" });
     expect(appended).toHaveLength(0); // appendShrinkMarker threw BEFORE appendEntry → nothing appended
     expect(res.details).toEqual({ matched: true, markerId: null }); // still success, markerId null
-    expect(firstText(res)).toContain("(Matched now: yes)");
+    expect(firstText(res)).toContain("Matched: yes");
   });
 
   it("a throwing getLeafId → appendShrinkMarker returns null → tool STILL succeeds (markerId:null)", async () => {
@@ -497,7 +508,7 @@ describe("mulligan_shrink — never throws (spec/05 shared tool convention; GOTC
     });
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "x" });
     expect(res.details).toEqual({ matched: true, markerId: null });
-    expect(firstText(res)).toContain("(Matched now: yes)");
+    expect(firstText(res)).toContain("Matched: yes");
   });
 
   it("malformed params (target undefined) → structural-validity refusal (no throw)", async () => {

@@ -92,7 +92,7 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "mulligan_shrink operator echo + terse result",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the shrink.notifyMaxChars config knob. Change the success return text to the terse form. Add ctx.ui.notify echo after persisting.",
               "subtasks": [
                 {
@@ -115,7 +115,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Terse result + ctx.ui.notify echo",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -132,7 +132,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Tests for shrink echo + config validation",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1",

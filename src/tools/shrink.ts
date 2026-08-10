@@ -137,16 +137,39 @@ function refusal(reason: string): AgentToolResult<ShrinkDetails> {
 }
 
 /**
- * feedbackText — the spec/05 §2 VERBATIM feedback text with the yes/no slot filled from the best-effort
- * match. Copy verbatim incl. the "from the next turn on" clause and the `(Matched now: yes|no)` slot.
+ * feedbackText — the TERSE success text (P1.M2.T1.S2): just the yes/no outcome, no prose. The full
+ * replacement is NOT echoed here (it would bloat the tool result / context); instead the operator gets
+ * a capped echo via `ctx.ui.notify` in step (5b) at zero context cost (the model never sees it). The
+ * `(Matched: yes|no)` slot reflects the best-effort match from resolveTargetEntryId (advisory; never blocks).
  */
 function feedbackText(matched: boolean): string {
-  return `Mulligan: shrink recorded. Matched message will show the replacement from the next turn on. (Matched now: ${
-    matched ? "yes" : "no"
-  })`;
+  return `Mulligan: shrink recorded. Matched: ${matched ? "yes" : "no"}.`;
 }
 
 // ── pure validation + match helpers (module-private; never throw) ────────────
+
+/**
+ * cap — clamp a string to `max` chars for operator display, appending an ellipsis + total-length note
+ * when truncated (P1.M2.T1.S2 operator echo). Defensive: returns `s` unchanged if it is not a string or is
+ * already within the cap. Uses the U+2026 ellipsis (`…`) per spec/05 §2 step 5b formatting.
+ */
+function cap(s: string, max: number): string {
+  if (typeof s !== "string" || s.length <= max) return s;
+  return s.slice(0, max) + `…(${s.length} chars total)`;
+}
+
+/**
+ * describeTarget — a short human-readable label for the shrink target (P1.M2.T1.S2 operator echo).
+ * Defensive: returns "message" for a non-record target. Mirrors the three matcher arms from ShrinkParams.
+ */
+function describeTarget(target: ShrinkArgs["target"]): string {
+  if (!target || typeof target !== "object") return "message";
+  if ("by_tool_call_id" in target) return `tool call ${target.by_tool_call_id}`;
+  if ("by_tool_name" in target) return `${target.by_tool_name} result`;
+  if ("by_content_includes" in target)
+    return `message containing "${target.by_content_includes.slice(0, 40)}"`;
+  return "message";
+}
 
 /**
  * isNonEmpty — true for a non-blank string; false for a blank string or a non-string (defensive — never
@@ -292,6 +315,19 @@ async function shrinkExecute(
       reason: params.reason,
       ...(entryId ? { pinnedEntryId: entryId } : {}),
     } satisfies ShrinkMarkerInput);
+
+    // (5b) operator echo (spec/05 §2 step 5 — zero context cost; the replacement is NOT in the tool result).
+    //      P1.M2.T1.S2: surface a capped copy of the replacement to the operator via ctx.ui.notify so the
+    //      human can audit what the model recorded, without the model itself paying context for the echo.
+    //      E13: a UI failure must NEVER break the tool — the marker is already persisted (own try/catch).
+    try {
+      if (ctx.hasUI) {
+        const capped = cap(params.replacement, config.shrink.notifyMaxChars);
+        ctx.ui.notify(`Shrunk ${describeTarget(params.target)} — replacement:\n<<<\n${capped}\n>>>`, "info");
+      }
+    } catch {
+      // E13: a UI failure must never break the tool — the marker is already persisted.
+    }
 
     // (6) return (spec/05 §2 step 5) — feedback text (yes/no from the best-effort match) + details.
     return {
