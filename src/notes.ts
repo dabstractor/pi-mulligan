@@ -3,7 +3,7 @@ import type { Granularity } from "./config.js";
 
 /**
  * notes.ts — Mulligan's note validation + rendering (pure helpers).
- * spec/04-data-model.md §2.1 (NoteInput), spec/05-tools.md §1 step 2 (validate note: all four non-empty),
+ * spec/04-data-model.md §2.1 (NoteInput), spec/05-tools.md §1 step 2 (validate note: all three non-empty),
  *   spec/08-edge-cases.md E9 (note field validation failure → refuse), spec/10-testing.md §1.8 (field validation),
  *   spec/03-architecture.md §2.3/§7 + spec/11 §1 (notes.ts = pure helper: validateNote/renderNote/...).
  *
@@ -19,7 +19,7 @@ import type { Granularity } from "./config.js";
  *   step 2, E9); the rewind tool prefixes it as "Mulligan: refused — <reason>.".
  * - NEVER throws (rewind-tool hot path; E9/E13 discipline). isRecord guards a null/array/primitive note; readOwn
  *   reads each field WITHOUT triggering a throwing Proxy get-trap. A malformed note or a field that is
- *   missing/non-string/whitespace-only → { valid:false, reason }. `note` is typed NoteInput (all four required
+ *   missing/non-string/whitespace-only → { valid:false, reason }. `note` is typed NoteInput (all three required
  *   strings) but fields are read as `unknown` via readOwn so the `typeof === 'string'` check is REAL, not dead code.
  *
  * NOTE: P1.M2.T3.S2 (renderNote) + P1.M2.T3.S3 (renderBloatReminder/renderDriftNudge) APPEND to this file next
@@ -30,18 +30,16 @@ import type { Granularity } from "./config.js";
 // ── NoteInput (spec/04-data-model.md §2.1 — field names + optionality are load-bearing) ──────────
 
 /**
- * NoteInput — what the agent passes to mulligan_rewind as the `note` (spec/04 §2.1). All four fields are
+ * NoteInput — what the agent passes to mulligan_rewind as the `note` (spec/04 §2.1). All three fields are
  * REQUIRED non-empty strings (enforced by validateNote; see spec/05 §1 step 2 + spec/08 E9). The structure is
- * the primary defense against confabulation (D2): the resumed model is told explicitly what happened, what to
- * avoid, the true current state, and what to do next. EXPORTED so the rewind tool, renderNote (S2), and tests
- * share one canonical type. ALSO persisted verbatim in RewindMarker.note (spec/04 §3).
+ * the primary defense against confabulation (D2): the resumed model is told explicitly what happened (and the
+ * lesson — what to avoid doing again), the true current state, and what to do next. EXPORTED so the rewind tool,
+ * renderNote (S2), and tests share one canonical type. ALSO persisted verbatim in RewindMarker.note (spec/04 §3).
  */
 export interface NoteInput {
-  /** What went wrong, concretely. Past tense. e.g. "Ran `grep -r auth .` and dumped ~40k tokens I didn't need." */
+  /** Past tense: what went wrong and wasted context — and what to avoid doing again. Be concrete; generalize the lesson. */
   what_happened: string;
-  /** What NOT to do again. Imperative. e.g. "Do not run grep without --quiet, -c, or piping to head." */
-  avoid: string;
-  /** The current TRUE world state as of the rewind — files changed, commands run, decisions made on the span. */
+  /** The TRUE current state as of this rewind — task progress, decisions, and conclusions (files/commands are auto-captured in the ledger below). This prevents redoing work. */
   true_current_state: string;
   /** The immediate next action to take on resume. Imperative. e.g. "Re-run the search as `grep -rl auth src/`." */
   next: string;
@@ -62,21 +60,20 @@ export interface NoteValidation {
  */
 export const NOTE_INVALID_REASON = "note fields must all be non-empty";
 
-/** The four required, non-empty note fields, in spec/04 §2.1 order. Drives validateNote's loop (module-local). */
+/** The three required, non-empty note fields, in spec/04 §2.1 order. Drives validateNote's loop (module-local). */
 const NOTE_FIELDS: readonly (keyof NoteInput)[] = [
   "what_happened",
-  "avoid",
   "true_current_state",
   "next",
 ];
 
 /**
- * validateNote — assert all four NoteInput fields are non-empty strings AFTER TRIM (spec/05 §1 step 2, spec/08 E9,
+ * validateNote — assert all three NoteInput fields are non-empty strings AFTER TRIM (spec/05 §1 step 2, spec/08 E9,
  * spec/10 §1.8). The rewind tool calls this as step 2 of its behavior, BEFORE persisting the marker + note; a
  * vacuous note is refused so it cannot defeat the confabulation defense (D2).
  *
  * Each field must satisfy `typeof === 'string' && field.trim().length > 0`. Any failure (missing, non-string,
- * empty, or whitespace-only) → { valid:false, reason: NOTE_INVALID_REASON }. All four present + non-empty →
+ * empty, or whitespace-only) → { valid:false, reason: NOTE_INVALID_REASON }. All three present + non-empty →
  * { valid:true }. The reason is the SAME single string for every failure (spec-pinned) — we do NOT vary it per
  * field, because the rewind tool shows one refusal text either way.
  *
@@ -153,7 +150,6 @@ const LEDGER_BLOCKS: ReadonlyArray<readonly [tag: string, field: keyof FileLedge
  * FORMAT (spec/04 §2.3 — built by joining these sections with a blank line, i.e. "\n\n"):
  *     ## 🔄 Mulligan rewind (<granularity>)
  *     **What happened:** <what_happened>
- *     **Avoid:** <avoid>
  *     **Current true state:** <true_current_state>
  *     <files-read>…</files-read>                ← omitted iff ledger.readFiles is empty
  *     <files-modified>…</files-modified>        ← omitted iff ledger.modifiedFiles is empty
@@ -182,7 +178,6 @@ export function renderNote(
   const sections: string[] = [
     `## 🔄 Mulligan rewind (${granularity})`,
     `**What happened:** ${readNoteField(note, "what_happened")}`,
-    `**Avoid:** ${readNoteField(note, "avoid")}`,
     `**Current true state:** ${readNoteField(note, "true_current_state")}`,
   ];
   for (const [tag, field] of LEDGER_BLOCKS) {
@@ -202,7 +197,7 @@ export function renderNote(
  */
 function readNoteField(
   note: unknown,
-  key: "what_happened" | "avoid" | "true_current_state" | "next",
+  key: "what_happened" | "true_current_state" | "next",
 ): string {
   const v = readOwn(note, key);
   return typeof v === "string" ? v : "";
