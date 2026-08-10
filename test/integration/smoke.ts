@@ -230,10 +230,11 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         break;
       }
       case "F-protected": {
-        // Rewind last_turn + to_previous_prompt when only the /mulligan_smoke prompt exists → the protected
-        // first:user selector refuses. The tool's refusal TEXT is the assertion (GOTCHA #4).
+        // Rewind last_turn + to_previous_prompt when only the /mulligan_smoke prompt exists → the BUG-006
+        // protected-refusal check (rewind.ts:step-5b) refuses BEFORE persisting (crossing the first:user
+        // boundary). The tool's refusal TEXT + ZERO persisted mulligan:rewind markers are the assertions.
         await rewindNow(pi, ctx, "smoke-prot-1", "last_turn", { to_previous_prompt: true });
-        // No followUp: pure refusal; the assertion is the refusal text in the tool.rewind smoke log line.
+        // No followUp: pure pre-persist refusal; the assertions are the refusal text + zero markers in assertProtected.
         break;
       }
       case "F-maxdepth": {

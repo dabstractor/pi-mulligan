@@ -15,7 +15,7 @@
 | # | Criterion (`spec/11` §3) | Gate command | Observed result | Status |
 |---|---|---|---|---|
 | 1 | All Tier-1 unit tests green (incl. pairing-invariant property test) | `npm test` | **671 passed, 0 failed** (18 files) | ✅ |
-| 2 | All F-* integration scenarios green | `npm run smoke` | **14/14 scenarios passed** (9 F-* + 5 E-*) | ✅ |
+| 2 | All F-* integration scenarios green | `npm run smoke` | **14/14 scenarios passed** (9 F-* + 5 E-*); F-protected now asserts the BUG-006 pre-persist refusal (see remediation table) | ✅ |
 | 3 | `mulligan:nudge` provably never persisted | grep smoke session JSONL for persisted `customType:"mulligan:nudge"` | **0** persisted nudge messages in any smoke session | ✅ |
 | 4 | `config.enabled=false` → pure no-op | grep the 5 master-switch gates + disabled unit tests | **5 gates present** (filter/rewind/shrink/nudges×2) + **115 disabled-path tests green** | ✅ |
 | 5 | Intentional filter exception doesn't break a turn | `filter.test.ts -t fail-open` + smoke `F-failopen` | **10 fail-open tests green** + F-failopen PASS | ✅ |
@@ -38,7 +38,7 @@ npx tsc --noEmit                                # → exit 0
 pi -e ./src/index.ts -p "Reply with the single word: ok"   # → no load error
 
 # DoD #2/#3/#5 — integration smoke (9 F-* + 5 E-* scenarios)
-npm run smoke                                   # → 14/14 scenarios passed
+npm run smoke                                   # → 14/14 scenarios passed (F-protected asserts the BUG-006 refusal)
 
 # DoD #3 — nudge-leak (authoritative: persisted customType in smoke session JSONL)
 grep -h '"customType":"mulligan:nudge"' \

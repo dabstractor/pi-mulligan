@@ -315,23 +315,24 @@ function assertProtected({ smoke, piRes }) {
   const results = [];
   const sessionFile = smoke.sessionFile;
   const entries = readSessionEntries(sessionFile);
-  // ACTUAL behavior (verified): the rewind tool SUCCEEDS (creates a marker) but the filter resolves to an
-  // empty removal set (nothing to hide) because iFirstUser === iLastUser (the /mulligan_smoke prompt is the
-  // only user message). The spec's "tool refuses; no marker" describes the model-driven first-user case; the
-  // deterministic harness observes the filter's defense-in-depth no-op. Assert: the turn survives (pi exit 0)
-  // AND the filter hid nothing (count unchanged / "0 messages hidden" in the tool text).
+  // BUG-006 fix (verified): the rewind tool REFUSES before persisting when a nuclear last_turn rewind would
+  // cross the first/only user message (the /mulligan_smoke prompt is the only user message, so iFirstUser ===
+  // iLastUser and the protected-refusal check in rewind.ts:step-5b trips). Assert: the turn survives (pi exit 0)
+  // AND the tool text is a refusal AND ZERO mulligan:rewind markers were persisted (the refusal is pre-persist).
   const rewindLines = smoke.lines.filter((l) => l.test === "tool.rewind");
   const lastRewind = rewindLines[rewindLines.length - 1];
   assert(results, "tool.rewind ran", !!lastRewind, "");
   const text = lastRewind?.detail?.text ?? "";
-  // The protected check manifests as "0 messages will be hidden" (the filter's resolveLastTurn nuclear refusal).
-  const zeroHidden = /0 messages will be hidden/i.test(text);
-  assert(results, "protected rewind hid 0 messages (filter no-op)", zeroHidden, text.slice(0, 80));
+  // The protected check now manifests as a tool-level refusal ("would cross a protected message").
+  const refused = /refused/i.test(text);
+  assert(results, "protected rewind refused (crosses first user message)", refused, text.slice(0, 80));
   assert(results, "pi exited 0 (turn survived)", piRes.status === 0, `exit=${piRes.status}`);
   if (entries.length > 0) {
+    const rewindCount = countCustom(entries, "mulligan:rewind", "rewind");
+    assert(results, "JSONL has 0 mulligan:rewind (refusal pre-persist)", rewindCount === 0, `${rewindCount} found`);
     assertGlobalInvariants(results, entries);
   }
-  return { results, entries, note: "F-protected deterministic path asserts the filter no-ops (0 hidden); the tool-refusal case is model-driven (first user msg)" };
+  return { results, entries, note: "F-protected deterministic path asserts the tool refuses pre-persist (BUG-006); no marker is created" };
 }
 
 function assertMaxdepth({ smoke, piRes }) {

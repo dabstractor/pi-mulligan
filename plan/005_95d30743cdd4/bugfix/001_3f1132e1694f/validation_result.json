@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 1,
+  "summary": "All 6 PRD bugs are already fixed (verified by probes); typecheck + 956 unit tests pass; but the integration smoke suite is RED (npm run smoke exits 1, 13/14) because the F-protected assertion was not updated for the BUG-006 refusal fix."
+}

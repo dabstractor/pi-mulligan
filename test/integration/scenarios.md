@@ -207,7 +207,7 @@ model-driven — SOFT.)*
 
 ### F-protected
 
-**Tests:** a rewind that would cross the first-user boundary is a no-op (the filter's defense-in-depth check).
+**Tests:** a rewind that would cross the first-user boundary is refused before persisting (the BUG-006 protected-refusal check in `rewind.ts:step-5b`).
 
 **Run (deterministic):**
 ```bash
@@ -215,14 +215,11 @@ pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-protect
   -p "/mulligan_smoke F-protected" -p "Reply with exactly: OK"
 ```
 
-**Expect in log:** `tool.rewind` with text containing "0 messages will be hidden" (the filter's
-`resolveLastTurn` nuclear refusal: when `iFirstUser === iLastUser`, the removal set is empty).
+**Expect in log:** `tool.rewind` with text containing "refused" (the tool-level refusal: when the rewind would cross the first/only user message, `rewind.ts:step-5b` refuses before persisting).
 
-**Expect in JSONL:** the rewind marker is created (the tool itself does not refuse — the protection lives in
-the filter, which resolves to an empty removal set). §2.3 invariants hold.
+**Expect in JSONL:** ZERO `mulligan:rewind` markers (the refusal is pre-persist — no marker is created). §2.3 invariants hold.
 
-**Pass:** the protected rewind hid 0 messages (filter no-op); the turn survived (pi exit 0). *(The literal
-"tool refuses; no marker" case is the model-driven first-user scenario.)*
+**Pass:** the protected rewind refused (tool text contains "refused"); ZERO rewind markers persisted; the turn survived (pi exit 0).
 
 ---
 
