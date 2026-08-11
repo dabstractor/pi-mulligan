@@ -1,0 +1,222 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "PRD Compliance Bug Fixes",
+      "status": "Planned",
+      "description": "Fix all 7 validated behavioral/PRD-compliance deviations (3 Major, 4 Minor) in the pi-mulligan extension. None are crashes or data-loss bugs — hidden content always remains on disk (soft-delete guarantee holds). The fixes restore spec compliance for the drift-nudge suppression mechanism (BUG-001), the pinned-hide permanence guarantee post-compaction (BUG-002), the drift-nudge acceptance criteria (BUG-003), and four minor polish items (BUG-004 through BUG-007).",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Major Bug Fixes (BUG-001, BUG-002, BUG-003)",
+          "status": "Planned",
+          "description": "The three Major-severity bugs that significantly impact core functionality: (1) the drift nudge is wrongly suppressed for ~10 minutes after any rewind/shrink via a wall-clock window instead of the spec's turn-based check; (2) pinned rewinds stop working entirely after the first compaction, leaking hidden content back into the model's view; (3) the drift nudge does not fire for 'three ~4k turns in a row', violating spec §5.1 acceptance criterion (b).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "BUG-001: Replace wall-clock suppressCheck with turn-based lower bound",
+              "status": "Planned",
+              "description": "spec/07 §5.3 (REQUIRED hard rule) says the per-turn drift nudge MUST NOT fire only 'for a turn in which the agent already issued a mulligan:rewind or mulligan:shrink'. The mechanism must be turn-based: a marker is 'during the metric's turn' iff it was created between the previous turn_end (previous metric's ts) and the current metric's ts. The implementation uses a fixed 10-minute wall-clock window (NUDGE_TURN_WINDOW_MS = 10*60*1000) which over-suppresses for ~10 minutes after ANY rewind/shrink. The data needed for the correct turn-based lower bound (recentMetrics) is now available via readMarkers but unused by suppressCheck.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Refactor suppressCheck to use recentMetrics turn-boundary as lower bound",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h2.2/h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-001. suppressCheck (src/nudges.ts:397-411) currently takes (metric: TurnMetric, markers: {rewinds, shrinks}) and suppresses iff some marker.ts falls in (metric.ts − 10min, metric.ts]. The correct behavior per spec/07 §5.3: suppress iff some marker.ts falls in (prevMetric.ts, metric.ts] where prevMetric is the SECOND-newest metric. readMarkers (src/markers.ts) returns recentMetrics: TurnMetric[] sorted NEWEST-FIRST (recentMetrics[0] = latest, recentMetrics[1] = previous). The markers param's ts is Date.now() stamped by appendRewindMarker/appendShrinkMarker. The metric's ts is stamped by appendTurnMetric.\n2. INPUT: metric (TurnMetric — the latest, recentMetrics[0]), recentMetrics (TurnMetric[] — full array newest-first), markers ({rewinds: ReadonlyArray<RewindMarker>, shrinks: ReadonlyArray<ShrinkMarker>} — same as current).\n3. LOGIC: Change suppressCheck signature to suppressCheck(metric: TurnMetric, recentMetrics: TurnMetric[], markers: {rewinds, shrinks}). Compute the turn-boundary lower bound: if recentMetrics.length >= 2, lo = recentMetrics[1].ts (the previous metric's ts); else (first turn / only one metric), lo = 0 (or suppress based on marker.ts <= metric.ts — on the first turn, any marker with ts <= metric.ts WAS created during this turn, so suppress). For each marker in rewinds + shrinks: suppress (return true) iff marker.ts > lo AND marker.ts <= metric.ts (both ts read defensively: non-finite → NaN → not in window → no suppress). Remove or deprecate the NUDGE_TURN_WINDOW_MS constant (line 270) and its export — it is no longer used. The existing defensive ts handling (typeof === number && Number.isFinite) stays.\n4. OUTPUT: boolean — true iff some marker was created during the metric's turn (turn-boundary to turn_end). The filter.ts call site composes this as: fire = shouldNudge(...) && !suppressCheck(metric, recentMetrics, markers).\n5. DOCS: [Mode A] Update the JSDoc on suppressCheck to document the turn-based lower bound mechanism, the recentMetrics parameter, and why the previous wall-clock window was replaced. Remove the stale 'no per-turn lower bound' justification from the WHY-a-window comment."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Update filter.ts suppressCheck call site to pass recentMetrics",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.2", "h2.2/h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-001. The call site is src/filter.ts:319: `!suppressCheck(markers.metric, markers)`. markers is a MarkersBundle (src/filter.ts:88-114) with fields {rewinds, shrinks, metric, cancelledIds, recentMetrics}. markers.recentMetrics is TurnMetric[] sorted newest-first, always present (empty array on fail-open). The guard already checks markers.metric is truthy (line 318: `markers.metric &&`) before suppressCheck, and recentMetrics.length > 0 (line 316), so markers.recentMetrics is guaranteed non-empty at this call site.\n2. INPUT: The new suppressCheck signature from P1.M1.T1.S1: suppressCheck(metric, recentMetrics, markers).\n3. LOGIC: Change line 319 from `!suppressCheck(markers.metric, markers)` to `!suppressCheck(markers.metric, markers.recentMetrics, markers)`. The MarkersBundle is structurally assignable to the {rewinds, shrinks} param (extra fields ignored). No other changes to the if-condition are needed — shouldNudge, markers.metric, and rewindRefusedTurnIndex checks remain unchanged.\n4. OUTPUT: The drift-nudge injection block now uses turn-based suppression. Verify via existing drift_nudge.test.ts suppressCheck acceptance tests (h3.0 acceptance a/b/c) — update them to use the new 3-arg signature with a recentMetrics array that includes a previous metric.\n5. DOCS: none — this is an internal call-site change with no user-facing/config/API surface change."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "BUG-002: Make resolvePinnedHide/resolvePinnedShrink compaction-aware",
+              "status": "Planned",
+              "description": "After the first compaction in a session, resolvePinnedHide bails entirely (returns []) because entryMessageYield returns -1 for compaction entries. This makes EVERY pinned rewind a permanent no-op, leaking previously-hidden content back into the model's view — violating PRD success criterion #1. The same bug affects resolvePinnedShrink. The fix uses a retained-tail-only walk: find the LAST compaction entry on the branch, walk only entries AFTER it (which map 1:1 to the tail of event.messages), and match pinned entry IDs there.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Rewrite resolvePinnedHide to use retained-tail walk (compaction-aware)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h2.2/h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-002 and external_deps.md (getBranch vs event.messages distinction). resolvePinnedHide (src/transforms.ts:625-660) currently filters branchEntries to isContextProducingType (which INCLUDES compaction), walks forward via entryMessageYield, and returns [] the instant it hits a compaction entry (yield -1). isContextProducingType (transforms.ts:555) returns true for {message, custom_message, branch_summary, compaction}. entryMessageYield (transforms.ts:549) returns 1 for {message, custom_message, branch_summary} and -1 for everything else. The key insight: entries AFTER the last compaction on the branch are the 'retained tail' and each (type message/custom_message/branch_summary) maps to exactly 1 message in event.messages. The retained tail maps to the LAST tailEntries.length messages.\n2. INPUT: messages (MessageLike[] — compaction-aware, what the model sees), branchEntries (BranchEntry[] — root→leaf raw path from getBranch()), hideEntryIds (string[] — stable entry IDs pinned at marker creation). All unchanged from the current signature.\n3. LOGIC: Replace the forward-walk algorithm with a retained-tail walk:\n  (a) Defensive checks stay the same (non-array → [], empty hideEntryIds → [], build hideSet).\n  (b) Find lastCompactionIdx = index of the LAST entry on branchEntries with type === 'compaction' (scan from end; -1 if none).\n  (c) tailEntries = branchEntries.slice(lastCompactionIdx + 1).filter(e => type is 'message' | 'custom_message' | 'branch_summary'). Do NOT include 'compaction' (we are past it). Do NOT include 'label'/'custom' (not context-producing).\n  (d) tailStartIdx = messages.length - tailEntries.length. If tailStartIdx < 0 → return [] (alignment lost — defensive).\n  (e) Walk tailEntries forward: for entry at position k, msgIdx = tailStartIdx + k. If entry.id (string, via readOwn) ∈ hideSet → push msgIdx to remove.\n  (f) Return remove (ascending by construction). When lastCompactionIdx === -1 (no compaction), this degenerates to walking ALL context-producing entries (excluding compaction), tailStartIdx = messages.length - allEntries.length = 0 — identical to the current no-compaction behavior.\n  DO NOT change entryMessageYield or isContextProducingType (resolveCheckpoint still needs the bail-on-compaction behavior for its contiguous-sweep semantics). DO NOT change the function signature or return type (still number[], never null). The filterPipeline call site (transforms.ts:1065) passes resolvePinnedHide(messages, branch, hideEntryIds) — unchanged.\n4. OUTPUT: number[] — ascending message indices to hide. Non-empty when pinned entries are in the retained tail (the production case post-compaction). Empty when pinned entries are in the compacted-away head (correct — they're gone from messages) or on defensive failures.\n5. DOCS: [Mode A] Rewrite the JSDoc on resolvePinnedHide to document the retained-tail walk algorithm, explaining why compaction no longer causes a total bail, and that entries in the compacted head are correctly unmatched (they're absent from messages). Reference spec/08 E24."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Apply compaction-aware retained-tail walk to resolvePinnedShrink",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.2", "h2.2/h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-002. resolvePinnedShrink (src/transforms.ts:813-842) has the IDENTICAL compaction-bail bug as resolvePinnedHide: it filters to isContextProducingType (includes compaction), walks forward via entryMessageYield, and returns null when it hits a compaction entry (yield -1). This makes pinned shrinks no-op post-compaction too — the PRD focuses on pinned rewinds (BUG-002) but the shrink resolver has the same root cause and must be fixed for consistency.\n2. INPUT: messages (MessageLike[]), branchEntries (BranchEntry[]), pinnedEntryId (string). Unchanged signature.\n3. LOGIC: Apply the SAME retained-tail walk algorithm from P1.M1.T2.S1, adapted for a single-ID lookup instead of a set:\n  (a) Defensive checks stay the same.\n  (b) Find lastCompactionIdx (same as S1).\n  (c) tailEntries = slice after last compaction, filter to message/custom_message/branch_summary.\n  (d) tailStartIdx = messages.length - tailEntries.length. If < 0 → return null.\n  (e) Walk tailEntries: for entry at position k, if entry.id === pinnedEntryId → return tailStartIdx + k (the FIRST match — there is at most one since entry IDs are unique).\n  (f) Return null if not found in the retained tail (correct — the pinned entry was compacted away; identity-or-nothing, matching the rewind precedent).\n  The filterPipeline pinned-shrink path (transforms.ts:1135: resolvePinnedShrink(messages, branch, pinnedId)) and applyShrink's internal call (transforms.ts:855) are unchanged — they already handle null correctly (no-op).\n4. OUTPUT: number | null — the message index of the pinned entry in the retained tail, or null when absent/compacted-away/alignment-lost.\n5. DOCS: [Mode A] Update the JSDoc on resolvePinnedShrink to document the retained-tail walk and why compaction no longer causes a no-op for retained-tail targets."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "BUG-003: Make shouldNudge satisfy §5.1 acceptance criterion (b)",
+              "status": "Planned",
+              "description": "shouldNudge uses a moving-average compared strictly > to driftThresholdTokens (6000). avg([4000,4000,4000]) = 4000 < 6000 → does not fire, violating spec §5.1 acceptance criterion (b) 'three ~4k turns in a row DO fire'. The fix lowers the default threshold to 4000 and changes the comparison from > to >= so that three ~4k turns (avg 4000 >= 4000) fire while a single 8k turn amid small turns (avg 3000 < 4000) does not.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Lower driftThresholdTokens default to 4000 and change shouldNudge comparison to >=",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h2.2/h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-003. shouldNudge (src/nudges.ts:326-334) computes avg(window deltas) and compares strictly > driftThresholdTokens. DEFAULT_CONFIG.nudges.driftThresholdTokens = 6000 (src/config.ts). Verification of the fix: (a) avg([8000,500,500])=3000 >= 4000? No ✓; (b) avg([4000,4000,4000])=4000 >= 4000? Yes ✓; (c) avg(~0) >= 4000? No ✓. The drift_nudge.test.ts test helper cfg(windowTurns=3, threshold=6000) passes an EXPLICIT threshold, so lowering the DEFAULT_CONFIG value will NOT break existing tests that use cfg(). Audit test files for any test that reads DEFAULT_CONFIG.nudges.driftThresholdTokens directly instead of passing an explicit value.\n2. INPUT: recentMetrics (TurnMetric[]), config (MulliganConfig). Unchanged signature.\n3. LOGIC: (a) In src/config.ts DEFAULT_CONFIG, change nudges.driftThresholdTokens from 6000 to 4000. Update the JSDoc comment on driftThresholdTokens to explain: 'Default 4000. The moving-average over driftWindowTurns (default 3) compared with >= satisfies all three §5.1 acceptance criteria: (a) a single 8k turn amid small turns averages <4000 → no fire; (b) three ~4k turns average ~4000 >= 4000 → fire; (c) a single large result with ~0 net growth averages ~0 → no fire.' (b) In src/nudges.ts shouldNudge, change the return from `avg > config.nudges.driftThresholdTokens` to `avg >= config.nudges.driftThresholdTokens`. (c) Update the SPEC-AMBIGUITY RESOLUTION comment in shouldNudge to note that criterion (b) is now satisfied with the lowered threshold and >= comparison, removing the 'ILLUSTRATIVE' recharacterization.\n4. OUTPUT: boolean — true iff avg(window deltas) >= driftThresholdTokens (delta-only when delta data exists); bloatHit fallback unchanged.\n5. DOCS: [Mode A] Update the JSDoc on driftThresholdTokens in config.ts (new default + rationale) and the shouldNudge SPEC-AMBIGUITY RESOLUTION comment in nudges.ts. These ride WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Minor Bug Fixes (BUG-004 through BUG-007)",
+          "status": "Planned",
+          "description": "Four minor-severity polish items: (1) pendingBloatHits memory leak when perTurnDrift=false; (2) retry budget counting cancelled rewinds; (3) cancel no-op text mismatch on the target path; (4) checkpoint tool not gated by config.enabled. Each is a small, self-contained fix.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "BUG-004: Fix pendingBloatHits unbounded accumulation when perTurnDrift=false",
+              "status": "Planned",
+              "description": "turnEndMetricHandler clears rt.pendingBloatHits at line 218, AFTER the perTurnDrift early-return at line 200. When bloatReminder=true but perTurnDrift=false, the clear never runs and pendingBloatHits grows by one entry per bloated result for the entire session.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Move pendingBloatHits clear before the perTurnDrift early-return",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h2.3/h3.3", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-004. turnEndMetricHandler (src/nudges.ts:188-220) has the structure: read sessionId → getConfig() → early-return if !enabled || !perTurnDrift (line 200) → ... → rt.pendingBloatHits = [] (line 218). bloatReminderHandler (src/nudges.ts:130-145) pushes to rt.pendingBloatHits unconditionally (its own gate is bloatReminder, not perTurnDrift). The clear at line 218 snapshots pendingBloatHits into the metric's bloatHits field AND resets it — both must happen only when perTurnDrift is on (the metric is only persisted when perTurnDrift is on). The FIX: move ONLY the reset (rt.pendingBloatHits = []) to before the early-return, while keeping the snapshot+bloat metric logic where it is. Specifically: after `const rt = getRuntime(sessionId)` and before the `if (!config.enabled || !config.nudges.perTurnDrift) return;` gate, add `rt.pendingBloatHits = [];` so the accumulator is always cleared every turn_end regardless of the perTurnDrift flag. When perTurnDrift IS on, the existing line 218 still snapshots the (now-already-cleared, but re-populated if a bloat result arrived between the clear and line 218 — impossible since tool_result fires before turn_end) array. Actually, since tool_result fires BEFORE turn_end within the same turn, and the clear runs at the TOP of turn_end, the snapshot at line 218 would see an empty array. FIX: move the snapshot+clear as a block to BEFORE the gate — `const bloat = rt.pendingBloatHits; rt.pendingBloatHits = [];` — and pass `bloat` into the metric. Then the gate runs after. This way bloat is always cleared (BUG-004 fix) AND the snapshot is correct when perTurnDrift is on.\n2. INPUT: rt (SessionRuntime — from getRuntime(sessionId)), config (MulliganConfig).\n3. LOGIC: Move lines 215-218 (the `const bloat = rt.pendingBloatHits; rt.pendingBloatHits = [];` block) from AFTER the perTurnDrift gate to BEFORE it (right after `const rt = getRuntime(sessionId)` on the line after line 196). The `bloat` const is then referenced later when building the metric (only reached when perTurnDrift is on). The metric's bloatHit/bloatHits fields use the captured `bloat` variable.\n4. OUTPUT: rt.pendingBloatHits is always cleared at every turn_end, preventing unbounded growth. The metric snapshot is unchanged when perTurnDrift is on.\n5. DOCS: [Mode A] Update the JSDoc on turnEndMetricHandler to note that pendingBloatHits is cleared before the perTurnDrift gate (always cleared, not just when perTurnDrift is on)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "BUG-005: Exclude cancelled rewinds from the per-prompt retry budget",
+              "status": "Planned",
+              "description": "countRetriesAtLatestPrompt counts every mulligan:rewind entry after the latest user prompt, with no exclusion for rewinds retired by a later mulligan:cancel. A cancelled rewind never took effect but still consumes budget.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Make countRetriesAtLatestPrompt cancel-aware (subtract cancelled rewinds)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h2.3/h3.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-005. countRetriesAtLatestPrompt (src/tools/rewind.ts:247-281) finds the last user-prompt entry, then counts entries after it where type === 'custom' && customType === 'mulligan:rewind'. A mulligan:cancel entry has type === 'custom', customType === 'mulligan:cancel', and data.targetId === the cancelled marker's uuid (data.id). readMarkers (src/markers.ts / src/filter.ts:120-204) builds cancelledIds the same way: scans for mulligan:cancel entries, reads data.targetId, drops markers whose data.id ∈ that set. The rewind marker's uuid is in entry.data.id.\n2. INPUT: ctx (ExtensionContext — sessionManager.getEntries() FRESH).\n3. LOGIC: In countRetriesAtLatestPrompt, after the existing rewind-count loop, ALSO scan the same entries (after latestPromptIndex) for mulligan:cancel entries. For each cancel entry, read data.targetId. Then re-scan the counted rewind entries: for each counted rewind, read its data.id; if that id matches any cancel's targetId, subtract it from the count. Implementation approach: (a) Build a Set<string> cancelledRewindIds from all mulligan:cancel entries after latestPromptIndex (read data.targetId via defensive access). (b) In the rewind-counting loop, for each mulligan:rewind entry, read its data.id; if data.id ∈ cancelledRewindIds, do NOT increment count (skip it). This is cleaner than subtract-after-counting. Read data.id and data.targetId defensively (try/catch per entry, mirroring the existing Proxy-safe pattern). The OVER-APPROXIMATION comment should be updated to note that cancelled rewinds are now excluded.\n4. OUTPUT: number — count of ACTIVE (non-cancelled) mulligan:rewind entries after the latest user prompt. Never throws (E13).\n5. DOCS: [Mode A] Update the JSDoc on countRetriesAtLatestPrompt to document the cancel-exclusion logic."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "BUG-006: Split cancel no-op text by resolution path (target vs markerId)",
+              "status": "Planned",
+              "description": "cancel.ts:393 returns a single hardcoded string 'Mulligan: no active marker found with that id — nothing to cancel.' for BOTH the target-not-found and markerId-not-found cases. spec/05 §5 specifies two distinct texts.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Emit spec-correct no-op text for target vs markerId resolution paths",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h2.3/h3.5", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-006. cancelExecute (src/tools/cancel.ts) resolves the marker via two paths: (3a) MARKERID PATH — when params.markerId is a non-empty string (scans entries for matching customType mulligan:rewind/shrink with id === markerId); (3b) TARGET PATH — when params.target is set (resolveTargetUuid resolves the target to a covering marker). If neither path yields a targetUuid, step 4 (cancel.ts:393) returns the not-found no-op. The current code returns ONE hardcoded string regardless of which path was attempted. The existing test at test/tools/cancel.test.ts:560 pins this unified string and must be updated.\n2. INPUT: params (the cancel tool params — has optional markerId?: string and optional target?: ShrinkTarget-like). The resolution already happened in steps 3a/3b.\n3. LOGIC: Before the `if (targetUuid === null)` check at cancel.ts:392, determine which path was attempted: `const usedMarkerId = typeof params.markerId === 'string' && params.markerId.length > 0;`. In the not-found block, emit: if usedMarkerId → 'Mulligan: no active marker found with that id — nothing to cancel.' (unchanged); else (target path or neither) → 'Mulligan: no active marker found for that target — nothing to cancel.' (the spec/05 §5 verbatim target-path text). The details stay { cancelled: false }.\n4. OUTPUT: The correct no-op text per the resolution path. No behavior change beyond the text.\n5. DOCS: none — tool result text is not externally documented (it's agent-facing runtime text, not a config/API surface). The existing cancel.test.ts:560 test that pins the unified string must be updated to assert the correct path-specific text."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "BUG-007: Add config.enabled gate to mulligan_checkpoint",
+              "status": "Planned",
+              "description": "checkpoint.ts performs no config.enabled check, so with the extension disabled it still writes mulligan:checkpoint labels. Spec E14 requires all tools to refuse with 'Mulligan is disabled.' when config.enabled === false.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "Add getConfig().enabled gate to checkpointExecute",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h2.3/h3.6", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-007. checkpointExecute (src/tools/checkpoint.ts:96-130) has NO config.enabled check. The other four tools all gate on it: src/tools/rewind.ts has `if (!getConfig().enabled) return refusal(...)` at the top of execute; cancel.ts:356 has `if (!getConfig().enabled) return refusal('Mulligan is disabled')`. The checkpoint tool already imports getConfig indirectly — it imports from markers.ts but NOT config.ts. ADD the import: `import { getConfig } from '../config.js';`. The refusal() helper (checkpoint.ts:84-89) builds `{ content: [{type:'text', text: 'Mulligan: refused — <reason>'}], details: { name } }`. The existing refusal format prefixes with 'Mulligan: refused — ' but E14 says tools should say 'Mulligan is disabled.' — match the other tools' exact text. Check how the other tools phrase it: cancel.ts:356 uses a literal `return { content: [...], details: {...} }` not the refusal() helper — verify the exact text pattern used by rewind/cancel/audit for the disabled case and match it.\n2. INPUT: none beyond the existing params (name, ctx, pi).\n3. LOGIC: At the top of checkpointExecute's try block (after `const name = params?.name;`), add: `if (!getConfig().enabled) { return { content: [{ type: 'text', text: 'Mulligan: disabled.' }], details: { name: typeof name === 'string' ? name : '' } }; }`. Match the exact disabled-text pattern used by the other four tools (verify by grepping `getConfig().enabled` in src/tools/*.ts — use the same wording). Add the import `import { getConfig } from '../config.js';` at the top of checkpoint.ts.\n4. OUTPUT: When config.enabled === false, checkpointExecute returns a disabled-refusal text result and does NOT call setCheckpoint (no label written). All other behavior unchanged.\n5. DOCS: [Mode A] Update the checkpoint.ts file header comment that currently says 'NO config gate here (GOTCHA #4)' — replace with documentation that the config.enabled gate is now present per spec E14, and checkpoints respect the master switch like all other tools."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Sync Changeset-Level Documentation",
+          "status": "Planned",
+          "description": "Per SOW §5 Mode B: cross-cutting documentation that only makes sense once the whole changeset is in place. VERIFICATION.md currently documents several of these bugs as 'deliberate deviations' — those notes must be updated to reflect the fixes. README.md may reference nudge behavior that changed.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Sync changeset-level documentation (VERIFICATION.md + README.md)",
+              "status": "Planned",
+              "description": "Update VERIFICATION.md and README.md to reflect all 7 bug fixes. VERIFICATION.md (15KB) documents BUG-001's suppressCheck, BUG-003's shouldNudge, and BUG-007's checkpoint gate as deliberate deviations — these sections must be updated. README.md (26KB) may reference drift-nudge behavior or tool-disabled behavior that changed.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Update VERIFICATION.md to reflect all 7 bug fixes",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T3.S1", "P1.M2.T1.S1", "P1.M2.T2.S1", "P1.M2.T3.S1", "P1.M2.T4.S1"],
+                  "prd_selectors": ["h2.0", "h2.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VERIFICATION.md (root, 15KB) documents the extension's verification status and calls out several of these bugs as deliberate decisions (e.g., the suppressCheck wall-clock window, the shouldNudge threshold at 6000, the checkpoint no-config-gate). After the fixes, these 'deliberate deviation' notes are stale and misleading.\n2. INPUT: All 7 bug fixes (P1.M1 + P1.M2). Read the current VERIFICATION.md to find every section that references: suppressCheck / NUDGE_TURN_WINDOW_MS / the 10-minute window (BUG-001), resolvePinnedHide / compaction / E24 (BUG-002), shouldNudge / driftThresholdTokens / 6000 / criterion (b) (BUG-003), pendingBloatHits / perTurnDrift=false (BUG-004), countRetriesAtLatestPrompt / cancel-awareness (BUG-005), cancel no-op text (BUG-006), checkpoint / config gate / E14 (BUG-007).\n3. LOGIC: Update each referenced section to reflect the FIXED behavior. Remove or annotate 'deliberate deviation' notes that are now resolved. Add a brief changelog/fix-log entry summarizing the 7 fixes.\n4. OUTPUT: VERIFICATION.md accurately reflects the post-fix state of the codebase.\n5. DOCS: This IS the documentation task."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S2",
+                  "title": "Update README.md to reflect drift-nudge and tool-disabled behavior changes",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T3.S1", "P1.M2.T4.S1"],
+                  "prd_selectors": ["h2.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md (root, 26KB) is the primary project documentation. It may reference: the drift-nudge threshold (6000 → now 4000), the drift-nudge suppression behavior (10-min window → turn-based), the three §5.1 acceptance criteria, the checkpoint tool behavior when disabled, and the pinned-hide permanence guarantee. Read README.md to find all sections that reference these behaviors.\n2. INPUT: The 4 bug fixes that change user-facing/behavioral semantics (BUG-001 suppressCheck, BUG-003 threshold, BUG-007 checkpoint gate — and BUG-002 if README documents the pinned-hide guarantee or compaction limitation E24).\n3. LOGIC: Update any README section that describes: (a) the drift-nudge threshold value or acceptance criteria — change 6000 to 4000, note criterion (b) is now met; (b) the drift-nudge suppression window — change from '10 minutes' to 'turn-based'; (c) the compaction limitation (E24) — note that retained-tail pinned hides now work post-compaction; (d) the checkpoint tool — note it now respects config.enabled like all other tools. If README does not reference these specifics, no changes needed (the implementing agent should verify).\n4. OUTPUT: README.md accurately reflects the post-fix behavior.\n5. DOCS: This IS the documentation task."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Drift nudge (Nudge B) is wrongly suppressed for ~10 minutes after ANY rewind/shrink marker
+  h3.1 Issue 2: Pinned rewinds stop working entirely after the first compaction (hidden content leaks back into the model's view)
+  h3.2 Issue 3: Drift nudge does NOT fire for 'three ~4k turns in a row' — explicit spec §5.1 acceptance criterion (b) is unmet
+ h2.3 Minor Issues (Nice to Fix)
+  h3.3 Issue 1: pendingBloatHits accumulates without bound when bloatReminder=true but perTurnDrift=false
+  h3.4 Issue 2: Per-prompt retry budget counts rewinds that were subsequently cancelled
+  h3.5 Issue 3: mulligan_cancel 'not found' text says 'with that id' even when cancelling by target
+  h3.6 Issue 4: mulligan_checkpoint is not gated by config.enabled — violates spec E14 'tools refuse when disabled'
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:26 list:3
