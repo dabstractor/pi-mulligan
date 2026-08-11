@@ -178,6 +178,12 @@ export function registerBloatReminder(pi: ExtensionAPI): void {
  * broken). Read sessionId FIRST so the catch can log it. deltaTokens is null on the first turn / post-reload
  * (baseline missing) → the downstream nudge falls back to bloat-only signaling. SYNC (every dependency is sync).
  *
+ * BUG-004: rt.pendingBloatHits is snapshot+CLEARed BEFORE the `perTurnDrift` early-return (always, every
+ * turn_end), not after the gate. bloatReminderHandler (Nudge A) pushes to it on its OWN `bloatReminder` gate
+ * (not perTurnDrift), so when bloatReminder=true but perTurnDrift=false the clear must still run or the
+ * accumulator grows without bound for the whole session. The snapshot feeds the metric's bloatHit/bloatHits
+ * (step 6) only when perTurnDrift is on (the gate still short-circuits measurement/metric/baseline-roll).
+ *
  * WHY pi is a parameter (GOTCHA #2): the turn_end callback only receives (event, ctx), but this handler must
  * call appendTurnMetric(pi, ctx, …) (→ pi.appendEntry). registerTurnEndMetric captures pi in a closure and
  * passes it here, so the exported handler is directly testable with a fake pi.
@@ -197,11 +203,20 @@ export function turnEndMetricHandler(
     sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); first so the catch can log it (GOTCHA #4)
 
     const config = getConfig();
-    if (!config.enabled || !config.nudges.perTurnDrift) return; // both gates BEFORE measurement (GOTCHA #8)
-
     const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
 
-    // (3) Current filtered token count. lastFiltered is the filter's cached output (what the model actually saw
+    // (3) Snapshot + CLEAR the bloat hits collected this turn by bloatReminderHandler (Nudge A) — ALWAYS,
+    //     every turn_end, BEFORE the perTurnDrift gate. BUG-004: bloatReminderHandler pushes here on its OWN
+    //     gate (bloatReminder, not perTurnDrift), so when bloatReminder=true but perTurnDrift=false the clear
+    //     must still run or pendingBloatHits grows without bound for the whole session. Grab the OLD array
+    //     reference (the metric's frozen snapshot — used in step 6, only when perTurnDrift is on), then
+    //     REASSIGN the field to a fresh [] for next turn.
+    const bloat = rt.pendingBloatHits;
+    rt.pendingBloatHits = [];
+
+    if (!config.enabled || !config.nudges.perTurnDrift) return; // both gates AFTER the bloat clear (GOTCHA #8)
+
+    // (4) Current filtered token count. lastFiltered is the filter's cached output (what the model actually saw
     //     — D5/D6 honest bookkeeping). Fallback to ctx.getContextUsage() only when no filtered view exists yet
     //     (first turn / context never fired). NO cast: rt.lastFiltered is AgentMessage[] (Record<string,unknown>[]),
     //     structurally assignable to estimateTokens' MessageLike[] (GOTCHA #3, verified by tsc).
@@ -209,13 +224,8 @@ export function turnEndMetricHandler(
       ? estimateTokens(rt.lastFiltered).tokens
       : (ctx.getContextUsage()?.tokens ?? 0);
 
-    // (4) Delta vs the baseline captured at the previous turn_end (or session_start). null on first turn.
+    // (5) Delta vs the baseline captured at the previous turn_end (or session_start). null on first turn.
     const delta = rt.tokenBaseline == null ? null : now - rt.tokenBaseline;
-
-    // (5) Snapshot + CLEAR the bloat hits collected this turn by bloatReminderHandler (Nudge A). Grab the OLD
-    //     array reference (the metric's frozen snapshot), then REASSIGN the field to a fresh [] for next turn.
-    const bloat = rt.pendingBloatHits;
-    rt.pendingBloatHits = [];
 
     // (6) Build TurnMetricInput — the 5 DATA fields ONLY (GOTCHA #1: appendTurnMetric stamps schema/v/kind/seq/ts;
     //     do NOT call nextSeq or add seq — it would double-increment). grewOverThreshold uses driftThresholdTokens.

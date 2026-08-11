@@ -157,6 +157,28 @@ describe("turnEndMetricHandler — config gates short-circuit before measurement
     expect(appended).toHaveLength(0);
     expect(rt.tokenBaseline).toBe(50);
   });
+
+  it("BUG-004: clears pendingBloatHits even when perTurnDrift is OFF (bloatReminder gate is separate)", () => {
+    setConfig({
+      ...structuredClone(DEFAULT_CONFIG),
+      enabled: true,
+      nudges: { ...DEFAULT_CONFIG.nudges, perTurnDrift: false }, // bloatReminder stays default true
+    });
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ sessionId: "s1", tokens: 1000 });
+    const rt = getRuntime("s1");
+    rt.tokenBaseline = 50;
+    rt.pendingBloatHits = [
+      { toolName: "bash", approxTokens: 5000 },
+      { toolName: "read", approxTokens: 3000 },
+    ];
+    turnEndMetricHandler(pi, makeEvent(3), ctx);
+    // No metric persisted (perTurnDrift off) + baseline NOT rolled (gate still short-circuits those)…
+    expect(appended).toHaveLength(0);
+    expect(rt.tokenBaseline).toBe(50);
+    // …but the accumulator IS cleared every turn_end (BUG-004 — no unbounded growth).
+    expect(rt.pendingBloatHits).toEqual([]);
+  });
 });
 
 // ── first turn: baseline null → delta null ──────────────────────────────────
