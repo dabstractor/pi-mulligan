@@ -3,7 +3,6 @@ import {
   shouldNudge,
   injectNudge,
   suppressCheck,
-  NUDGE_TURN_WINDOW_MS,
   shouldHighWater,
   renderHighWaterNudge,
   injectHighWaterNudge,
@@ -169,53 +168,75 @@ describe("injectNudge — pure append, ephemeral (spec/07 §2)", () => {
 
 // ── suppressCheck ───────────────────────────────────────────────────────────────────────────
 
-describe("suppressCheck — §5.3 hard-rule suppress window (mechanism: ts-window; spec/07 §5.3, origin §2)", () => {
-  const T = 1_000_000;
+describe("suppressCheck — §5.3 hard-rule suppress window (mechanism: turn-boundary; spec/07 §5.3, BUG-001 fix)", () => {
+  const T_LATEST = 200;
+  const T_PREV = 100;
+  // Two-turn recentMetrics, newest-first: [0]=latest, [1]=previous (matches readMarkers' sort).
+  const recentMetrics = (): TurnMetric[] => [
+    metric({ ts: T_LATEST, seq: 3 }),
+    metric({ ts: T_PREV, seq: 2 }),
+  ];
+  const latest = (): TurnMetric => recentMetrics()[0];
 
   it("returns false when there are no markers", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [], shrinks: [] })).toBe(false);
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [], shrinks: [] })).toBe(false);
   });
 
-  it("returns true when a rewind marker ts is within (T − window, T] — inclusive upper bound", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [rewind(1, T)], shrinks: [] })).toBe(true);
+  it("returns true when a rewind marker ts is within (prev.ts, latest.ts] — inclusive upper bound", () => {
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [rewind(1, T_LATEST)], shrinks: [] })).toBe(true);
   });
 
-  it("returns true when a rewind marker ts is just inside the window (T − 1)", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [rewind(1, T - 1)], shrinks: [] })).toBe(true);
+  it("returns true when a marker is created DURING this turn (prev.ts < markerTs <= latest.ts)", () => {
+    // marker at ts=150 falls in (100, 200] → created during this turn → suppress.
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [], shrinks: [shrink(1, 150)] })).toBe(true);
   });
 
-  it("returns false when a rewind marker ts is at the lower boundary (T − window) — lower exclusive", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [rewind(1, T - NUDGE_TURN_WINDOW_MS)], shrinks: [] })).toBe(false);
+  it("returns FALSE when a marker is from the PREVIOUS turn (markerTs <= prev.ts) — BUG-001 fix", () => {
+    // marker at ts=100 (== prev.ts) → 100 > 100 is FALSE → not in window → no suppress.
+    // Under the old wall-clock logic, 100 was within 10 min of 200 → wrongly suppressed.
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [], shrinks: [shrink(1, T_PREV)] })).toBe(false);
   });
 
-  it("returns false when a rewind marker ts is older than the window (T − window − 1)", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [rewind(1, T - NUDGE_TURN_WINDOW_MS - 1)], shrinks: [] })).toBe(false);
+  it("returns false when a marker is from a much older turn (markerTs < prev.ts)", () => {
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [], shrinks: [shrink(1, 50)] })).toBe(false);
   });
 
-  it("returns false when a rewind marker ts is in the future (T + 1) — strict upper bound", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [rewind(1, T + 1)], shrinks: [] })).toBe(false);
+  it("returns false when a marker ts is in the future (markerTs > latest.ts) — strict upper bound", () => {
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [rewind(1, 250)], shrinks: [] })).toBe(false);
   });
 
-  it("returns true when a SHRINK marker ts is within the window (not just rewinds)", () => {
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [], shrinks: [shrink(1, T)] })).toBe(true);
+  it("returns true when a SHRINK marker is within the turn window (not just rewinds)", () => {
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [], shrinks: [shrink(1, T_LATEST)] })).toBe(true);
   });
 
   it("returns false when a rewind marker ts is non-finite (malformed) — treated as NOT in window", () => {
     const bad = rewind(1, Number.NaN) as RewindMarker & { ts: number };
     bad.ts = Number.NaN;
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [bad], shrinks: [] })).toBe(false);
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [bad], shrinks: [] })).toBe(false);
   });
 
-  it("returns true as soon as ANY marker (rewind or shrink) is in the window", () => {
-    const oldRewind = rewind(1, T - NUDGE_TURN_WINDOW_MS - 1); // too old → not in window
-    const freshShrink = shrink(2, T); // in window
-    expect(suppressCheck(metric({ ts: T }), { rewinds: [oldRewind], shrinks: [freshShrink] })).toBe(true);
+  it("returns true as soon as ANY marker (rewind or shrink) is in the turn window", () => {
+    const oldRewind = rewind(1, 50); // older than prev.ts → not in window
+    const freshShrink = shrink(2, 150); // in (prev.ts, latest.ts] → in window
+    expect(suppressCheck(latest(), recentMetrics(), { rewinds: [oldRewind], shrinks: [freshShrink] })).toBe(true);
+  });
+
+  it("first turn (recentMetrics.length===1): marker <= latest.ts → true (lo=0 fallback)", () => {
+    // Only one metric this turn → no previous metric → lo=0 → any marker <= latest.ts suppresses.
+    const firstTurn = [metric({ ts: T_LATEST })];
+    expect(suppressCheck(latest(), firstTurn, { rewinds: [], shrinks: [shrink(1, T_LATEST)] })).toBe(true);
+  });
+
+  it("defensive: non-finite recentMetrics[1].ts → lo=0 (first-turn fallback)", () => {
+    // A corrupt previous-metric ts falls back to lo=0 → marker <= latest.ts suppresses.
+    const corruptPrev = [metric({ ts: T_LATEST }), metric({ ts: Number.NaN })];
+    expect(suppressCheck(latest(), corruptPrev, { rewinds: [], shrinks: [shrink(1, T_LATEST)] })).toBe(true);
   });
 
   it("treats a non-finite metric.ts as 0 (defensive)", () => {
-    // metric.ts = NaN → metricTs = 0 → lo = −window. A marker at ts=0 is in (−window, 0] → suppress.
+    // metric.ts = NaN → metricTs = 0 → lo = prev.ts (100). A marker at ts=0 is not in (100, 0] → no suppress.
     const m = metric({ ts: Number.NaN });
-    expect(suppressCheck(m, { rewinds: [rewind(1, 0)], shrinks: [] })).toBe(true);
+    expect(suppressCheck(m, recentMetrics(), { rewinds: [rewind(1, 0)], shrinks: [] })).toBe(false);
   });
 });
 
@@ -242,37 +263,46 @@ describe("suppressCheck — spec/07 §5.3 hard rule (acceptance a/b/c): drift nu
   const latest = (): TurnMetric => driftWindow()[0]; // seq 3, ts 3 — bounds the suppress window
 
   it("(a) >threshold window + same-turn SHRINK → net nudge decision is FALSE (no drift nudge)", () => {
-    const sameTurnShrink = shrink(1, latest().ts); // ts === metric.ts → in (ts−window, ts] → suppress
+    const sameTurnShrink = shrink(1, latest().ts); // ts === metric.ts → in (prev.ts, ts] → suppress
     const fire = shouldNudge(driftWindow(), cfg()) &&
-                 !suppressCheck(latest(), { rewinds: [], shrinks: [sameTurnShrink] });
+                 !suppressCheck(latest(), driftWindow(), { rewinds: [], shrinks: [sameTurnShrink] });
     expect(shouldNudge(driftWindow(), cfg())).toBe(true);           // would fire on growth alone
-    expect(suppressCheck(latest(), { rewinds: [], shrinks: [sameTurnShrink] })).toBe(true); // suppressed
+    expect(suppressCheck(latest(), driftWindow(), { rewinds: [], shrinks: [sameTurnShrink] })).toBe(true); // suppressed
     expect(fire).toBe(false);                                      // §5.3 (a): net NO nudge
   });
 
   it("(b) >threshold window + NO action → net nudge decision is TRUE (fires normally)", () => {
     const fire = shouldNudge(driftWindow(), cfg()) &&
-                 !suppressCheck(latest(), { rewinds: [], shrinks: [] });
+                 !suppressCheck(latest(), driftWindow(), { rewinds: [], shrinks: [] });
     expect(shouldNudge(driftWindow(), cfg())).toBe(true);           // growth fires
-    expect(suppressCheck(latest(), { rewinds: [], shrinks: [] })).toBe(false); // no marker → not suppressed
+    expect(suppressCheck(latest(), driftWindow(), { rewinds: [], shrinks: [] })).toBe(false); // no marker → not suppressed
     expect(fire).toBe(true);                                       // §5.3 (b): fires
   });
 
   it("(c) >threshold window + same-turn REWIND → net nudge decision is FALSE (no drift nudge)", () => {
-    const sameTurnRewind = rewind(1, latest().ts); // ts === metric.ts → in (ts−window, ts] → suppress
+    const sameTurnRewind = rewind(1, latest().ts); // ts === metric.ts → in (prev.ts, ts] → suppress
     const fire = shouldNudge(driftWindow(), cfg()) &&
-                 !suppressCheck(latest(), { rewinds: [sameTurnRewind], shrinks: [] });
-    expect(suppressCheck(latest(), { rewinds: [sameTurnRewind], shrinks: [] })).toBe(true); // suppressed
+                 !suppressCheck(latest(), driftWindow(), { rewinds: [sameTurnRewind], shrinks: [] });
+    expect(suppressCheck(latest(), driftWindow(), { rewinds: [sameTurnRewind], shrinks: [] })).toBe(true); // suppressed
     expect(fire).toBe(false);                                      // §5.3 (c): net NO nudge
   });
 });
 
-// ── NUDGE_TURN_WINDOW_MS ────────────────────────────────────────────────────────────────────
+// ── BUG-001 regression ──────────────────────────────────────────────────────────────────────
 
-describe("NUDGE_TURN_WINDOW_MS — exported constant (10 minutes)", () => {
-  it("equals 10 minutes in milliseconds", () => {
-    expect(NUDGE_TURN_WINDOW_MS).toBe(10 * 60 * 1000);
-  });
+it("BUG-001: a marker from a PRIOR turn does NOT suppress a later turn (no 10-min blackout)", () => {
+  // Two turns: latest at T+120s (seq 3), previous at T (seq 2). A shrink created during the PREVIOUS turn
+  // (ts=T) must NOT suppress the drift nudge on the latest turn. Under the old wall-clock logic this wrongly
+  // suppressed for ~10 min after the marker.
+  const T = 1_000_000;
+  const latestMetric = metric({ ts: T + 120_000, seq: 3 });
+  const prev = metric({ ts: T, seq: 2 });
+  const recentMetrics = [latestMetric, prev];
+  const priorTurnShrink = { ...shrink(1, T) }; // created during the PREVIOUS turn
+  expect(suppressCheck(latestMetric, recentMetrics, { rewinds: [], shrinks: [priorTurnShrink] })).toBe(false);
+  // And a marker created DURING this turn still suppresses:
+  const thisTurnShrink = { ...shrink(2, T + 60_000) }; // between prev.ts and latest.ts
+  expect(suppressCheck(latestMetric, recentMetrics, { rewinds: [], shrinks: [thisTurnShrink] })).toBe(true);
 });
 
 // ── pure-function unit tests for the §5.2 edge-triggered high-water signal (spec/07 §5.2). ──

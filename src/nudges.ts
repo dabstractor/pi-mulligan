@@ -257,19 +257,6 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
 }
 
 /**
- * NUDGE_TURN_WINDOW_MS — the heuristic time window for suppressCheck, which implements spec/07 §5.3 (REQUIRED,
- * hard rule: suppress the drift nudge for a turn in which the agent already rewound/shrunk). §5.3 promotes the
- * spec/07 §2 "Edge cases" ts-window heuristic to a hard rule; the window bounds "during the metric's turn" as
- * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. 10 minutes: a generous bound on a single agent turn's wall-clock
- * duration. A marker created during the turn that produced the metric falls inside
- * (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]; markers from earlier turns fall outside. EXPORTED so tests can
- * reference the exact boundary. Best-effort by design (spec/07 §2 frames suppress as a "Simple heuristic"; the
- * whole nudge subsystem is best-effort). NOT config in v1 (config.ts is frozen by sibling PRPs); a future
- * iteration may expose it as config.nudges.suppressWindowMs.
- */
-export const NUDGE_TURN_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-
-/**
  * shouldNudge — Nudge B Phase 2 gate (spec/07 §2; spec/07 §5.1 Windowed drift signaling, REQUIRED). PURE boolean
  * (no Pi calls, no tokenization). Fires the drift nudge iff the per-turn token delta, SMOOTHED over a rolling
  * window of the last `config.nudges.driftWindowTurns` turns, exceeds `config.nudges.driftThresholdTokens`
@@ -368,38 +355,46 @@ export function injectNudge(messages: MessageLike[], metric: TurnMetric): Messag
 /**
  * suppressCheck — Nudge B Phase 2 suppress gate, implementing spec/07 §5.3 (REQUIRED, hard rule): the drift nudge
  * MUST NOT fire for a turn in which the agent already issued a mulligan:rewind or mulligan:shrink that addressed
- * the bloat/drift the nudge would describe — REGARDLESS of delta or bloatHit. §5.3 promotes the earlier spec/07
- * §2 "Edge cases" ts-window heuristic ("avoid nagging after the agent already acted") to a hard rule; the
- * MECHANISM is unchanged (an acknowledged "Simple heuristic" per spec/07 §2 — NOT seq-based). PURE: returns true
- * (suppress the nudge) iff ANY rewind or shrink marker was created during the metric's turn, approximated as:
- * some marker.ts falls in the half-open window (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts]. Returns false
- * otherwise (no markers / all older than the window / marker ts in the future). Call site (filter.ts): the nudge
- * fires iff `shouldNudge(recentMetrics, config) && !suppressCheck(markers.metric, markers)` — suppressCheck is
- * the §5.3 gate AFTER shouldNudge (§5.1), composing with the E22 refusal-suppression rule.
+ * the bloat/drift the nudge would describe — REGARDLESS of delta or bloatHit. PURE: returns true (suppress the
+ * nudge) iff ANY rewind or shrink marker was created DURING the metric's turn, i.e. some marker.ts falls in the
+ * half-open turn window (lo, metric.ts], where lo is the PREVIOUS metric's ts (recentMetrics[1]). Returns false
+ * otherwise (no markers / all markers from earlier turns / marker ts in the future). Call site (filter.ts): the
+ * nudge fires iff `shouldNudge(recentMetrics, config) && !suppressCheck(markers.metric, markers.recentMetrics,
+ * markers)` — suppressCheck is the §5.3 gate AFTER shouldNudge (§5.1), composing with the E22 refusal-suppression rule.
  *
- * WHY a window, not a pure upper bound (GOTCHA #7): at nudge-fire time, readMarkers returns the LATEST metric + ALL
- * accumulated markers. A turn-N marker AND a turn-(N-1) marker both have ts <= metric.ts (the metric is the most-
- * recently-stamped entry; no turn-(N+1) markers exist at context-fire). So `ts <= metric.ts` alone OVER-SUPPRESSES
- * (one rewind ever → nudge never fires again). There is no per-turn lower bound without the PREVIOUS metric
- * (readMarkers keeps only the latest), so a wall-clock window is the best-effort resolution the spec calls a
- * "Simple heuristic". Read ts defensively; a non-finite ts → treated as NOT in window (no suppress → fail to nudge,
- * the safe direction for an advisory nudge).
+ * TURN-BOUNDARY LOWER BOUND (replaces the old 10-min wall-clock window — BUG-001 fix): the lower bound `lo` is the
+ * PREVIOUS metric's ts (recentMetrics[1], now available via readMarkers' recentMetrics). This bounds "this turn"
+ * exactly — a marker created during the PREVIOUS turn (ts <= prevMetric.ts) does NOT suppress a later turn. The
+ * old code used `metricTs - NUDGE_TURN_WINDOW_MS` (a fixed 10-minute wall-clock window), which over-suppressed for
+ * ~10 minutes after any single marker — exactly the window where sustained context growth is most likely and the
+ * nudge is most valuable. First turn (recentMetrics.length < 2) OR a non-finite previous-metric ts → lo=0 (any
+ * marker with ts <= metric.ts was created during this first turn → suppress). Read ts defensively; a non-finite
+ * marker ts → treated as NOT in window (no suppress → fail to nudge, the safe direction for an advisory nudge).
  *
  * WHY a structural markers param (GOTCHA #6): filter.ts imports these functions from nudges.ts, so nudges.ts must
  * NOT import MarkersBundle from filter.ts (circular). The param is `{ rewinds: ReadonlyArray<RewindMarker>;
  * shrinks: ReadonlyArray<ShrinkMarker> }`; filter.ts's MarkersBundle is structurally assignable (the extra `metric`
- * field is ignored for assignability-to-param). Call site: `suppressCheck(markers.metric, markers)`.
+ * field is ignored for assignability-to-param). Call site: `suppressCheck(markers.metric, markers.recentMetrics, markers)`.
  *
- * @param metric  the latest turn-metric (metric.ts bounds the window's upper end).
- * @param markers { rewinds, shrinks } — the persisted rewind/shrink markers on the branch (MarkersBundle shape).
- * @returns true iff some marker.ts ∈ (metric.ts − NUDGE_TURN_WINDOW_MS, metric.ts].
+ * @param metric        the latest turn-metric (recentMetrics[0]; bounds the window's upper end).
+ * @param recentMetrics ALL turn-metrics, newest-first ([0]=latest=metric, [1]=previous). The previous metric's ts
+ *                      bounds the turn's lower end; <2 entries → first-turn (lo=0).
+ * @param markers       { rewinds, shrinks } — the persisted rewind/shrink markers on the branch (MarkersBundle shape).
+ * @returns true iff some marker.ts ∈ (lo, metric.ts] where lo = recentMetrics[1].ts (or 0 on first turn).
  */
 export function suppressCheck(
   metric: TurnMetric,
+  recentMetrics: TurnMetric[],
   markers: { rewinds: ReadonlyArray<RewindMarker>; shrinks: ReadonlyArray<ShrinkMarker> },
 ): boolean {
   const metricTs = typeof metric.ts === "number" && Number.isFinite(metric.ts) ? metric.ts : 0;
-  const lo = metricTs - NUDGE_TURN_WINDOW_MS;
+  // Turn-boundary lower bound (spec/07 §5.3): a marker suppresses iff created DURING this turn,
+  // bounded below by the PREVIOUS metric's ts. recentMetrics is newest-first: [0]=latest(=metric),
+  // [1]=previous. <2 entries (first turn) OR a non-finite previous ts → lo=0 (any marker with
+  // ts <= metric.ts was created during this turn → suppress). Replaces the old 10-min wall-clock window (BUG-001).
+  const prev = recentMetrics.length >= 2 ? recentMetrics[1] : undefined;
+  const lo =
+    prev && typeof prev.ts === "number" && Number.isFinite(prev.ts) ? prev.ts : 0;
   for (const m of markers.rewinds) {
     const ts = typeof m.ts === "number" && Number.isFinite(m.ts) ? m.ts : NaN;
     if (Number.isFinite(ts) && ts > lo && ts <= metricTs) return true;
