@@ -148,7 +148,7 @@ if (ctx.hasUI) ctx.ui.notify(
 ```
 Guard with `ctx.hasUI` (no-op in print/JSON mode — there is no user to show). The tool RESULT (returned to the model) stays terse — the model does not need its own summary echoed back. `config.shrink.notifyMaxChars` (default **2048**) caps the toast for *UI ergonomics only* (not context); over-cap, append `…(<N> chars total)`. **Why not echo in the result / `sendMessage`:** both enter the model's context. `ctx.ui.notify` is the only user-facing channel that costs zero tokens — the whole point of the tool is to reduce context, so the summary must reach the human without re-entering the model's view.
 
-The filter applies shrinks **after** rewinds and substitutes content in place, preserving `role:"toolResult"`, `toolCallId`, `toolName`, `isError` so the tool pairing invariant holds (C-pairing). Only the `content` array is replaced with `[{type:"text", text: replacement}]`.
+The filter applies shrinks **after** rewinds and substitutes content in place, preserving `role:"toolResult"`, `toolCallId`, `toolName`, `isError` so the tool pairing invariant holds (C-pairing). Only the `content` array is replaced — and it is wrapped in a render-time `<context-shrunk>` awareness stamp (`@06-context-filter.md` §5.1) so the model has a durable, in-context signal that this message was shrunk and will not redundantly re-shrink already-compact content. The tool result itself stays terse (the stamp is added by the filter at render time, not by the tool); the persisted `replacement` field stays raw.
 
 ---
 

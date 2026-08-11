@@ -32,7 +32,8 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 ### 1.5 `applyShrink`
 - `by_tool_call_id` match → content replaced, `role/toolCallId/toolName/isError` preserved.
 - No match → input unchanged (no-op).
-- Two shrinks same target, seq order → last wins.
+- Two shrinks same target, seq order → last wins; the `<context-shrunk>` stamp appears exactly once (never nested) regardless of how many shrinks re-target the same message.
+- **Render-time stamp (`@06-context-filter.md` §5.1):** the rendered content is the raw `replacement` wrapped in `<context-shrunk>\n…\n</context-shrunk>`; the marker's stored `replacement` stays RAW (assert `marker.replacement === "[shrunk]"` after `applyShrink` — the stamp is render-only, never persisted/mutated onto the marker).
 
 ### 1.6 `extractFileLedger`
 - A span with `read(path="a.ts")`, `edit(path="b.ts")`, `bash(command="git commit")`, `bash(command="ls")` → `readFiles:["a.ts"]`, `modifiedFiles:["b.ts"]`, `bashSideEffects:["git commit"]` (`ls` is read-only → omitted). De-dup + sort.

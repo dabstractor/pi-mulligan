@@ -128,6 +128,15 @@
 - **Risk (bounded):** originally-hidden content **reappears** in the model's view for that fire — a transient **leak**, not a replay. It is NOT the turn-replay vector (`FIX_TURN_REPLAY_LOOP.md`), which is fixed by the `turnHasAdvanced` gate on the legacy relative path; the pinned path is unaffected by that bug (tested: a new post-compaction read survives).
 - **Behavior (v1):** accepted as a bounded, transient limitation (compaction is itself soon superseded; Mulligan reducing context makes compaction fire later and over less). The `filter.invariant` log (`@06-context-filter.md` §12) distinguishes this case from a replay by showing `mode: pinned` with `remove: []`. No v1 fix; rely on the audit trail (`/tree`) for recovery.
 
+## E25. Redundant re-shrink of already-shrunk content (awareness stamp)
+
+- **Situation:** the model calls `mulligan_shrink`, then — failing to attend to the terse `"Mulligan: shrink recorded…"` tool result — issues a *second* shrink against the same (now already-compact) target in the same or a later turn.
+- **Behavior (v1):** no hard per-turn block. Instead the filter applies a **render-time `<context-shrunk>` awareness stamp** (`@06-context-filter.md` §5.1) to every shrink's rendered replacement, so the awareness travels with the shrunk message (survives compaction/scroll, unlike a tool-result line). Two safety properties then hold automatically:
+  - **Natural dedup:** after a `by_content_includes` shrink, the targeted substring is gone (replaced by the stamped summary), so a redundant same-target call resolves to nothing and the tool returns an honest `Matched: no` — the model is told the truth rather than double-recording.
+  - **No false refusal of distinct targets:** because the stamp is per-message (not a global turn counter), a legitimate second shrink of a *different* bloated result still succeeds. A per-turn `appendShrinkMarker` dedup would wrongly block this case and is intentionally NOT used.
+- **Stamp is render-only:** the marker's persisted `replacement` stays raw; cancel/audit/restore see the unwrapped summary. `mulligan_cancel` dropping the marker removes the stamp entirely on the next fire (the original content reappears verbatim).
+- **Acceptance:** (a) a single shrink's rendered content is wrapped in exactly one `<context-shrunk>…</context-shrunk>`; (b) the stored `replacement` is the raw model text (assert unchanged after `applyShrink`); (c) two seq-ordered shrinks on the same target produce exactly one stamp (never nested).
+
 ---
 
 ## Cross-references

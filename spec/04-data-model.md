@@ -163,9 +163,13 @@ interface ShrinkMarker extends MulliganEnvelope {
   kind: "shrink";
   id: string;
   target: ShrinkTarget;
-  /** The replacement content (text). The filter substitutes the matched
-   *  ToolResultMessage's content with [{type:"text", text: replacement}] and
-   *  preserves isError/toolName/toolCallId so the API stays valid. */
+  /** The replacement content (text), stored RAW. The filter's `applyShrink`
+   *  substitutes the matched message's content with the replacement WRAPPED in a
+   *  render-time `<context-shrunk>` awareness stamp (`@06-context-filter.md`
+   *  §5.1) and preserves isError/toolName/toolCallId so the API stays valid.
+   *  This field itself is the raw model-authored summary — audit, cancel
+   *  target resolution, and any future restore see it unwrapped; only the
+   *  rendered content array the filter emits is stamped. */
   replacement: string;
   /** Optional reason, surfaced in audit. */
   reason?: string;

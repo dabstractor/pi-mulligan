@@ -142,15 +142,58 @@ function applyShrink(messages: AgentMessage[], marker: ShrinkMarker): AgentMessa
   const orig = messages[i];
   const replacement: AgentMessage =
     orig.role === "toolResult"
-      ? { ...orig, content: [{ type: "text", text: marker.replacement }] }   // preserve role/toolCallId/toolName/isError
-      : { ...orig, content: [{ type: "text", text: marker.replacement }] };  // generic message: replace content, keep role
+      ? { ...orig, content: [{ type: "text", text: stampShrink(marker.replacement) }] }   // preserve role/toolCallId/toolName/isError
+      : { ...orig, content: [{ type: "text", text: stampShrink(marker.replacement) }] };  // generic message: replace content, keep role
   return messages.map((m, j) => (j === i ? replacement : m));
+}
+
+// Render-time awareness stamp — see §5.1. NEVER persisted; marker.replacement stays RAW.
+function stampShrink(rep: string): string {
+  return `<context-shrunk>\n${rep}\n</context-shrunk>`;
 }
 ```
 
+## 5.1 Render-time awareness stamp (`stampShrink`)
+
+The substitution wraps the rendered replacement in a fixed render-time envelope so the model sees, in place of the
+original content:
+
+```
+<context-shrunk>
+<the model's replacement, verbatim>
+</context-shrunk>
+```
+
+This gives the model a **durable, in-context signal that a shrink occurred here**, co-located with the very artifact it
+scans when deciding what else to reclaim. **Motivation (live failure mode):** a shrink previously left *no* footprint
+in live context — the original bloated content vanished and the model's own summary sat in context indistinguishable
+from any other message, so the only trace that a shrink had happened was the transient tool-result string
+`"Mulligan: shrink recorded…"`, which the model could fail to attend to and then **redundantly re-shrink the same
+target**. The stamp fixes a *salience* gap, not an information gap: the awareness travels with the shrunk message and
+survives compaction/scroll, unlike a tool-result line or a turn counter.
+
+Properties the stamp delivers for free:
+- **Natural re-shrink dedup.** After a shrink, the original content (e.g. the `by_content_includes` substring the
+  model targeted) is gone — replaced by the stamped summary. A redundant same-target call therefore resolves to
+  nothing and the tool returns an honest `Matched: no` (`@05-tools.md` §2). No hard per-turn block is required.
+- **Target-scoped, not a blanket block.** A second *distinct* target has no stamp and is still shrinkable, so a
+  legitimate two-distinct-shrinks turn is never falsely refused (which a per-turn `appendShrinkMarker` dedup would do).
+- **Survives cancel.** `mulligan_cancel` drops the marker from `readMarkers`; `applyShrink` then no longer runs for
+  it, so the original content reappears verbatim in the filtered view (no stamp). Automatic — nothing extra to do.
+
+The stamp is **render-only**:
+- The marker's persisted `replacement` field (`@04-data-model.md` §4) stays RAW — the model-authored summary,
+  byte-for-byte. Audit (`mulligan_audit`), cancel target resolution, and any future restore see it unwrapped; only
+  the *rendered content array* `applyShrink` emits is wrapped.
+- The `mulligan:shrink` control entry and the `ctx.ui.notify` operator echo (`@05-tools.md` §2 step 5) both use the
+  raw replacement.
+- The stamp is a **fixed constant** (not configurable); it adds ~3 tokens, negligible versus the context saved. A
+  malformed marker with an empty `replacement` still stamps (yielding an empty-body
+  `<context-shrunk>\n\n</context-shrunk>`) — harmless and still signals "shrunk".
+
 **Pinned shrinks (FINDING 3).** `applyShrink` resolves the target **pinned-first**: when the marker carries a `pinnedEntryId` (the stable ENTRY id the target matched at marker-creation time — recorded by the tool), it resolves that id by **identity** via `resolvePinnedShrink(messages, branchEntries, pinnedEntryId)` (the single-id counterpart of `resolvePinnedHide`), NOT the live selector. This locks the substitution to ONE message forever, so `by_tool_name`+`last` and `by_content_includes` can no longer drift onto a later, unrelated message that merely happens to match (the moving-target footgun). If the pinned entry is no longer present (compaction), the shrink no-ops that inference rather than re-resolving the selector — identity-or-nothing, mirroring the rewind `hideEntryIds` precedent. `by_tool_call_id` is already stable, so pinning is a harmless no-op there. Markers without a `pinnedEntryId` (old markers, or a target that did not match at creation) fall back to the live `resolveShrinkTarget` above (compaction-robust as before).
 
-**Multiple shrinks on the same target:** applied in seq order, so the last one wins (its replacement is what's seen). **Shrink after rewind:** if a rewind already removed the target message, the shrink no-ops (resolve returns null) — harmless.
+**Multiple shrinks on the same target:** applied in seq order, so the last one wins (its stamped replacement is what's seen — each application re-wraps the raw `replacement`, so the stamp appears exactly once, never nested). **Shrink after rewind:** if a rewind already removed the target message, the shrink no-ops (resolve returns null) — harmless.
 
 **Pairing:** shrink preserves `toolCallId`/`role`, so pairing is untouched. Safe.
 
