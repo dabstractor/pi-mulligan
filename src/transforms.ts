@@ -577,24 +577,41 @@ function isContextProducingType(type: unknown): boolean {
  * are NOT a stable anchor (they shift on compaction: the message list is compaction-aware; getBranch() is not) —
  * which is exactly why the anchor is entry IDs, not indices.
  *
- * ALGORITHM (fix_design.md §Change 3; mirrors resolveCheckpoint steps 3–4, generalized):
+ * ALGORITHM (retained-tail walk; fixes BUG-002 — architecture/system_context.md §BUG-002):
  *   1. Defensive: non-array messages/branchEntries/hideEntryIds, OR empty hideEntryIds → return [] (safe no-op;
  *      applyRewind(m, []) is the documented idempotent no-op — spec/10 §1.4).
  *   2. Build a Set<string> from hideEntryIds (skip non-string/empty ids; dedupes).
- *   3. ctxEntries = branchEntries filtered to context-producing types (isContextProducingType: message/
- *      custom_message/branch_summary/compaction). branchEntries is ALREADY ROOT→LEAF (getBranch() order; P1.M1.T1.S1
- *      established the no-reverse convention — see resolveCheckpoint's step-3 comment at its line ~416). Do NOT
- *      reverse. (fix_design.md §Change 3's `[...].reverse()` is SUPERSEDED.)
- *   4. Walk ctxEntries with msgCursor (messages consumed so far). For each entry:
- *        yield = entryMessageYield(entry); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
- *        if yield < 0 → return [] (compaction/unknown on the walk → entry→message alignment INDETERMINATE → refuse
- *           safely, identical to resolveCheckpoint; the marker persists, content not hidden this fire, no crash).
- *        if msgCursor + yield > messages.length → return [] (raw branch vs compaction-aware messages misalign → refuse).
- *        if the entry's string id ∈ hideSet → push ALL indices [msgCursor, msgCursor+yield) into remove (yield is 1
- *           in practice, so one index per hidden entry; the range is forward-compatible if a future entry type
- *           yields >1 message).
- *        msgCursor += yield. (Do NOT break — a SET of entries may be pinned, e.g. a whole toolGroup.)
- *   5. Return remove (ascending — the root→leaf walk + monotonic msgCursor guarantee it; no sort needed).
+ *   3. Find lastCompactionIdx — the INDEX of the LAST entry on the branch whose type === "compaction" (-1 if none).
+ *      getBranch() is the RAW path (carries compacted-away entries + the compaction entry); event.messages is
+ *      COMPACTION-AWARE (summary + retained tail). The compacted-away set is unknowable from the compaction entry
+ *      (no retainedTail field — architecture/external_deps.md), so a whole-branch walk is fundamentally
+ *      unalignable. The entries AFTER the last compaction are the "retained tail" and map 1:1 to the LAST
+ *      tailEntries.length messages.
+ *   4. tailEntries = branchEntries.slice(lastCompactionIdx + 1) filtered to context-message types ONLY
+ *      (entryMessageYield(e) > 0: message/custom_message/branch_summary — each yields exactly 1 message). Do NOT
+ *      use isContextProducingType here (it INCLUDES compaction, wrong for the tail).
+ *   5. tailStartIdx = messages.length - tailEntries.length. The retained tail maps to the LAST tailEntries.length
+ *      messages, so retained-tail entry k ↔ messages[tailStartIdx + k]. If tailStartIdx < 0 → return [] (raw branch
+ *      vs compaction-aware messages misalign beyond recovery → refuse safely; the marker persists, content not
+ *      hidden this fire, no crash).
+ *   6. Walk the tail; push tailStartIdx + k for each entry whose string id ∈ hideSet. Entries pinned in the
+ *      COMPACTED-AWAY HEAD are correctly unmatched (they are absent from tailEntries, and absent from messages →
+ *      no leak, no error). No-compaction case: lastCompactionIdx === -1 → slice(0) = all entries → tailEntries is
+ *      the whole context-message list → tailEntries.length === messages.length → tailStartIdx === 0 → entry k ↔
+ *      messages[k] (IDENTICAL to the legacy forward walk — tests (a)/(b) stay green).
+ *   7. Return remove (ascending by construction — the tail walk is root→leaf; no sort needed).
+ *
+ * This UPGRADES spec/08 E24 ("Pinned hide no-ops under compaction" — previously framed as a KNOWN LIMITATION):
+ * retained-tail hides now WORK post-compaction; only entries pinned in the compacted-away head no-op (correctly —
+ * they are gone from messages). E24 is a leak (not a replay), so the fix is pure correctness (hidden content stays
+ * hidden); no new pairing/serialization risk.
+ *
+ * WHY resolveCheckpoint KEEPS its bail-on-compaction (do NOT change the shared helpers): resolveCheckpoint removes
+ * a CONTIGUOUS SWEEP ("everything after iTarget") — a compaction anywhere in its walked range makes the sweep's end
+ * indeterminate, so refusing (null) is correct for ITS semantics. resolvePinnedHide removes a DISCRETE set (exactly
+ * the pinned entries) — it only needs retained-tail alignment, so it can be compaction-aware without the bail. The
+ * two resolvers legitimately need DIFFERENT compaction handling; entryMessageYield + isContextProducingType stay
+ * unchanged (resolveCheckpoint reuses them).
  *
  * WHY NO UNIT-SNAP / NO REWIND-OWN / NO NOTE EXCLUSION (unlike resolveCheckpoint): resolveCheckpoint removes a
  * contiguous SWEEP ("everything after iTarget") and so must (a) unit-snap iTarget to avoid orphaning the
@@ -638,26 +655,38 @@ export function resolvePinnedHide(
   }
   if (hideSet.size === 0) return []; // hideEntryIds held no usable string ids → nothing to hide
 
-  // 3) ctxEntries = context-producing entries, ROOT→LEAF (getBranch() order — NO reverse; P1.M1.T1.S1 convention).
-  const ctxEntries = branchEntries.filter((e) =>
-    isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
-  );
-
-  // 4) Walk in parallel with messages; collect the message indices of every PINNED entry.
-  const remove: number[] = [];
-  let msgCursor = 0;
-  for (const e of ctxEntries) {
-    const y = entryMessageYield(e); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
-    if (y < 0) return []; // compaction (or unknown) on the walked range → alignment INDETERMINATE → refuse safely
-    if (msgCursor + y > messages.length) return []; // raw branch vs compaction-aware messages misalign → refuse
-    const id = isRecord(e) ? readOwn(e, "id") : undefined;
-    if (typeof id === "string" && hideSet.has(id)) {
-      for (let j = msgCursor; j < msgCursor + y; j++) remove.push(j); // yield is 1 in practice; range is forward-compatible
+  // 3) RETAINED-TAIL WALK (compaction-aware; fixes BUG-002). getBranch() is RAW (compacted-away + compaction +
+  //    tail); event.messages is compaction-aware. The entries AFTER the LAST compaction are the "retained tail"
+  //    and map 1:1 to the LAST tailEntries.length messages. resolveCheckpoint KEEPS its bail-on-compaction
+  //    (contiguous-sweep semantics) — it is NOT touched here.
+  let lastCompactionIdx = -1;
+  for (let i = branchEntries.length - 1; i >= 0; i--) {
+    const t = isRecord(branchEntries[i]) ? readOwn(branchEntries[i], "type") : undefined;
+    if (t === "compaction") {
+      lastCompactionIdx = i;
+      break;
     }
-    msgCursor += y;
   }
 
-  // 5) remove is ascending by construction (root→leaf walk + monotonic msgCursor). Return it.
+  // 4) tailEntries = retained tail (entries AFTER the last compaction), context-message types ONLY. Reuse
+  //    entryMessageYield as the predicate (1 for message/custom_message/branch_summary; -1 otherwise → excluded).
+  //    Do NOT use isContextProducingType here — it INCLUDES compaction, which is wrong for the tail.
+  const tailEntries = branchEntries.slice(lastCompactionIdx + 1).filter((e) => entryMessageYield(e) > 0);
+
+  // 5) Retained tail ↔ the LAST tailEntries.length messages. If the tail is longer than messages → refuse safely.
+  const tailStartIdx = messages.length - tailEntries.length;
+  if (tailStartIdx < 0) return []; // raw branch vs compaction-aware messages misalign beyond recovery
+
+  // 6) Walk the tail; hide exactly the pinned entries. No-compaction case: tailStartIdx === 0 (legacy walk).
+  const remove: number[] = [];
+  tailEntries.forEach((e, k) => {
+    const id = isRecord(e) ? readOwn(e, "id") : undefined;
+    if (typeof id === "string" && hideSet.has(id)) {
+      remove.push(tailStartIdx + k); // this retained-tail entry ↔ messages[tailStartIdx + k]
+    }
+  });
+
+  // 7) remove is ascending by construction (tail walk is root→leaf; msgIdx monotonic). Return it.
   return remove;
 }
 

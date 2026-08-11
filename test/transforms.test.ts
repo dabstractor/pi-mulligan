@@ -739,6 +739,11 @@ function entry(id: string, type: BranchEntry["type"], extra: Record<string, unkn
   return { type, id, parentId: null, timestamp: "t", ...extra };
 }
 
+/** Build a minimal compaction-summary message (role/content are irrelevant to the resolver — only the count matters). */
+function compactionSummary(text = "summary"): MessageLike {
+  return { role: "system", content: text };
+}
+
 /** Build a mulligan:checkpoint LabelEntry pointing at targetId. */
 function labelEntry(id: string, targetId: string, name: string): BranchEntry {
   return { type: "label", id, parentId: null, timestamp: "t", targetId, label: `mulligan:checkpoint:${name}` };
@@ -1630,13 +1635,66 @@ describe("resolvePinnedHide — fix_design.md §Change 3 PINNED contract (basic 
     expect(resolvePinnedHide(msgs, branchGrown, ["e1", "e2"])).toEqual([0, 1]);
   });
 
-  it("(c) compaction refusal — a branch containing a compaction entry → [] (entryMessageYield returns -1 → refuse)", () => {
+  it("(c) compaction — pinned entry in the RETAINED TAIL is hidden (BUG-002 fix; was [] before)", () => {
+    // messages: 2 (no compaction-summary message in this minimal fixture; the algorithm maps the retained tail to
+    // the LAST N messages — only the count matters, not the content).
     const msgs: MessageLike[] = [user("u"), asst("c1")];
-    // compaction PASSES isContextProducingType but entryMessageYield(compaction) === -1 → walk returns []
+    // root→leaf: e1 (compacted-away head), eC (compaction), e2 (retained tail). lastCompactionIdx=1; tailEntries=[e2];
+    // tailStartIdx = 2 - 1 = 1 → e2 ↔ messages[1]. (Was [] before the fix — the old walk bailed on the compaction entry.)
     const branch: BranchEntry[] = [
       entry("e1", "message"), entry("eC", "compaction"), entry("e2", "message"),
     ];
-    expect(resolvePinnedHide(msgs, branch, ["e2"])).toEqual([]); // alignment INDETERMINATE → refuse safely
+    expect(resolvePinnedHide(msgs, branch, ["e2"])).toEqual([1]); // e2 is retained-tail → hidden
+  });
+
+  it("(f) compaction in head + pinned retained-tail toolGroup → hides them (BUG-002 production repro)", () => {
+    // messages: 4 (idx 0..3). The compaction-summary message's content is irrelevant — only the count matters.
+    const msgs: MessageLike[] = [user("u"), compactionSummary("s"), asst("c1"), result("c1")];
+    // root→leaf: e1 (compacted-away head), c1 (compaction), e3/e4 (retained tail).
+    // lastCompactionIdx=1; tailEntries=[e3,e4] (len 2); tailStartIdx = 4 - 2 = 2 → e3↔idx2, e4↔idx3.
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s", firstKeptEntryId: "e3" }),
+      entry("e3", "message"), entry("e4", "message"),
+    ];
+    // result(c1) at idx3 IS hidden (was [] before the fix → the whole toolGroup leaked into the model's view).
+    expect(resolvePinnedHide(msgs, branch, ["e3", "e4"])).toEqual([2, 3]);
+  });
+
+  it("(g) pinned entry in the COMPACTED-AWAY head → [] (gone from messages; no leak, no error)", () => {
+    const msgs: MessageLike[] = [user("u"), compactionSummary("s"), asst("c1")]; // 3 msgs
+    // root→leaf: e1 (compacted-away head), c1 (compaction), e3 (retained tail).
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s" }), entry("e3", "message"),
+    ];
+    // e1 is BEFORE the compaction (compacted-away head) → not in tailEntries → not matched → not hidden.
+    expect(resolvePinnedHide(msgs, branch, ["e1"])).toEqual([]);
+  });
+
+  it("(h) multiple compactions — only the LAST compaction's tail is retained", () => {
+    // messages: 2 (2nd compaction summary + the one retained-tail entry e3).
+    const msgs: MessageLike[] = [compactionSummary("s2"), asst("c1")];
+    // root→leaf: e1(msg), c1(compaction s1), e2(msg), c2(compaction s2), e3(msg).
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s1" }),
+      entry("e2", "message"), entry("c2", "compaction", { summary: "s2" }), entry("e3", "message"),
+    ];
+    // lastCompactionIdx=3 (c2); tailEntries=[e3] (len 1); tailStartIdx = 2 - 1 = 1 → e3↔idx1. e2 was compacted away by c2.
+    expect(resolvePinnedHide(msgs, branch, ["e3"])).toEqual([1]); // retained-tail entry hidden
+    expect(resolvePinnedHide(msgs, branch, ["e2"])).toEqual([]); // e2 compacted away by c2 → gone from messages
+  });
+
+  it("(i) no compaction on the branch → identical to the legacy forward walk (tailStartIdx === 0)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message"), entry("e3", "message")];
+    // lastCompactionIdx=-1; tailEntries=[e1,e2,e3] (len 3); tailStartIdx = 3 - 3 = 0 → legacy mapping.
+    expect(resolvePinnedHide(msgs, branch, ["e1", "e3"])).toEqual([0, 2]); // identical to test (a)
+  });
+
+  it("(j) defensive — tail longer than messages (alignment lost) → []", () => {
+    const msgs: MessageLike[] = [user("u")]; // 1 message
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")]; // 2 retained-tail entries
+    // tailEntries=[e1,e2] (len 2) > messages.length (1) → tailStartIdx = 1 - 2 = -1 → [].
+    expect(resolvePinnedHide(msgs, branch, ["e1"])).toEqual([]);
   });
 
   it("(d) defensive — non-array messages / branchEntries / hideEntryIds → [] each", () => {
@@ -1699,10 +1757,12 @@ describe("resolvePinnedHide — fix_design.md §Change 3 PINNED contract (basic 
   });
 
   it("malformed / non-record / throwing-Proxy entries → skipped defensively, never throws (E13)", () => {
-    const msgs: MessageLike[] = [user("u"), asst("c1")];
+    // 1 message + 1 real context entry keeps the tail well-aligned (garbage entries consume no message slots).
+    const msgs: MessageLike[] = [user("u")];
     const branch = [null, 42, "raw", entry("e1", "message")] as unknown as BranchEntry[]; // garbage + one good entry
     expect(() => resolvePinnedHide(msgs, branch, ["e1"])).not.toThrow();
-    // null/42/"raw" → isRecord false → isContextProducingType(undefined) false → filtered out; only e1 walks → idx0
+    // null/42/"raw" → isRecord false → entryMessageYield(undefined) === -1 → filtered out of the retained tail;
+    // only e1 remains → tailEntries=[e1] → tailStartIdx = 1 - 1 = 0 → e1 ↔ messages[0].
     expect(resolvePinnedHide(msgs, branch, ["e1"])).toEqual([0]);
   });
 
@@ -1877,10 +1937,10 @@ describe("permanent hiding across fires (BUG-001/002 regression)", () => {
     expect(out).toHaveLength(4);
   });
 
-  it("compaction refusal — pinned marker whose branch contains a compaction entry → nothing hidden (refuse; NO legacy fallback)", () => {
-    // resolvePinnedHide returns [] when a compaction entry is on the walk (entryMessageYield('compaction') === -1 → refuse).
-    // Because hideEntryIds.length > 0 already passed the dispatch gate, the ELSE chain is NOT entered → remove=[] → no-op.
-    // This fire the marker hides nothing; it retries next fire. (Falling back to legacy here would re-introduce BUG-001.)
+  it("compaction-aware hide — pinned RETAINED-TAIL entry is hidden across a compaction; pinned COMPACTED-HEAD entry is not (BUG-002 fix; NO legacy fallback)", () => {
+    // Pre-fix this asserted refusal ([]); post-fix resolvePinnedHide walks the retained tail around the compaction.
+    // Because hideEntryIds.length > 0 already passed the dispatch gate, the ELSE chain is NOT entered even when some
+    // pinned ids go unmatched (falling back to legacy here would re-introduce BUG-001).
     const msgs: MessageLike[] = [user("u"), asst("BAD"), result("BAD"), asst("RW"), result("RW"), custom("mulligan:note")];
     const branchWithCompaction: BranchEntry[] = [
       entry("e_u", "message"), entry("e_bad_a", "message"), entry("eC", "compaction"), // compaction between pinned ids
@@ -1890,10 +1950,14 @@ describe("permanent hiding across fires (BUG-001/002 regression)", () => {
       seq: 1, granularity: "last_tool_call_group", excludeToolCallId: "RW", hideEntryIds: ["e_bad_a", "e_bad_r"],
     };
     const out = filterPipeline(msgs, { rewinds: [marker], shrinks: [] }, cfg, branchWithCompaction);
-    // Refused → remove=[] → applyRewind no-op → SAME reference, nothing hidden this fire (no crash, no legacy fallback).
-    expect(out).toBe(msgs);
-    expect(out).toContain(msgs[1]); // BAD NOT hidden this fire (refusal); retries next fire when session stabilizes
-    expect(out).toContain(msgs[2]);
+    // Trace: lastCompactionIdx=2 (eC); tailEntries=[e_bad_r, e_rw_a, e_rw_r, e_note] (4); tailStartIdx = 6 - 4 = 2.
+    // e_bad_a is in the COMPACTED-AWAY HEAD (before eC) → not in tailEntries → unmatched (gone from messages).
+    // e_bad_r is retained-tail (k=0) → tailStartIdx+0 = 2 → msgs[2] (the BAD result) IS hidden this fire.
+    expect(out).not.toBe(msgs); // applyRewind produced a NEW array (one message hidden)
+    expect(out).not.toContain(msgs[2]); // BAD result (retained-tail pin) IS hidden this fire
+    expect(out).toContain(msgs[1]); // BAD assistant is the compacted-head pin → unmatched → still visible (correct)
+    expect(out).toContain(msgs[3]); // RW work untouched
+    expect(out).toContain(msgs[4]);
   });
 });
 
