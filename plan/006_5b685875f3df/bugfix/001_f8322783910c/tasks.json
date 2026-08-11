@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "BUG-001: Replace wall-clock suppressCheck with turn-based lower bound",
-              "status": "Researching",
+              "status": "Complete",
               "description": "spec/07 §5.3 (REQUIRED hard rule) says the per-turn drift nudge MUST NOT fire only 'for a turn in which the agent already issued a mulligan:rewind or mulligan:shrink'. The mechanism must be turn-based: a marker is 'during the metric's turn' iff it was created between the previous turn_end (previous metric's ts) and the current metric's ts. The implementation uses a fixed 10-minute wall-clock window (NUDGE_TURN_WINDOW_MS = 10*60*1000) which over-suppresses for ~10 minutes after ANY rewind/shrink. The data needed for the correct turn-based lower bound (recentMetrics) is now available via readMarkers but unused by suppressCheck.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Update filter.ts suppressCheck call site to pass recentMetrics",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -64,7 +64,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Rewrite resolvePinnedHide to use retained-tail walk (compaction-aware)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-002 and external_deps.md (getBranch vs event.messages distinction). resolvePinnedHide (src/transforms.ts:625-660) currently filters branchEntries to isContextProducingType (which INCLUDES compaction), walks forward via entryMessageYield, and returns [] the instant it hits a compaction entry (yield -1). isContextProducingType (transforms.ts:555) returns true for {message, custom_message, branch_summary, compaction}. entryMessageYield (transforms.ts:549) returns 1 for {message, custom_message, branch_summary} and -1 for everything else. The key insight: entries AFTER the last compaction on the branch are the 'retained tail' and each (type message/custom_message/branch_summary) maps to exactly 1 message in event.messages. The retained tail maps to the LAST tailEntries.length messages.\n2. INPUT: messages (MessageLike[] — compaction-aware, what the model sees), branchEntries (BranchEntry[] — root→leaf raw path from getBranch()), hideEntryIds (string[] — stable entry IDs pinned at marker creation). All unchanged from the current signature.\n3. LOGIC: Replace the forward-walk algorithm with a retained-tail walk:\n  (a) Defensive checks stay the same (non-array → [], empty hideEntryIds → [], build hideSet).\n  (b) Find lastCompactionIdx = index of the LAST entry on branchEntries with type === 'compaction' (scan from end; -1 if none).\n  (c) tailEntries = branchEntries.slice(lastCompactionIdx + 1).filter(e => type is 'message' | 'custom_message' | 'branch_summary'). Do NOT include 'compaction' (we are past it). Do NOT include 'label'/'custom' (not context-producing).\n  (d) tailStartIdx = messages.length - tailEntries.length. If tailStartIdx < 0 → return [] (alignment lost — defensive).\n  (e) Walk tailEntries forward: for entry at position k, msgIdx = tailStartIdx + k. If entry.id (string, via readOwn) ∈ hideSet → push msgIdx to remove.\n  (f) Return remove (ascending by construction). When lastCompactionIdx === -1 (no compaction), this degenerates to walking ALL context-producing entries (excluding compaction), tailStartIdx = messages.length - allEntries.length = 0 — identical to the current no-compaction behavior.\n  DO NOT change entryMessageYield or isContextProducingType (resolveCheckpoint still needs the bail-on-compaction behavior for its contiguous-sweep semantics). DO NOT change the function signature or return type (still number[], never null). The filterPipeline call site (transforms.ts:1065) passes resolvePinnedHide(messages, branch, hideEntryIds) — unchanged.\n4. OUTPUT: number[] — ascending message indices to hide. Non-empty when pinned entries are in the retained tail (the production case post-compaction). Empty when pinned entries are in the compacted-away head (correct — they're gone from messages) or on defensive failures.\n5. DOCS: [Mode A] Rewrite the JSDoc on resolvePinnedHide to document the retained-tail walk algorithm, explaining why compaction no longer causes a total bail, and that entries in the compacted head are correctly unmatched (they're absent from messages). Reference spec/08 E24.",

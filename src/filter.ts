@@ -307,16 +307,18 @@ export function contextHandler(
     // guard verbatim (P3.M3.T6.S1): gate on a non-empty recentMetrics window FIRST, then call the windowed
     // shouldNudge(recentMetrics, config) (it slices driftWindowTurns internally — firing on sustained growth:
     // moving average > threshold, or any window bloatHit; a single heavy turn amid small turns does NOT fire).
-    // injectNudge/suppressCheck still take the single LATEST metric (markers.metric) for the text + the
-    // time-window suppress heuristic. markers.metric !== null ⟺ recentMetrics.length > 0, so the reorder is
-    // logically equivalent EXCEPT shouldNudge is never called on an empty window (cleaner, defensive).
+    // injectNudge still takes the single LATEST metric (markers.metric) for the nudge text. suppressCheck now
+    //  takes (markers.metric, markers.recentMetrics, markers) — the turn-boundary lower bound
+    //  (recentMetrics[1].ts) replaces the old fixed time-window (BUG-001). markers.metric !== null ⟺
+    //  recentMetrics.length > 0, so the reorder is logically equivalent EXCEPT shouldNudge is never called on
+    //  an empty window (cleaner, defensive).
     if (
       config.nudges.perTurnDrift &&
       markers.recentMetrics &&
       markers.recentMetrics.length > 0 &&
       shouldNudge(markers.recentMetrics, config) &&
       markers.metric &&
-      !suppressCheck(markers.metric, markers) &&
+      !suppressCheck(markers.metric, markers.recentMetrics, markers) &&
       rt.rewindRefusedTurnIndex !== markers.metric.turnIndex   // [P4.M1.T2.S3] mute on a refused rewind this turn
     ) {
       messages = injectNudge(messages, markers.metric);
