@@ -1,0 +1,110 @@
+# Bug Fix Requirements
+
+## Overview
+End-to-end PRD validation of pi-mulligan. The implementation is unusually thorough and disciplined: all 955 unit/integration tests pass, tsc --noEmit is clean, fail-open is consistently applied, tool pairing is preserved by construction, and the marker/note/context-filter architecture matches the spec. The full unit suite is green. I confirmed the core rewind/shrink/cancel/checkpoint/audit data flows, the pairing invariant, protected-message enforcement, the pinned-hide permanence fix (pre-compaction), and the E22 retry/context-fraction guards. The issues I found are behavioral/PRD-compliance deviations rather than crashes or data loss: (1) the drift nudge is over-suppressed for ~10 minutes after any rewind/shrink because suppressCheck uses a wall-clock window instead of the spec's turn-based check — the previous metric needed for the correct lower bound is now available but unused; (2) after the first compaction in a session ALL pinned rewinds become no-ops (broader than the documented E24 limitation), so previously-hidden content leaks back into the model's view, breaking success criterion #1; (3) shouldNudge's moving-average+threshold-6000 does not satisfy spec §5.1 acceptance criterion (b) 'three ~4k turns in a row DO fire'; plus four minor issues (pendingBloatHits memory leak in a specific config, retry budget counting cancelled rewinds, a cancel no-op text mismatch, and checkpoint not honoring config.enabled). Each finding was reproduced with a targeted vitest probe (since removed) against the real source modules. No critical/data-loss bugs were found; hidden content always remains on disk (soft-delete guarantee holds) — the leaks are view-level.
+
+
+## Critical Issues (Must Fix)
+Issues that prevent core functionality from working.
+
+None.
+
+
+## Major Issues (Should Fix)
+Issues that significantly impact user experience or functionality.
+
+### Issue 1: Drift nudge (Nudge B) is wrongly suppressed for ~10 minutes after ANY rewind/shrink marker
+**Severity**: Major
+**ID**: BUG-001
+**Location**: src/nudges.ts:270 (NUDGE_TURN_WINDOW_MS), src/nudges.ts:397-411 (suppressCheck)
+
+**Description**:
+spec/07-preventive-and-nudges.md §5.3 (REQUIRED hard rule) says the per-turn drift nudge MUST NOT fire only 'for a turn in which the agent already issued a mulligan:rewind or mulligan:shrink', and prescribes a turn-based mechanism: 'collect the seqs of every marker created during the metric's turn (turn-boundary → turn_end)'. The implementation instead uses a fixed 10-minute wall-clock window (NUDGE_TURN_WINDOW_MS = 10*60*1000) in suppressCheck(): a marker is treated as 'during the metric's turn' iff its ts is in (metric.ts − 10min, metric.ts]. Because agent turns are typically seconds-to-minutes apart, a SINGLE rewind or shrink suppresses the drift nudge on every subsequent, unrelated turn for up to 10 minutes. This effectively disables the project's signature 'free ride' feature (the PRD calls Nudge B 'the non-obvious mechanism the project pivoted on') for a long window after any rewind/shrink — exactly the scenarios where sustained context growth is most likely. The data needed to implement the spec's turn-based lower bound (the previous metric's ts) is now available via readMarkers' recentMetrics (P3.M3.T3.S1 added it), but suppressCheck still takes only the latest metric + a fixed time window, so the stale 'no per-turn lower bound' justification in the code comment no longer holds.
+
+**Steps to Reproduce**:
+1. Set default config (perTurnDrift=true). 2. Have the agent issue one mulligan_shrink at wall-clock time T (e.g. shrink a bloated read). 3. Over the next several minutes, run normal turns that each add >6000 tokens of context (no further markers). 4. After 3 such turns, the windowed moving-average delta exceeds driftThresholdTokens (6000), so shouldNudge() returns true — but suppressCheck(latestMetric, markers) returns true because the shrink marker's ts (T) still falls inside (latestMetric.ts − 10min, latestMetric.ts], so the drift nudge is NOT injected. Confirmed by probe: suppressCheck({ts: T+2min}, {rewinds:[], shrinks:[{ts:T}]}) === true even though no marker was issued during the T+2min turn. The nudge only resumes ~10 minutes after the last marker.
+
+### Issue 2: Pinned rewinds stop working entirely after the first compaction (hidden content leaks back into the model's view)
+**Severity**: Major
+**ID**: BUG-002
+**Location**: src/transforms.ts:625-660 (resolvePinnedHide), src/transforms.ts:549-555 (entryMessageYield returning -1 for compaction), src/transforms.ts:543-546 (isContextProducingType includes 'compaction')
+
+**Description**:
+spec/08-edge-cases.md E24 frames the compaction interaction narrowly: 'a pinned rewind's hideEntryIds are walked via resolvePinnedHide, which returns [] when the pinned entries fall in the compacted-away head'. In reality resolvePinnedHide bails on ANY compaction entry anywhere on the branch: it filters getBranch() to context-producing types (which INCLUDES 'compaction') and returns [] the instant entryMessageYield(entry) returns the -1 'indeterminate' sentinel for a compaction entry (transforms.ts:651). Because getBranch() is the raw path (it carries compaction entries) and event.messages is compaction-aware, the alignment walk gives up on the whole branch, not just the compacted head. Net effect: once the FIRST auto-compaction fires in a session, EVERY pinned rewind (hideEntryIds-based, the production path) becomes a permanent no-op for the rest of the session, including rewinds whose targets are still present in the retained tail. The previously-hidden content therefore reappears verbatim in the model's filtered view on every subsequent inference — directly violating PRD success criterion #1 ('shed it so that no subsequent inference sees it') and the 'permanent soft-delete' guarantee. This is broader and more persistent than E24's 'bounded, transient limitation' wording implies (it does not self-heal; the compaction entry stays on the branch forever).
+
+**Steps to Reproduce**:
+Probe (filterPipeline/resolvePinnedHide, no Pi needed): messages=[user, compactionSummary, assistant(toolCall X), toolResult X(big)]; branch (getBranch raw)=[{type:'message',id:'e1'},{type:'compaction',id:'c1'},{type:'message',id:'e3'},{type:'message',id:'e4'}]; hideEntryIds=['e3','e4'] (the retained-tail toolGroup a rewind pinned). resolvePinnedHide(messages, branch, ['e3','e4']) returns [] → applyRewind no-ops → the BIG toolResult stays in the filtered view. The identical call WITHOUT the compaction entry on the branch correctly returns the hidden indices. So compaction anywhere on the branch defeats all pinned hides.
+
+### Issue 3: Drift nudge does NOT fire for 'three ~4k turns in a row' — explicit spec §5.1 acceptance criterion (b) is unmet
+**Severity**: Major
+**ID**: BUG-003
+**Location**: src/nudges.ts:326-334 (shouldNudge), src/config.ts DEFAULT_CONFIG driftThresholdTokens=6000 / driftWindowTurns=3
+
+**Description**:
+spec/07-preventive-and-nudges.md §5.1 lists three acceptance criteria for the windowed drift nudge, including (b) 'three ~4k turns in a row DO fire'. shouldNudge() implements a moving average over the last driftWindowTurns (default 3) and compares it strictly to driftThresholdTokens (default 6000). The moving average of three 4000-token turns is 4000, which is < 6000, so shouldNudge returns false and the nudge does not fire — directly contradicting acceptance criterion (b). The code comment acknowledges this ('Criterion 2 … correctly do NOT fire') and recharacterizes (b) as 'ILLUSTRATIVE', but the spec states (b) as a firm acceptance criterion alongside (a) and (c). The root cause is that the threshold was raised from 3000 to 6000 while keeping the moving-average algorithm; only a sum/M-of-N-style algorithm (or a lower threshold) would satisfy (b). (a) and (c) are met, but (b) is not. The drift nudge is a headline feature, so missing a stated acceptance criterion is a real PRD-compliance gap.
+
+**Steps to Reproduce**:
+shouldNudge([metric(4000,3), metric(4000,2), metric(4000,1)], defaultConfig) === false. moving-average = (4000+4000+4000)/3 = 4000 < 6000 → no fire. Spec §5.1 acceptance (b) says this scenario SHOULD fire. (Contrast: shouldNudge([8000,500,500]) avg=3000<6000 → no fire, which correctly satisfies (a).)
+
+
+## Minor Issues (Nice to Fix)
+Small improvements or polish items.
+
+### Issue 1: pendingBloatHits accumulates without bound when bloatReminder=true but perTurnDrift=false
+**Severity**: Minor
+**ID**: BUG-004
+**Location**: src/nudges.ts:200 (early return before clear), src/nudges.ts:142 (push), src/nudges.ts:218 (the only clear)
+
+**Description**:
+bloatReminderHandler (Nudge A) pushes a {toolName, approxTokens} entry into rt.pendingBloatHits for every result over the bloat threshold. The ONLY place pendingBloatHits is cleared is inside turnEndMetricHandler (nudges.ts:218, `rt.pendingBloatHits = []`), which runs AFTER the `if (!config.enabled || !config.nudges.perTurnDrift) return;` early-return at nudges.ts:200. So in the valid configuration where the user enables the inline bloat reminder but disables the per-turn drift nudge (bloatReminder:true, perTurnDrift:false), turnEndMetricHandler returns before the clear, and pendingBloatHits grows by one entry per bloated result for the entire session (until session_start resets the runtime). It is never read in this configuration, so it is dead data rather than a correctness bug, but it is an unbounded in-memory accumulation on the tool_result hot path.
+
+**Steps to Reproduce**:
+setConfig({enabled:true, nudges:{bloatReminder:true, perTurnDrift:false}}). Fire bloatReminderHandler twice with a >threshold bash result, then turnEndMetricHandler. rt.pendingBloatHits.length is 2 (not cleared). Fire one more bloat result + another turn_end → length is 3. It keeps growing every turn.
+
+### Issue 2: Per-prompt retry budget counts rewinds that were subsequently cancelled
+**Severity**: Minor
+**ID**: BUG-005
+**Location**: src/tools/rewind.ts:247-281 (countRetriesAtLatestPrompt counts all mulligan:rewind entries, no cancel-awareness)
+
+**Description**:
+The E22 per-prompt retry budget (countRetriesAtLatestPrompt) counts every `mulligan:rewind` custom entry appended after the latest user-prompt entry, with no exclusion for rewinds later retired by a `mulligan:cancel`. spec/08 E22 defines a retry as 'every last_turn/(to_previous_prompt), plus a last_tool_call_group/checkpoint rewind whose resolved target is at/after that user message' — i.e. rewinds that actually re-land at the prompt. A cancelled rewind never took effect (readMarkers drops it before the filter sees it), so it did not re-land anywhere, yet it still consumes budget. An agent that rewinds to the wrong target, cancels it, and rewinds again to the correct target burns 2 budget slots for 1 effective rewind; repeated cancel/rewind cycles can hit maxRetriesPerPrompt (default 5) prematurely and refuse a legitimate rewind.
+
+**Steps to Reproduce**:
+Session entries (in order): user(msg), assistant, custom mulligan:rewind id=rw1, custom_message mulligan:note, custom mulligan:cancel targetId=rw1, custom mulligan:rewind id=rw2. countRetriesAtLatestPrompt returns 2 (both rw1 and rw2), even though rw1 is cancelled and only rw2 is active. With maxRetriesPerPrompt=2 the next legitimate rewind would be refused.
+
+### Issue 3: mulligan_cancel 'not found' text says 'with that id' even when cancelling by target
+**Severity**: Minor
+**ID**: BUG-006
+**Location**: src/tools/cancel.ts:393
+
+**Description**:
+spec/05-tools.md §5 specifies two distinct no-op texts: 'Mulligan: no active marker found for that target — nothing to cancel.' (target path) and the markerId variant. The implementation returns a single hardcoded string 'Mulligan: no active marker found with that id — nothing to cancel.' for BOTH the target-not-found and markerId-not-found cases (cancel.ts:393). When the agent cancels by `target` (the preferred, documented path) and nothing matches, it is told 'with that id', which is misleading (no id was supplied) and diverges from the spec's verbatim text. The existing test (cancel.test.ts:560) pins this unified string intentionally, so it is a deliberate deviation rather than an accident, but it is still a spec-text mismatch on the tool's primary interaction path.
+
+**Steps to Reproduce**:
+Call mulligan_cancel({target:{by_tool_name:'read', occurrence:'last'}}) in a session with no active markers covering that target. Result text is 'Mulligan: no active marker found with that id — nothing to cancel.' Spec §5 says it should reference 'that target'.
+
+### Issue 4: mulligan_checkpoint is not gated by config.enabled — violates spec E14 'tools refuse when disabled'
+**Severity**: Minor
+**ID**: BUG-007
+**Location**: src/tools/checkpoint.ts:27-28 (no config gate), checkpointExecute body (no getConfig()/enabled check)
+
+**Description**:
+spec/08-edge-cases.md E14 states that when config.enabled === false 'tools refuse with "Mulligan is disabled." The extension is a no-op.' rewind, shrink, audit, and cancel all gate on the master switch, but mulligan_checkpoint performs no config check at all (checkpoint.ts documents 'NO config gate here' as intentional because checkpoints are 'inert labels'). Consequently, with the extension disabled (enabled:false), the context filter is pass-through, the other four tools refuse, yet mulligan_checkpoint still happily writes a `mulligan:checkpoint:` label to the session. This is a (small) mutation performed by an extension the operator believes is fully disabled, inconsistent with E14's blanket 'tools refuse' / 'no-op' contract. (The VERIFICATION.md notes this is deliberate, but it remains a deviation from the stated E14 behavior.)
+
+**Steps to Reproduce**:
+setConfig({enabled:false, ...}). Call mulligan_checkpoint({name:'x'}) in a session that has at least one real message. It succeeds ('Mulligan: checkpoint x set at entry …') and persists a label, instead of refusing 'Mulligan is disabled.' like the other four tools.
+
+## Testing Summary
+- Total bugs found: 7
+- Critical: 0
+- Major: 3
+- Minor: 4
+
+## Recommendations
+- BUG-001: change suppressCheck to a turn-based lower bound using recentMetrics (e.g. lower bound = the 2nd-newest metric's ts, or stamp each marker with the turnIndex of its creating turn and compare to the metric's turnIndex), per spec §5.3.
+- BUG-002: make resolvePinnedHide compaction-aware instead of bailing entirely — map compaction entries to their yielded message count (summary + retainedTail) so retained-tail pinned hides keep working after compaction; or at minimum document that ALL pinned hides no-op post-compaction (not just head entries).
+- BUG-003: either lower driftThresholdTokens back toward a value where moving-average satisfies (b) (e.g. ~4000), or switch shouldNudge to an M-of-N/sum-style algorithm that fires on sustained sub-threshold growth, to meet all three §5.1 acceptance criteria.
+- BUG-004: clear rt.pendingBloatHits at the top of turnEndMetricHandler (before the perTurnDrift early-return), or only push to it when perTurnDrift is also enabled.
+- BUG-005: have countRetriesAtLatestPrompt subtract rewinds whose data.id is targeted by a later mulligan:cancel on the branch.
+- BUG-006: emit the spec's 'for that target' text on the target-not-found path and reserve 'with that id' for the markerId path.
+- BUG-007: add a getConfig().enabled gate to mulligan_checkpoint returning 'Mulligan is disabled.' to satisfy E14's 'tools refuse' contract.
