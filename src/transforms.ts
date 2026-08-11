@@ -956,6 +956,27 @@ export function resolvePinnedShrink(
  *                       via resolvePinnedShrink — absent → a pinned shrink no-ops this fire (live shrinks ignore it)
  * @returns a NEW array with the matched message's content substituted; the SAME array reference on a no-op
  */
+
+/**
+ * stampShrink — wrap a shrink's RAW replacement in the render-time `<context-shrunk>` awareness envelope (spec/06
+ * §5.1; spec/08 E25). Gives the model a durable, in-context signal that a shrink occurred HERE — co-located with
+ * the artifact it scans when deciding what else to reclaim, so it does not redundantly re-shrink already-compact
+ * content (the original substring is gone after a shrink → a redundant same-target call resolves to nothing → the
+ * tool returns an honest `Matched: no`).
+ *
+ * RENDER-ONLY: this wrapper is applied ONLY to the rendered content array emitted by applyShrink/applyShrinkAt; it
+ * is NEVER persisted onto the marker. The marker's stored `replacement` field stays the raw model-authored summary
+ * (audit / cancel target resolution / any future restore see it unwrapped — spec/04 §4, spec/05 §2). FIXED format
+ * (not configurable); ~3 tokens, negligible vs. the context saved. A non-string/empty replacement still stamps
+ * (yielding an empty-body envelope) — harmless and still signals "shrunk".
+ */
+const SHRUNK_OPEN = "<context-shrunk>";
+const SHRUNK_CLOSE = "</context-shrunk>";
+/** EXPORTED so tests + audit can reference the SAME render format (single source of truth — spec/06 §5.1). */
+export function stampShrink(rep: string): string {
+  return `${SHRUNK_OPEN}\n${rep}\n${SHRUNK_CLOSE}`;
+}
+
 export function applyShrink(
   messages: MessageLike[],
   marker: { target: ShrinkTarget; replacement: string; pinnedEntryId?: string },
@@ -985,7 +1006,7 @@ export function applyShrink(
 
   const orig = messages[i];
   const rep = readOwn(marker, "replacement");
-  const text = typeof rep === "string" ? rep : "";
+  const text = stampShrink(typeof rep === "string" ? rep : "");   // spec/06 §5.1 — render-time awareness stamp (raw replacement stays unstamped on the marker)
   const newContent: ContentBlock[] = [{ type: "text", text }];
 
   // Clone orig's fields via spread + override content. {...orig} preserves role/toolCallId/toolName/isError/customType/…
@@ -1034,7 +1055,7 @@ function applyShrinkAt(
 
   const orig = messages[i];
   const rep = readOwn(marker, "replacement");
-  const text = typeof rep === "string" ? rep : "";
+  const text = stampShrink(typeof rep === "string" ? rep : "");   // spec/06 §5.1 — render-time awareness stamp (DRY twin of applyShrink's; raw replacement stays unstamped on the marker)
   const newContent: ContentBlock[] = [{ type: "text", text }];
 
   // Clone orig's fields via spread + override content (pairing + role preserved — spec/06 §5:145 / spec/08 E19).

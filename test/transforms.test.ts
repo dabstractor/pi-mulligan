@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, resolvePinnedShrink, applyRewind, applyShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, resolvePinnedShrink, applyRewind, applyShrink, stampShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -1044,7 +1044,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     const msgs: MessageLike[] = [user("u"), asst("call-A"), bloated];
     const out = applyShrink(msgs, { target: { by_tool_call_id: "call-A" }, replacement: "[shrunk]" });
     expect(out).toHaveLength(3);
-    expect(textOf(out[2])).toBe("[shrunk]");        // content replaced
+    expect(textOf(out[2])).toBe(stampShrink("[shrunk]"));        // content replaced (wrapped in the spec/06 §5.1 awareness stamp)
     expect(out[2].role).toBe("toolResult");         // preserved
     expect(out[2].toolCallId).toBe("call-A");       // preserved → pairing untouched (spec/06 §5:145)
     expect(out[2].toolName).toBe("grep");           // preserved
@@ -1068,9 +1068,9 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     ];
     // Sequential application: the first shrink preserves toolCallId "c", so the second re-matches the same message.
     const once = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "first" });
-    expect(textOf(once[2])).toBe("first");
+    expect(textOf(once[2])).toBe(stampShrink("first"));
     const twice = applyShrink(once, { target: { by_tool_call_id: "c" }, replacement: "second" });
-    expect(textOf(twice[2])).toBe("second");        // last wins
+    expect(textOf(twice[2])).toBe(stampShrink("second"));        // last wins (stamp appears once — never nested)
     expect(twice[2].toolCallId).toBe("c");          // still paired after both substitutions
   });
 
@@ -1080,7 +1080,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     const other: MessageLike = { ...result("c3"), toolName: "read", content: [{ type: "text", text: "ro" }] };
     const msgs: MessageLike[] = [user("u"), asst("c1"), r1, asst("c2"), r2, asst("c3"), other];
     const out = applyShrink(msgs, { target: { by_tool_name: "grep", occurrence: "last" }, replacement: "L" });
-    expect(textOf(out[4])).toBe("L");               // the LAST grep result (index 4)
+    expect(textOf(out[4])).toBe(stampShrink("L"));               // the LAST grep result (index 4)
     expect(textOf(out[2])).toBe("r1");              // the FIRST grep result untouched
     expect(textOf(out[6])).toBe("ro");              // the non-grep result untouched
   });
@@ -1090,7 +1090,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     const r2: MessageLike = { ...result("c2"), toolName: "grep", content: [{ type: "text", text: "r2" }] };
     const msgs: MessageLike[] = [user("u"), asst("c1"), r1, asst("c2"), r2];
     const out = applyShrink(msgs, { target: { by_tool_name: "grep", occurrence: "first" }, replacement: "F" });
-    expect(textOf(out[2])).toBe("F");               // the FIRST grep result (index 2)
+    expect(textOf(out[2])).toBe(stampShrink("F"));               // the FIRST grep result (index 2)
     expect(textOf(out[4])).toBe("r2");              // the LAST grep result untouched
   });
 
@@ -1098,14 +1098,14 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     const big: MessageLike = { ...result("c"), content: [{ type: "text", text: "error: ENOSPC at /disk" }] };
     const msgs: MessageLike[] = [user("hello"), asst("c"), big];
     const out = applyShrink(msgs, { target: { by_content_includes: "ENOSPC" }, replacement: "[err]" });
-    expect(textOf(out[2])).toBe("[err]");           // the toolResult at index 2 matched
+    expect(textOf(out[2])).toBe(stampShrink("[err]"));           // the toolResult at index 2 matched
     expect(out[2].role).toBe("toolResult");
   });
 
   it("spec/08 E19 — by_content_includes matches a NON-toolResult (user) → content replaced, role PRESERVED", () => {
     const msgs: MessageLike[] = [user("find this token please"), asst("c"), result("c")];
     const out = applyShrink(msgs, { target: { by_content_includes: "token" }, replacement: "[redacted]" });
-    expect(textOf(out[0])).toBe("[redacted]");      // the user message at index 0 matched
+    expect(textOf(out[0])).toBe(stampShrink("[redacted]"));      // the user message at index 0 matched
     expect(out[0].role).toBe("user");               // role PRESERVED (E19) — not turned into a toolResult
   });
 
@@ -1184,7 +1184,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
       { target: { by_tool_name: "read", occurrence: "last" }, replacement: "[shrunk]", pinnedEntryId: "e_old" },
       branch,
     );
-    expect(textOf(out[2])).toBe("[shrunk]"); // OLD read (pinned e_old) substituted
+    expect(textOf(out[2])).toBe(stampShrink("[shrunk]")); // OLD read (pinned e_old) substituted
     expect(out[2].toolCallId).toBe("c1");    // pairing preserved
     expect(textOf(out[4])).toBe("NEW READ"); // NEW read UNTOUCHED (did NOT drift to the live "last" match)
     expect(out[4]).toBe(msgs[4]);            // by reference — never even read
@@ -1208,13 +1208,55 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
       user("u"), asst("c1"), { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD" }] },
     ];
     const out = applyShrink(msgs, { target: { by_tool_name: "read", occurrence: "last" }, replacement: "[s]" });
-    expect(textOf(out[2])).toBe("[s]");
+    expect(textOf(out[2])).toBe(stampShrink("[s]"));
   });
 
   it("returns MessageLike[] (resolveShrinkTarget returns number | null)", () => {
     expectTypeOf(applyShrink([], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(applyShrink([user("u")], { target: { by_tool_call_id: "x" }, replacement: "r" })).toEqualTypeOf<MessageLike[]>();
     expectTypeOf(resolveShrinkTarget([], { by_tool_call_id: "x" })).toEqualTypeOf<number | null>();
+  });
+});
+
+describe("stampShrink — render-time awareness envelope (spec/06 §5.1 / spec/08 E25 / spec/10 §1.5)", () => {
+  // NL = newline char, built WITHOUT a hand-typed escape so the exact-format assertion is robust to source-level
+  // backslash escaping (a literal "\n" in source would compare against backslash+n, not a newline).
+  const NL = String.fromCharCode(10);
+
+  it("FIXED format: <context-shrunk> NL <rep> NL </context-shrunk> (the model-facing contract)", () => {
+    expect(stampShrink("sum")).toBe(`<context-shrunk>${NL}sum${NL}</context-shrunk>`);
+    // multi-line replacement stays verbatim inside the envelope
+    expect(stampShrink(`a${NL}b`)).toBe(`<context-shrunk>${NL}a${NL}b${NL}</context-shrunk>`);
+  });
+
+  it("applyShrink wraps the rendered content via stampShrink (the awareness signal is in-context)", () => {
+    const bloated: MessageLike = { ...result("c"), content: [{ type: "text", text: "BLOATED" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c"), bloated];
+    const out = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "compact" });
+    expect((out[2].content as Array<{ text?: string }>)[0].text).toBe(stampShrink("compact"));
+    expect((out[2].content as Array<{ text?: string }>)[0].text).toContain("<context-shrunk>");
+  });
+
+  it("RENDER-ONLY: the marker's stored replacement is NOT mutated (raw — audit/cancel/restore see it unwrapped)", () => {
+    const bloated: MessageLike = { ...result("c"), content: [{ type: "text", text: "BLOATED" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c"), bloated];
+    const marker = { target: { by_tool_call_id: "c" } as ShrinkTarget, replacement: "raw summary" };
+    applyShrink(msgs, marker);
+    expect(marker.replacement).toBe("raw summary"); // untouched — the stamp is render-only, never persisted onto the marker
+  });
+
+  it("two shrinks same target, seq order → stamp appears EXACTLY ONCE (never nested)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c"), { ...result("c"), content: [{ type: "text", text: "BIG" }] }];
+    const once = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "first" });
+    const twice = applyShrink(once, { target: { by_tool_call_id: "c" }, replacement: "second" });
+    const text = (twice[2].content as Array<{ text?: string }>)[0].text ?? "";
+    expect(text).toBe(stampShrink("second"));
+    expect(text.split("<context-shrunk>").length - 1).toBe(1); // exactly one open tag — never nested
+    expect(text.split("</context-shrunk>").length - 1).toBe(1);
+  });
+
+  it("a malformed/empty replacement STILL stamps (empty-body envelope — harmless, still signals 'shrunk')", () => {
+    expect(stampShrink("")).toBe(`<context-shrunk>${NL}${NL}</context-shrunk>`);
   });
 });
 
@@ -1335,7 +1377,7 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
       };
       const out = filterPipeline(msgs, markers, cfg);
       expect(out).toHaveLength(4);                                  // a1/r1 removed by rewind
-      expect(out.some((m) => textOf(m) === "[shrunk]")).toBe(false); // shrink no-op'd (target gone)
+      expect(out.some((m) => textOf(m) === stampShrink("[shrunk]"))).toBe(false); // shrink no-op'd (target gone) — and no stamped body either
     });
 
     it("spec/10 §1.9 bullet 3 — protected message → rewind skipped (first user never removed)", () => {
@@ -1369,8 +1411,8 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
       };
       const out = filterPipeline(msgs, markers, cfg);
       expect(out).toHaveLength(5);
-      expect(textOf(out[2])).toBe("[s1]");
-      expect(textOf(out[4])).toBe("[s2]");
+      expect(textOf(out[2])).toBe(stampShrink("[s1]"));
+      expect(textOf(out[4])).toBe(stampShrink("[s2]"));
     });
 
     it("last_turn rewind through the pipeline keeps the rewind's own unit + the note", () => {
@@ -1426,7 +1468,7 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
         shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[shrunk]", { pinnedEntryId: "e_old" })],
       };
       const out = filterPipeline(msgs, markers, cfg, branchEntries);
-      expect(textOf(out[2])).toBe("[shrunk]"); // OLD read (pinned) substituted
+      expect(textOf(out[2])).toBe(stampShrink("[shrunk]")); // OLD read (pinned) substituted
       expect(out[2].toolCallId).toBe("c1");
       expect(textOf(out[4])).toBe("NEW READ"); // NEW read UNTOUCHED — no drift
     });
@@ -1441,7 +1483,7 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
         shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[s]")],
       };
       const out = filterPipeline(msgs, markers, cfg, []);
-      expect(textOf(out[2])).toBe("[s]");
+      expect(textOf(out[2])).toBe(stampShrink("[s]"));
     });
 
     it("defensive: no markers → SAME reference; non-array messages → []; non-record markers → pass-through", () => {
@@ -2157,7 +2199,7 @@ describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink
     // The shrink NO-OP'd: no "SHRUNK" text anywhere (its target — result(A) — was already removed; resolveShrinkTarget → null).
     const hasShrunk = out.some((m) => {
       const c = (m as MessageLike).content;
-      if (Array.isArray(c)) return c.some((b) => b && typeof b === "object" && (b as Record<string, unknown>).text === "SHRUNK");
+      if (Array.isArray(c)) return c.some((b) => b && typeof b === "object" && (b as Record<string, unknown>).text === stampShrink("SHRUNK"));
       return false;
     });
     expect(hasShrunk).toBe(false);
@@ -2192,7 +2234,7 @@ describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink
     const shrunk = out.find((m) => (m as MessageLike).role === "toolResult" && (m as MessageLike).toolCallId === "read");
     expect(shrunk).toBeDefined();
     const c = (shrunk as MessageLike).content;
-    expect(Array.isArray(c) && c.some((b) => b && typeof b === "object" && (b as Record<string, unknown>).text === "[SHRUNK]")).toBe(true);
+    expect(Array.isArray(c) && c.some((b) => b && typeof b === "object" && (b as Record<string, unknown>).text === stampShrink("[SHRUNK]"))).toBe(true);
     // pairing intact: the toolResult's toolCallId still matches asst(read)'s call id.
     expect((shrunk as MessageLike).toolCallId).toBe("read");
   });

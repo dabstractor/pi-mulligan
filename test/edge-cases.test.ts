@@ -25,6 +25,7 @@ import {
   resolveLastToolCallGroup,
   resolveLastTurn,
   applyShrink,
+  stampShrink,
   filterPipeline,
   protectedOk,
   type Unit,
@@ -999,7 +1000,7 @@ describe("E17 — Two shrinks target the same message (last-wins by seq, not ins
     const shrunkResult = out.find((m) => m.role === "toolResult") as MessageLike | undefined;
     expect(shrunkResult, "the toolResult survived the shrink (role preserved)").toBeDefined();
     const block = (shrunkResult as MessageLike).content as Array<Record<string, unknown>>;
-    expect(block[0].text).toBe("WINNER");
+    expect(block[0].text).toBe(stampShrink("WINNER")); // higher-seq replacement wins, wrapped in the §5.1 stamp
   });
 });
 
@@ -1035,7 +1036,7 @@ describe("E19 — Shrink target is a non-toolResult message (role preserved)", (
     expect(out).toHaveLength(1);
     expect(out[0].role).toBe("user"); // role preserved (E19)
     const block = out[0].content as Array<Record<string, unknown>>;
-    expect(block[0].text).toBe("X");
+    expect(block[0].text).toBe(stampShrink("X"));
   });
 
   it("applyShrink on a text ASSISTANT message → role 'assistant' preserved, content replaced", () => {
@@ -1044,7 +1045,7 @@ describe("E19 — Shrink target is a non-toolResult message (role preserved)", (
     expect(out).toHaveLength(1);
     expect(out[0].role).toBe("assistant"); // role preserved
     const block = out[0].content as Array<Record<string, unknown>>;
-    expect(block[0].text).toBe("Y");
+    expect(block[0].text).toBe(stampShrink("Y"));
   });
 
   it("filterPipeline pairing is unaffected (no toolResult involved)", () => {
@@ -1059,7 +1060,7 @@ describe("E19 — Shrink target is a non-toolResult message (role preserved)", (
     expectPairingInvariant(out, partitionIntoUnits(out));
     const shrunk = out.find((m) => {
       const c = m.content;
-      return Array.isArray(c) && c.some((b) => (b as Record<string, unknown>)?.text === "SUMMARY");
+      return Array.isArray(c) && c.some((b) => (b as Record<string, unknown>)?.text === stampShrink("SUMMARY"));
     });
     expect(shrunk?.role).toBe("assistant");
   });
