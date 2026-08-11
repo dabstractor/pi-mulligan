@@ -151,14 +151,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "BUG-005: Exclude cancelled rewinds from the per-prompt retry budget",
-              "status": "Researching",
+              "status": "Complete",
               "description": "countRetriesAtLatestPrompt counts every mulligan:rewind entry after the latest user prompt, with no exclusion for rewinds retired by a later mulligan:cancel. A cancelled rewind never took effect but still consumes budget.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Make countRetriesAtLatestPrompt cancel-aware (subtract cancelled rewinds)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-005. countRetriesAtLatestPrompt (src/tools/rewind.ts:247-281) finds the last user-prompt entry, then counts entries after it where type === 'custom' && customType === 'mulligan:rewind'. A mulligan:cancel entry has type === 'custom', customType === 'mulligan:cancel', and data.targetId === the cancelled marker's uuid (data.id). readMarkers (src/markers.ts / src/filter.ts:120-204) builds cancelledIds the same way: scans for mulligan:cancel entries, reads data.targetId, drops markers whose data.id ∈ that set. The rewind marker's uuid is in entry.data.id.\n2. INPUT: ctx (ExtensionContext — sessionManager.getEntries() FRESH).\n3. LOGIC: In countRetriesAtLatestPrompt, after the existing rewind-count loop, ALSO scan the same entries (after latestPromptIndex) for mulligan:cancel entries. For each cancel entry, read data.targetId. Then re-scan the counted rewind entries: for each counted rewind, read its data.id; if that id matches any cancel's targetId, subtract it from the count. Implementation approach: (a) Build a Set<string> cancelledRewindIds from all mulligan:cancel entries after latestPromptIndex (read data.targetId via defensive access). (b) In the rewind-counting loop, for each mulligan:rewind entry, read its data.id; if data.id ∈ cancelledRewindIds, do NOT increment count (skip it). This is cleaner than subtract-after-counting. Read data.id and data.targetId defensively (try/catch per entry, mirroring the existing Proxy-safe pattern). The OVER-APPROXIMATION comment should be updated to note that cancelled rewinds are now excluded.\n4. OUTPUT: number — count of ACTIVE (non-cancelled) mulligan:rewind entries after the latest user prompt. Never throws (E13).\n5. DOCS: [Mode A] Update the JSDoc on countRetriesAtLatestPrompt to document the cancel-exclusion logic.",
@@ -174,14 +174,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "BUG-006: Split cancel no-op text by resolution path (target vs markerId)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "cancel.ts:393 returns a single hardcoded string 'Mulligan: no active marker found with that id — nothing to cancel.' for BOTH the target-not-found and markerId-not-found cases. spec/05 §5 specifies two distinct texts.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Emit spec-correct no-op text for target vs markerId resolution paths",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-006. cancelExecute (src/tools/cancel.ts) resolves the marker via two paths: (3a) MARKERID PATH — when params.markerId is a non-empty string (scans entries for matching customType mulligan:rewind/shrink with id === markerId); (3b) TARGET PATH — when params.target is set (resolveTargetUuid resolves the target to a covering marker). If neither path yields a targetUuid, step 4 (cancel.ts:393) returns the not-found no-op. The current code returns ONE hardcoded string regardless of which path was attempted. The existing test at test/tools/cancel.test.ts:560 pins this unified string and must be updated.\n2. INPUT: params (the cancel tool params — has optional markerId?: string and optional target?: ShrinkTarget-like). The resolution already happened in steps 3a/3b.\n3. LOGIC: Before the `if (targetUuid === null)` check at cancel.ts:392, determine which path was attempted: `const usedMarkerId = typeof params.markerId === 'string' && params.markerId.length > 0;`. In the not-found block, emit: if usedMarkerId → 'Mulligan: no active marker found with that id — nothing to cancel.' (unchanged); else (target path or neither) → 'Mulligan: no active marker found for that target — nothing to cancel.' (the spec/05 §5 verbatim target-path text). The details stay { cancelled: false }.\n4. OUTPUT: The correct no-op text per the resolution path. No behavior change beyond the text.\n5. DOCS: none — tool result text is not externally documented (it's agent-facing runtime text, not a config/API surface). The existing cancel.test.ts:560 test that pins the unified string must be updated to assert the correct path-specific text.",

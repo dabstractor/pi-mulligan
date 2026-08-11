@@ -233,16 +233,25 @@ function countRewindMarkers(ctx: ExtensionContext): number {
  * countRetriesAtLatestPrompt — the E22 per-prompt retry-budget counter (step 4b). Finds the LAST entry whose
  * `type === "message"` AND whose `message.role === "user"` (the latest user prompt), then counts entries at
  * index > that index where `type === "custom" && customType === "mulligan:rewind"` (rewind markers appended
- * AFTER the latest user message = rewinds during this turn that re-land at the prompt). Returns 0 when there
- * is no user-message entry (no prompt → no budget consumption). Defensive (never throws; a throwing-Proxy
- * entry, a non-array, or a throwing getEntries → the entry is skipped / the count is 0). Module-local.
+ * AFTER the latest user message = rewinds during this turn that re-land at the prompt), EXCLUDING rewinds
+ * retired by a `mulligan:cancel` (BUG-005: a cancelled rewind never took effect → it did not re-land at the
+ * prompt, so it must not consume budget). Returns 0 when there is no user-message entry (no prompt → no
+ * budget consumption). Defensive (never throws; a throwing-Proxy entry, a non-array, or a throwing getEntries
+ * → the entry is skipped / the count is 0). Module-local.
+ *
+ * CANCEL-EXCLUSION (BUG-005): before counting, scans the same post-prompt slice for `mulligan:cancel` entries
+ * and collects their `data.targetId` into a Set (mirrors readMarkers' `cancelledIds` in src/filter.ts — the
+ * same uuid-by-targetId mechanism that drops cancelled markers from the filter). A rewind whose `data.id` is
+ * in that Set is skipped. Order-independent (full cancel scan, then count). A rewind with an unreadable
+ * `data.id` is COUNTED — never exclude on bad data (defensive polarity matches readMarkers' "keep on bad id";
+ * here "keep" = "count", the conservative direction for a retry budget).
  *
  * OVER-APPROXIMATION (v1 entry-position): for `last_tool_call_group`/`checkpoint` rewinds this counts a rewind
  * issued THIS turn even if its resolved target was a PRIOR turn's group (the marker is appended at the end
  * regardless). The spec's intent — arrest the same-prompt loop — is met; precise message-list resolution
- * (excluding a tool-group rewind whose target precedes the latest prompt) is a future refinement. Advancing
- * to a new user prompt naturally resets the count (the new prompt becomes the latest → prior rewinds are
- * before it).
+ * (excluding a tool-group rewind whose target precedes the latest prompt) is a future refinement. (Cancelled
+ * rewinds, by contrast, ARE now excluded — see CANCEL-EXCLUSION above.) Advancing to a new user prompt
+ * naturally resets the count (the new prompt becomes the latest → prior rewinds are before it).
  */
 function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
   let entries: unknown;
@@ -267,14 +276,41 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
   }
   if (latestPromptIndex === -1) return 0; // no user prompt → no budget consumption
 
-  // Count mulligan:rewind markers appended AFTER the latest user prompt.
+  // BUG-005: collect the uuid ids of rewinds RETIRED by a mulligan:cancel on the branch, so cancelled rewinds
+  // are excluded from the budget (a cancelled rewind never took effect → it did not re-land at the prompt).
+  // Mirrors readMarkers' cancelledIds (src/filter.ts): scan ALL cancel entries after the latest prompt
+  // (order-independent — a cancel may appear after the rewind it retires), read data.targetId defensively.
+  // A malformed cancel (non-string / empty / missing targetId) is skipped (fail-open, never throw).
+  const cancelledRewindIds = new Set<string>();
+  for (let i = latestPromptIndex + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown; data?: { targetId?: unknown } };
+      if (ee.type === "custom" && ee.customType === "mulligan:cancel") {
+        const targetId = ee.data?.targetId;
+        if (typeof targetId === "string" && targetId.length > 0) cancelledRewindIds.add(targetId);
+      }
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+
+  // Count ACTIVE (non-cancelled) mulligan:rewind markers appended AFTER the latest user prompt. A rewind
+  // whose data.id ∈ cancelledRewindIds is SKIPPED (retired by a cancel). A rewind with an unreadable data.id
+  // is COUNTED — never exclude on bad data (defensive polarity matches readMarkers' "keep on bad id": here
+  // "keep" = "count", the conservative direction for a retry budget).
   let count = 0;
   for (let i = latestPromptIndex + 1; i < entries.length; i++) {
     const e = entries[i];
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      const ee = e as { type?: unknown; customType?: unknown };
-      if (ee.type === "custom" && ee.customType === "mulligan:rewind") count++;
+      const ee = e as { type?: unknown; customType?: unknown; data?: { id?: unknown } };
+      if (ee.type === "custom" && ee.customType === "mulligan:rewind") {
+        const id = ee.data?.id;
+        if (typeof id === "string" && cancelledRewindIds.has(id)) continue; // cancelled → skip
+        count++;
+      }
     } catch {
       // a throwing-Proxy entry → skip (never throw on the tool hot path)
     }

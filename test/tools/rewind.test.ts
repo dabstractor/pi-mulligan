@@ -208,6 +208,16 @@ function rewindEntry(seq = 1): { type: "custom"; customType: "mulligan:rewind"; 
   return { type: "custom", customType: "mulligan:rewind", data: { seq } };
 }
 
+/** A rewind marker entry WITH a data.id (for BUG-005 cancel-exclusion tests: cancellation targets data.id). */
+function rewindEntryWithId(seq: number, id: string): { type: "custom"; customType: "mulligan:rewind"; data: { seq: number; id: string; kind: string } } {
+  return { type: "custom", customType: "mulligan:rewind", data: { seq, id, kind: "rewind" } };
+}
+
+/** A cancel marker entry (customType "mulligan:cancel"); targetId is the retired marker's data.id (BUG-005). */
+function cancelEntry(targetId: string): { type: "custom"; customType: "mulligan:cancel"; data: { kind: string; targetId: string } } {
+  return { type: "custom", customType: "mulligan:cancel", data: { kind: "cancel", targetId } };
+}
+
 /** A turn-metric marker entry (customType "mulligan:turn-metric") with the given turnIndex + seq, for the
  *  P4.M1.T2.S3 refused-rewind flag tests (rewind.ts reads readMarkers(ctx).metric?.turnIndex). */
 function metricEntry(turnIndex: number, seq = turnIndex): { type: "custom"; customType: "mulligan:turn-metric"; data: Record<string, unknown> } {
@@ -1160,6 +1170,31 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
     expect(res.content.length).toBeGreaterThan(0);
     expect((res.content[0] as { type?: string }).type).toBe("text");
     expect(typeof (res.content[0] as { text?: string }).text).toBe("string");
+  });
+});
+
+// ── BUG-005: cancelled rewinds excluded from the retry budget (spec/08 E22 — a cancelled rewind never re-landed) ─
+// countRetriesAtLatestPrompt scans the same post-prompt slice for mulligan:cancel entries and skips rewinds
+// whose data.id is targeted by one. Mirrors readMarkers' cancelledIds (src/filter.ts). Backward-compatible:
+// id-less rewinds (rewindEntry(seq)) are still COUNTED (defensive — never exclude on bad data).
+describe("mulligan_rewind — retry budget: cancelled rewinds excluded (BUG-005 / spec/08 E22)", () => {
+  it("a rewind retired by a later mulligan:cancel does NOT consume budget", async () => {
+    setConfig({ rewind: { maxRetriesPerPrompt: 2 } });
+    const { appended, pi } = makePi();
+    // countRetriesAtLatestPrompt: after the user prompt there are TWO mulligan:rewind markers (rw1, rw2),
+    // but rw1 is retired by a mulligan:cancel(targetId=rw1). WITHOUT the fix → count=2 → 2>=2 → refuse.
+    // WITH the fix → count=1 (only rw2 active) → 1<2 → succeed (marker persisted).
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("wrong target then right target")),
+        rewindEntryWithId(1, "rw1"),
+        cancelEntry("rw1"),
+        rewindEntryWithId(2, "rw2"),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).not.toContain("per-prompt retry budget");
+    expect(appended.length).toBeGreaterThan(0); // succeeded (not refused) → marker persisted
   });
 });
 
