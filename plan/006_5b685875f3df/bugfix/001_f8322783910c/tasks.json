@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "PRD Compliance Bug Fixes",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix all 7 validated behavioral/PRD-compliance deviations (3 Major, 4 Minor) in the pi-mulligan extension. None are crashes or data-loss bugs — hidden content always remains on disk (soft-delete guarantee holds). The fixes restore spec compliance for the drift-nudge suppression mechanism (BUG-001), the pinned-hide permanence guarantee post-compaction (BUG-002), the drift-nudge acceptance criteria (BUG-003), and four minor polish items (BUG-004 through BUG-007).",
       "milestones": [
         {
@@ -222,21 +222,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync Changeset-Level Documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Per SOW §5 Mode B: cross-cutting documentation that only makes sense once the whole changeset is in place. VERIFICATION.md currently documents several of these bugs as 'deliberate deviations' — those notes must be updated to reflect the fixes. README.md may reference nudge behavior that changed.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation (VERIFICATION.md + README.md)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update VERIFICATION.md and README.md to reflect all 7 bug fixes. VERIFICATION.md (15KB) documents BUG-001's suppressCheck, BUG-003's shouldNudge, and BUG-007's checkpoint gate as deliberate deviations — these sections must be updated. README.md (26KB) may reference drift-nudge behavior or tool-disabled behavior that changed.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update VERIFICATION.md to reflect all 7 bug fixes",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -260,7 +260,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Update README.md to reflect drift-nudge and tool-disabled behavior changes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

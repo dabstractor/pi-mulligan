@@ -17,7 +17,7 @@
 | 1 | All Tier-1 unit tests green (incl. pairing-invariant property test) | `npm test` | **671 passed, 0 failed** (18 files) | ✅ |
 | 2 | All F-* integration scenarios green | `npm run smoke` | **14/14 scenarios passed** (9 F-* + 5 E-*); F-protected now asserts the BUG-006 pre-persist refusal (see remediation table) | ✅ |
 | 3 | `mulligan:nudge` provably never persisted | grep smoke session JSONL for persisted `customType:"mulligan:nudge"` | **0** persisted nudge messages in any smoke session | ✅ |
-| 4 | `config.enabled=false` → pure no-op | grep the 5 master-switch gates + disabled unit tests | **5 gates present** (filter/rewind/shrink/nudges×2) + **115 disabled-path tests green** | ✅ |
+| 4 | `config.enabled=false` → pure no-op | grep the 7 master-switch gates + disabled unit tests | **7 gates present** (filter + all 5 tools [rewind/shrink/audit/cancel/checkpoint] + 2 nudges [bloatReminder/perTurnDrift]) + disabled-path tests green | ✅ |
 | 5 | Intentional filter exception doesn't break a turn | `filter.test.ts -t fail-open` + smoke `F-failopen` | **10 fail-open tests green** + F-failopen PASS | ✅ |
 | 6 | README documents install, the five agent-callable tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **5 *_DESC verbatim + 20-knob config table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** (rewind, shrink, checkpoint, audit, cancel) | ✅ |
 | + | typebox schemas compile | `npx tsc --noEmit` | **exit 0** (strict + skipLibCheck; typebox `Type.Object` schemas compile) | ✅ |
@@ -51,12 +51,12 @@ npx vitest run test/config.test.ts test/filter.test.ts test/tools/rewind.test.ts
 # DoD #5 — fail-open authoritative unit proof
 npx vitest run test/filter.test.ts -t "fail-open"   # → 10 passed
 
-# DoD #4 code-inspection — the 5 master-switch gates
-grep -n '!config.enabled\|!cfg.enabled' src/filter.ts src/tools/rewind.ts src/tools/shrink.ts src/nudges.ts
-# → filter.ts:180, rewind.ts:322, shrink.ts:235, nudges.ts:98, nudges.ts:176
+# DoD #4 code-inspection — the 7 master-switch gates (filter + 5 tools + 2 nudges)
+grep -rn 'getConfig().enabled\|!config.enabled' src/filter.ts src/tools/rewind.ts src/tools/shrink.ts src/tools/audit.ts src/tools/cancel.ts src/tools/checkpoint.ts src/nudges.ts
+# → filter.ts:240, rewind.ts:511, shrink.ts:286, audit.ts:584, cancel.ts:350, checkpoint.ts:138, nudges.ts:122, nudges.ts:217
 
 # DoD #4 code-inspection — E14 refusal text LANDED
-grep -rn "Mulligan is disabled" src/tools/      # → present in rewind.ts + shrink.ts
+grep -rn "Mulligan is disabled" src/tools/      # → present in all five tools (rewind/shrink/audit/cancel/checkpoint)
 
 # DoD #6 — README accuracy (Disabling note documents the POST-E14 refusal)
 ls README.md && grep -c "Mulligan is disabled" README.md   # → exists; 1
@@ -92,13 +92,14 @@ fail-open to validated `DEFAULT_CONFIG` (`enabled:true`). So settings-driven dis
 entry point no-ops/refuses (verified by `validate.sh` Phase 6). (Earlier drafts of this note described a
 `setConfig(undefined)` placeholder from before `settings.ts` shipped; that is stale — corrected here.)
 
-**`checkpoint` is non-gated** (always-on; a harmless label write). **`audit` IS gated** on the master
-`config.enabled` switch (BUG-005 fix, src/tools/audit.ts: when `enabled` is false the audit refuses
-"Mulligan is disabled" before doing any work — matching the other gated entry points). DoD #4's pure-no-op
-applies to the gated entry points (filter, rewind, shrink, audit, bloat nudge, turn_end nudge), not checkpoint.
-An earlier draft of this note claimed audit + checkpoint were "intentionally non-gated"; that pre-dates the
-BUG-005 audit gate and is corrected here. (There is still no `config.audit.enabled` sub-switch — audit gates
-on the master only, like the others.)
+**All five tools + the filter + both nudges are gated** on the master `config.enabled` switch (spec/08 E14):
+when `enabled` is false each refuses / no-ops before doing any work. **`checkpoint` is gated** (BUG-007,
+src/tools/checkpoint.ts: refuses "Mulligan: refused — Mulligan is disabled." before name validation — no
+label is written); **`audit` is gated** (BUG-005, src/tools/audit.ts). DoD #4's pure-no-op applies to the
+full gated set: filter, rewind, shrink, audit, cancel, checkpoint, bloat nudge, turn_end nudge. Earlier
+drafts of this note described checkpoint as "non-gated / always-on"; that pre-dates the BUG-007 gate and
+is corrected here. (There are still no per-tool `config.<tool>.enabled` sub-switches — every tool gates on
+the master `enabled` only, like the others.)
 
 ### DoD #2/#5 — smoke `soft` notes are not failures
 `run-smoke.mjs` marks model-driven assertions as `soft` (canary-drop, `bloatHit:true`,
@@ -210,3 +211,23 @@ detail per bug (the six implementing subtask PRPs hold the full depth).
 | BUG-006 | Minor | `rewind.ts` had no protected-refusal check before persist; nuclear `last_turn` on the first/only user message persisted a no-op marker | step-5b guarded refusal before persist (detects crossing `first:user`) | `edge-cases.test.ts:447-456` rewritten to assert refusal + no-persist |
 
 `npm test` → **956 passed, 0 failed** (post-remediation; the v1.0 DoD `671 passed` above is the v1.0 baseline).
+
+## Bug-fix remediation pass — round 2 (PRD-compliance): BUG-001 through BUG-007
+
+A second end-to-end PRD validation pass found seven PRD-compliance deviations (3 Major, 4 Minor; 0 Critical,
+0 data-loss) in behavioral edge cases the suite did not cover. All seven were fixed with regression tests
+added. The table records the engineering detail per bug (the seven implementing subtask PRPs hold the full
+depth). NOTE: the bug numbers below are THIS round's numbering (BUG-001..BUG-007) and are DISTINCT from the
+prior round's "BUG-001 through BUG-006" table above — each remediation round re-numbers its findings.
+
+| Bug | Severity | Root cause | Fix applied | Regression test added |
+|-----|----------|------------|-------------|-----------------------|
+| BUG-001 | Major | `suppressCheck` (src/nudges.ts) used a fixed 10-minute wall-clock window (`NUDGE_TURN_WINDOW_MS`) instead of the spec §5.3 turn-boundary check — a single rewind/shrink over-suppressed the drift nudge on every turn for ~10 minutes | Turn-based lower bound: a marker is "during the metric's turn" iff `prevMetric.ts < marker.ts <= metric.ts` (uses `recentMetrics[1]?.ts`); `NUDGE_TURN_WINDOW_MS` removed | test/drift_nudge.test.ts (suppressCheck turn-boundary cases) |
+| BUG-002 | Major | `resolvePinnedHide`/`resolvePinnedShrink` (src/transforms.ts) bailed entirely on hitting ANY compaction entry → ALL pinned hides no-op'd after the first compaction (broader than the documented E24 limitation) | Compaction-aware retained-tail walk: find the last compaction entry; the retained tail (entries after it) maps to the last N messages; walk only the tail matching pinned IDs | test/transforms.test.ts (compaction retained-tail cases) |
+| BUG-003 | Major | `shouldNudge` moving-average vs `driftThresholdTokens` (6000) used strict `>` — `avg([4000,4000,4000])=4000 < 6000` did not fire, violating spec §5.1 acceptance criterion (b) | `driftThresholdTokens` default 6000→**4000** (src/config.ts) + comparison `>`→**`>=`** (src/nudges.ts) | test/drift_nudge.test.ts (criterion (b): three ~4k turns → fires) |
+| BUG-004 | Minor | `turnEndMetricHandler` (src/nudges.ts) cleared `rt.pendingBloatHits` AFTER the `perTurnDrift` early-return → unbounded growth when `bloatReminder=true, perTurnDrift=false` | Move the snapshot+clear of `pendingBloatHits` to BEFORE the early-return (runs every turn_end regardless of perTurnDrift) | test/nudges.test.ts (pendingBloatHits bounded when perTurnDrift=false) |
+| BUG-005 | Minor | `countRetriesAtLatestPrompt` (src/tools/rewind.ts) counted ALL post-prompt rewind markers, including ones later retired by `mulligan:cancel` → inflated the E22 retry budget | Cancel-exclusion: scan post-prompt `mulligan:cancel` entries, collect their `data.targetId`, skip counted rewinds whose `data.id` is retired (mirrors filter's `cancelledIds`) | test/tools/rewind.test.ts (cancelled rewind excluded from budget) |
+| BUG-006 | Minor | `mulligan_cancel` (src/tools/cancel.ts) emitted one no-op text ("with that id") for BOTH the target-not-found and markerId-not-found paths; spec/05 §5 specifies distinct texts | Split the no-op text by resolution path: target→"for that target", markerId→"with that id" | test/tools/cancel.test.ts (updated text pins per path) |
+| BUG-007 | Minor | `mulligan_checkpoint` (src/tools/checkpoint.ts) had NO `getConfig().enabled` gate (its header documented the omission as intentional) → wrote a label when disabled, violating spec E14 | Add `getConfig().enabled` gate as step 0 inside the try (before name validation); refuses byte-identical "Mulligan: refused — Mulligan is disabled." (no label written) | test/tools/checkpoint.test.ts (config-disabled describe, 2 tests) |
+
+`npm test` → **974 passed, 0 failed** (post-round-2; the v1.0 DoD `671 passed` and round-1 `956 passed` above are prior baselines, preserved as accurate history).
