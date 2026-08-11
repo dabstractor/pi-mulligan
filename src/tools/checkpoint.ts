@@ -24,9 +24,13 @@
  *   factory closure (the recommended testable shape; no module-scoped mutable state). index.ts
  *   (P1.M7.T1.S1) will do `pi.registerTool(makeCheckpointTool(pi))`.
  *
- * NO config gate here (GOTCHA #4): there is no `config.checkpoint.enabled` switch (spec/09 has no checkpoint
- * config section); checkpoints are inert labels, there is nothing to disable. This item does NOT modify
- * src/index.ts (wiring is P1.M7.T1.S1).
+ * config.enabled gate (spec/08 E14, BUG-007): checkpointExecute refuses with
+ * "Mulligan: refused — Mulligan is disabled." when getConfig().enabled === false, BEFORE name validation
+ * (mirrors rewind/shrink/audit/cancel step 1). No label is written when disabled (setCheckpoint is not
+ * called). There is still NO config.checkpoint sub-knob (spec/09 has no checkpoint section) — the master
+ * switch is the only gate (like cancel). NOTE: the disabled case is inlined (not via the refusal() helper)
+ * because checkpoint's refusal() omits the trailing "." the other four tools' helpers add; inlining yields
+ * byte-identical disabled text across all five tools. This item does NOT modify src/index.ts (P1.M7.T1.S1).
  */
 import { Type } from "typebox";
 import type { Static } from "typebox";
@@ -38,6 +42,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { setCheckpoint } from "../markers.js"; // GOTCHA #2: .js extension (ESM/Bundler resolution)
+import { getConfig } from "../config.js"; // BUG-007: E14 master-switch gate (enabled:false → refuse)
 
 // ── Parameter schema (spec/05 §3 — Typebox) ─────────────────────────────────
 
@@ -125,6 +130,17 @@ async function checkpointExecute(
 ): Promise<AgentToolResult<CheckpointDetails>> {
   const name = params?.name;
   try {
+    // (0) config gate (spec/08 E14, BUG-007): master switch off → refuse BEFORE name validation (mirrors
+    //     rewind/shrink/audit/cancel step 1). Byte-identical to the other four tools' disabled text.
+    //     INLINED (NOT via refusal()) because checkpoint's refusal() helper omits the trailing '.' — see
+    //     the file-header note + the research/bug007 dot-parity decision. setCheckpoint is NOT called → no
+    //     label is written. details:{name} for correlation (CheckpointDetails; no entryId on refusal).
+    if (!getConfig().enabled) {
+      return {
+        content: [{ type: "text", text: "Mulligan: refused — Mulligan is disabled." }],
+        details: { name },
+      };
+    }
     // (1) Validate name format (spec/05 §3 step 1; spec/04 §6; spec/08 E10). THE TOOL OWNS THIS (GOTCHA #3).
     if (!validCheckpointName(name)) {
       return refusal(

@@ -25,6 +25,7 @@ import {
   type CheckpointDetails,
 } from "../../src/tools/checkpoint.js";
 import { clearAll } from "../../src/runtime.js";
+import { setConfig } from "../../src/config.js"; // BUG-007: checkpoint now reads getConfig()
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -35,8 +36,14 @@ import type {
 // GOTCHA #8 (shared with markers.test.ts): nextSeq mutates the SHARED module-scoped runtime map. clearAll()
 // before AND after each test so a previous test's seq can't leak in. (setCheckpoint itself doesn't use
 // nextSeq, but we keep the house reset for hygiene and to mirror the sibling test exactly.)
-beforeEach(() => clearAll());
-afterEach(() => clearAll());
+beforeEach(() => {
+  clearAll();
+  setConfig(undefined); // DEFAULT_CONFIG: enabled:true (so a prior disabled test never bleeds)
+});
+afterEach(() => {
+  clearAll();
+  setConfig(undefined); // reset the config cache to defaults
+});
 
 // ── fakes (reproduced from test/markers.test.ts, trimmed to the setLabel/getBranch surface) ─────
 
@@ -278,6 +285,39 @@ describe("mulligan_checkpoint — no-stable-entry refusal (setCheckpoint returns
     expect(firstText(res)).toContain("no conversation message to checkpoint");
     expect(firstText(res)).toContain("emit a message first");
     expect(res.details).toEqual({ name: "before-refactor" });
+  });
+});
+
+// ── config-disabled refusal (spec/08 E14, BUG-007) ─────────────────────────────────
+
+describe("mulligan_checkpoint — config-disabled refusal (spec/08 E14, BUG-007)", () => {
+  beforeEach(() => setConfig({ enabled: false }));
+  afterEach(() => setConfig(undefined)); // reset to DEFAULT_CONFIG so the master-disabled state doesn't bleed
+
+  it("refuses with 'Mulligan: refused — Mulligan is disabled.' and does NOT call setLabel", async () => {
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ branch: branchEndingInMsg("L") });
+    const res = await run(pi, ctx, "before-refactor");
+    // setCheckpoint is NOT called when disabled → setLabel is untouched (no label written).
+    expect(labels).toHaveLength(0);
+    expect(res.content).toHaveLength(1);
+    expect(res.content[0].type).toBe("text");
+    // Byte-identical to the other four tools' disabled text (cancel.test.ts:412 pins the same string).
+    expect(firstText(res)).toBe("Mulligan: refused — Mulligan is disabled.");
+    // details carries the (attempted) name for correlation; NO entryId (refusal path).
+    expect(res.details).toEqual({ name: "before-refactor" });
+    expect(res.details).not.toHaveProperty("entryId");
+  });
+
+  it("disabled refusal fires BEFORE name validation (an invalid name still gets the disabled refusal)", async () => {
+    // Mirrors rewind.test.ts:326 + shrink.test.ts:213: the config gate is step 0, before name validation,
+    // so even a name that would normally be an invalid-name refusal gets the disabled refusal instead.
+    const { labels, pi } = makePi();
+    const { ctx } = makeCtx({ branch: branchEndingInMsg("L") });
+    const res = await run(pi, ctx, "BAD NAME!"); // would be invalid-name if enabled
+    expect(labels).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: refused — Mulligan is disabled.");
+    expect(res.details).toEqual({ name: "BAD NAME!" });
   });
 });
 

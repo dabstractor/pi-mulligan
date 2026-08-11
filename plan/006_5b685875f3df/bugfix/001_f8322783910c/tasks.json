@@ -121,7 +121,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor Bug Fixes (BUG-004 through BUG-007)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Four minor-severity polish items: (1) pendingBloatHits memory leak when perTurnDrift=false; (2) retry budget counting cancelled rewinds; (3) cancel no-op text mismatch on the target path; (4) checkpoint tool not gated by config.enabled. Each is a small, self-contained fix.",
           "tasks": [
             {
@@ -197,14 +197,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "BUG-007: Add config.enabled gate to mulligan_checkpoint",
-              "status": "Researching",
+              "status": "Complete",
               "description": "checkpoint.ts performs no config.enabled check, so with the extension disabled it still writes mulligan:checkpoint labels. Spec E14 requires all tools to refuse with 'Mulligan is disabled.' when config.enabled === false.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Add getConfig().enabled gate to checkpointExecute",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-007. checkpointExecute (src/tools/checkpoint.ts:96-130) has NO config.enabled check. The other four tools all gate on it: src/tools/rewind.ts has `if (!getConfig().enabled) return refusal(...)` at the top of execute; cancel.ts:356 has `if (!getConfig().enabled) return refusal('Mulligan is disabled')`. The checkpoint tool already imports getConfig indirectly — it imports from markers.ts but NOT config.ts. ADD the import: `import { getConfig } from '../config.js';`. The refusal() helper (checkpoint.ts:84-89) builds `{ content: [{type:'text', text: 'Mulligan: refused — <reason>'}], details: { name } }`. The existing refusal format prefixes with 'Mulligan: refused — ' but E14 says tools should say 'Mulligan is disabled.' — match the other tools' exact text. Check how the other tools phrase it: cancel.ts:356 uses a literal `return { content: [...], details: {...} }` not the refusal() helper — verify the exact text pattern used by rewind/cancel/audit for the disabled case and match it.\n2. INPUT: none beyond the existing params (name, ctx, pi).\n3. LOGIC: At the top of checkpointExecute's try block (after `const name = params?.name;`), add: `if (!getConfig().enabled) { return { content: [{ type: 'text', text: 'Mulligan: disabled.' }], details: { name: typeof name === 'string' ? name : '' } }; }`. Match the exact disabled-text pattern used by the other four tools (verify by grepping `getConfig().enabled` in src/tools/*.ts — use the same wording). Add the import `import { getConfig } from '../config.js';` at the top of checkpoint.ts.\n4. OUTPUT: When config.enabled === false, checkpointExecute returns a disabled-refusal text result and does NOT call setCheckpoint (no label written). All other behavior unchanged.\n5. DOCS: [Mode A] Update the checkpoint.ts file header comment that currently says 'NO config gate here (GOTCHA #4)' — replace with documentation that the config.enabled gate is now present per spec E14, and checkpoints respect the master switch like all other tools.",
@@ -236,7 +236,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update VERIFICATION.md to reflect all 7 bug fixes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
