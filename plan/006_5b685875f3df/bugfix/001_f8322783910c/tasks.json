@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Major Bug Fixes (BUG-001, BUG-002, BUG-003)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The three Major-severity bugs that significantly impact core functionality: (1) the drift nudge is wrongly suppressed for ~10 minutes after any rewind/shrink via a wall-clock window instead of the spec's turn-based check; (2) pinned rewinds stop working entirely after the first compaction, leaking hidden content back into the model's view; (3) the drift nudge does not fire for 'three ~4k turns in a row', violating spec §5.1 acceptance criterion (b).",
           "tasks": [
             {
@@ -57,7 +57,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "BUG-002: Make resolvePinnedHide/resolvePinnedShrink compaction-aware",
-              "status": "Researching",
+              "status": "Complete",
               "description": "After the first compaction in a session, resolvePinnedHide bails entirely (returns []) because entryMessageYield returns -1 for compaction entries. This makes EVERY pinned rewind a permanent no-op, leaking previously-hidden content back into the model's view — violating PRD success criterion #1. The same bug affects resolvePinnedShrink. The fix uses a retained-tail-only walk: find the LAST compaction entry on the branch, walk only entries AFTER it (which map 1:1 to the tail of event.messages), and match pinned entry IDs there.",
               "subtasks": [
                 {
@@ -78,7 +78,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Apply compaction-aware retained-tail walk to resolvePinnedShrink",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -96,14 +96,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "BUG-003: Make shouldNudge satisfy §5.1 acceptance criterion (b)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "shouldNudge uses a moving-average compared strictly > to driftThresholdTokens (6000). avg([4000,4000,4000]) = 4000 < 6000 → does not fire, violating spec §5.1 acceptance criterion (b) 'three ~4k turns in a row DO fire'. The fix lowers the default threshold to 4000 and changes the comparison from > to >= so that three ~4k turns (avg 4000 >= 4000) fire while a single 8k turn amid small turns (avg 3000 < 4000) does not.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Lower driftThresholdTokens default to 4000 and change shouldNudge comparison to >=",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_5b685875f3df/bugfix/001_f8322783910c/architecture/system_context.md §BUG-003. shouldNudge (src/nudges.ts:326-334) computes avg(window deltas) and compares strictly > driftThresholdTokens. DEFAULT_CONFIG.nudges.driftThresholdTokens = 6000 (src/config.ts). Verification of the fix: (a) avg([8000,500,500])=3000 >= 4000? No ✓; (b) avg([4000,4000,4000])=4000 >= 4000? Yes ✓; (c) avg(~0) >= 4000? No ✓. The drift_nudge.test.ts test helper cfg(windowTurns=3, threshold=6000) passes an EXPLICIT threshold, so lowering the DEFAULT_CONFIG value will NOT break existing tests that use cfg(). Audit test files for any test that reads DEFAULT_CONFIG.nudges.driftThresholdTokens directly instead of passing an explicit value.\n2. INPUT: recentMetrics (TurnMetric[]), config (MulliganConfig). Unchanged signature.\n3. LOGIC: (a) In src/config.ts DEFAULT_CONFIG, change nudges.driftThresholdTokens from 6000 to 4000. Update the JSDoc comment on driftThresholdTokens to explain: 'Default 4000. The moving-average over driftWindowTurns (default 3) compared with >= satisfies all three §5.1 acceptance criteria: (a) a single 8k turn amid small turns averages <4000 → no fire; (b) three ~4k turns average ~4000 >= 4000 → fire; (c) a single large result with ~0 net growth averages ~0 → no fire.' (b) In src/nudges.ts shouldNudge, change the return from `avg > config.nudges.driftThresholdTokens` to `avg >= config.nudges.driftThresholdTokens`. (c) Update the SPEC-AMBIGUITY RESOLUTION comment in shouldNudge to note that criterion (b) is now satisfied with the lowered threshold and >= comparison, removing the 'ILLUSTRATIVE' recharacterization.\n4. OUTPUT: boolean — true iff avg(window deltas) >= driftThresholdTokens (delta-only when delta data exists); bloatHit fallback unchanged.\n5. DOCS: [Mode A] Update the JSDoc on driftThresholdTokens in config.ts (new default + rationale) and the shouldNudge SPEC-AMBIGUITY RESOLUTION comment in nudges.ts. These ride WITH the work.",

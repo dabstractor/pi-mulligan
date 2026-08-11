@@ -836,18 +836,28 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
  * longer drift onto later, unrelated messages as the session grows (the moving-target footgun that motivated the
  * rewind hideEntryIds fix).
  *
- * ALGORITHM (identical alignment walk to resolvePinnedHide §4): filter branchEntries to context-producing types,
- * walk in parallel with `messages` via msgCursor + entryMessageYield, and return the FIRST message index (msgCursor)
- * of the entry whose `id === pinnedEntryId`. Like resolvePinnedHide it returns null (no-op) when alignment is
- * INDETERMINATE: a compaction/unknown entry type (entryMessageYield === -1), a raw-branch vs compaction-aware
- * messages misalignment, or the pinned entry simply not being present (compacted away). Returning null (NOT
- * falling back to live resolution) is deliberate: once a target is pinned we want identity-or-nothing, matching the
- * rewind precedent — substituting a DIFFERENT message that happens to currently match the selector would re-introduce
- * the very moving-target bug pinning exists to prevent.
+ * ALGORITHM (retained-tail walk — fixes BUG-002; mirrors resolvePinnedHide, adapted for ONE id → ONE index):
+ *   1. Find lastCompactionIdx: scan branchEntries END→start for the LAST entry whose type === "compaction" (-1 if none).
+ *   2. tailEntries = branchEntries.slice(lastCompactionIdx + 1) filtered to context-message types via entryMessageYield > 0
+ *      (message/custom_message/branch_summary only; EXCLUDES compaction — do NOT use isContextProducingType, which
+ *      includes compaction and would be wrong for the tail).
+ *   3. tailStartIdx = messages.length - tailEntries.length. The retained tail maps 1:1 to the LAST tailEntries.length
+ *      messages (getBranch() is RAW = compacted-away + compaction + tail; event.messages is compaction-aware). If
+ *      tailStartIdx < 0 → null (defensive: raw branch vs compaction-aware messages misalign beyond recovery).
+ *   4. Walk the tail; return tailStartIdx + k on the FIRST (only) entry whose id === pinnedEntryId; else null.
+ * Entries in the compacted-away head are correctly unmatched (absent from messages → null, no leak, no error).
+ * No-compaction case (lastCompactionIdx === -1) degenerates to the legacy forward walk: tailStartIdx === 0 → entry k
+ * ↔ messages[k]. This UPGRADES spec/08 E24 for shrinks (retained-tail targets now resolve post-compaction; only
+ * compacted-head entries no-op). See §BUG-002 in architecture/system_context.md and T2.S1 (resolvePinnedHide — same
+ * algorithm). resolveCheckpoint KEEPS its bail-on-compaction (contiguous-sweep semantics) — it is NOT touched here.
+ * Returning null (NOT falling back to live resolution) is deliberate: once a target is pinned we want identity-or-
+ * nothing, matching the rewind precedent — substituting a DIFFERENT message that happens to currently match the
+ * selector would re-introduce the very moving-target bug pinning exists to prevent.
  *
  * Pure + defensive + TOTAL: non-array messages/branchEntries, or a non-string/empty pinnedEntryId → null; every
- * field read via isRecord/readOwn. NEVER throws (sits on the context-handler hot path via filterPipeline T5.S1).
- * NO new imports (reuses MessageLike + BranchEntry + isContextProducingType + entryMessageYield + isRecord/readOwn).
+ * field read via isRecord/readOwn (readOwn is throw-safe, so the direct call in the lastCompactionIdx scan NEVER
+ * throws on a throwing-Proxy entry — E13). NEVER throws (sits on the context-handler hot path via filterPipeline
+ * T5.S1). NO new imports (reuses MessageLike + BranchEntry + entryMessageYield + isRecord/readOwn).
  * EXPORTED so applyShrink, filterPipeline, and tests share one shape at the pure tier.
  *
  * @param messages      the CURRENT message list (a real Pi AgentMessage[] assigns in); non-array → null
@@ -863,22 +873,39 @@ export function resolvePinnedShrink(
   if (!Array.isArray(messages) || !Array.isArray(branchEntries)) return null;
   if (typeof pinnedEntryId !== "string" || pinnedEntryId.length === 0) return null;
 
-  const ctxEntries = branchEntries.filter((e) =>
-    isContextProducingType(isRecord(e) ? readOwn(e, "type") : undefined),
-  );
-
-  let msgCursor = 0;
-  for (const e of ctxEntries) {
-    const y = entryMessageYield(e); // 1 for message/custom_message/branch_summary; -1 (indeterminate) for compaction/unknown
-    if (y < 0) return null; // compaction (or unknown) on the walked range → alignment INDETERMINATE → no-op safely
-    if (msgCursor + y > messages.length) return null; // raw branch vs compaction-aware messages misalign → no-op
-    const id = isRecord(e) ? readOwn(e, "id") : undefined;
-    if (typeof id === "string" && id === pinnedEntryId) {
-      return msgCursor; // yield is 1 in practice → the entry's single message index
+  // 3) RETAINED-TAIL WALK (compaction-aware; fixes BUG-002 — mirrors resolvePinnedHide, adapted for ONE id).
+  //    getBranch() is the RAW path (carries compacted-away entries + the compaction entry); event.messages is
+  //    compaction-aware. The entries AFTER the LAST compaction are the "retained tail" and map 1:1 to the LAST
+  //    tailEntries.length messages. resolveCheckpoint keeps its bail-on-compaction (contiguous-sweep) — NOT touched.
+  let lastCompactionIdx = -1;
+  for (let i = branchEntries.length - 1; i >= 0; i--) {
+    const t = isRecord(branchEntries[i]) ? readOwn(branchEntries[i], "type") : undefined;
+    if (t === "compaction") {
+      lastCompactionIdx = i;
+      break;
     }
-    msgCursor += y;
   }
-  return null; // pinned entry not present (compacted away / wrong branch) → no-op this fire
+
+  // 4) tailEntries = retained tail (entries AFTER the last compaction), context-message types ONLY. Reuse
+  //    entryMessageYield as the predicate (1 for message/custom_message/branch_summary; -1 otherwise → excluded).
+  //    Do NOT use isContextProducingType here — it INCLUDES compaction, which is wrong for the tail.
+  const tailEntries = branchEntries.slice(lastCompactionIdx + 1).filter((e) => entryMessageYield(e) > 0);
+
+  // 5) Retained tail ↔ the LAST tailEntries.length messages. If the tail is longer than messages → refuse safely.
+  const tailStartIdx = messages.length - tailEntries.length;
+  if (tailStartIdx < 0) return null; // defensive: raw branch vs compaction-aware messages misalign beyond recovery
+
+  // 6) Walk the tail; return the FIRST (only) entry whose id === pinnedEntryId. No-compaction case: tailStartIdx === 0
+  //    (legacy forward walk). Entry ids are unique, so there is at most one match — early return avoids walking the rest.
+  for (let k = 0; k < tailEntries.length; k++) {
+    const id = isRecord(tailEntries[k]) ? readOwn(tailEntries[k], "id") : undefined;
+    if (typeof id === "string" && id === pinnedEntryId) {
+      return tailStartIdx + k; // this retained-tail entry ↔ messages[tailStartIdx + k]
+    }
+  }
+
+  // 7) Pinned entry not in the retained tail (compacted away / wrong branch) → no-op this fire (identity-or-nothing).
+  return null;
 }
 
 /**

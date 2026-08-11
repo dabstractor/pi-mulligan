@@ -1811,12 +1811,14 @@ describe("resolvePinnedShrink — FINDING 3 PINNED contract (basic / lock / comp
     expect(resolvePinnedShrink(msgs, branchGrown, "e1")).toBe(0); // LOCKED to e1 (idx0), NOT e3/e4
   });
 
-  it("(c) compaction refusal — a branch containing a compaction entry → null (entryMessageYield === -1 → no-op)", () => {
+  it("(c) compaction — pinned entry in the RETAINED TAIL resolves (BUG-002 fix; was null before)", () => {
     const msgs: MessageLike[] = [user("u"), asst("c1")];
+    // root→leaf: e1 (compacted-away head), eC (compaction), e2 (retained tail). lastCompactionIdx=1; tailEntries=[e2];
+    // tailStartIdx = 2 - 1 = 1 → e2 ↔ messages[1]. (Was `null` before the fix — the BUG-002 shrink repro.)
     const branch: BranchEntry[] = [
       entry("e1", "message"), entry("eC", "compaction"), entry("e2", "message"),
     ];
-    expect(resolvePinnedShrink(msgs, branch, "e2")).toBeNull(); // alignment INDETERMINATE → no-op (identity-or-nothing)
+    expect(resolvePinnedShrink(msgs, branch, "e2")).toBe(1); // e2 is retained-tail → resolves to idx1
   });
 
   it("(d) not-found — pin an id absent from the branch → null (pinned entry compacted away / wrong branch → no-op, NOT live fallback)", () => {
@@ -1844,6 +1846,52 @@ describe("resolvePinnedShrink — FINDING 3 PINNED contract (basic / lock / comp
 
   it("(g) types — returns number | null", () => {
     expectTypeOf(resolvePinnedShrink([], [], "x")).toEqualTypeOf<number | null>();
+  });
+
+  it("(h) compaction in head + pinned retained-tail target → resolves (BUG-002 shrink production repro)", () => {
+    const msgs: MessageLike[] = [user("u"), compactionSummary("s"), asst("c1"), result("c1")]; // 4 msgs idx 0..3
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s", firstKeptEntryId: "e3" }),
+      entry("e3", "message"), entry("e4", "message"),
+    ];
+    // lastCompactionIdx=1 (c1); tailEntries=[e3,e4]; tailStartIdx=4-2=2 → e3↔idx2, e4↔idx3. (Was `null` before.)
+    expect(resolvePinnedShrink(msgs, branch, "e3")).toBe(2); // the pinned retained-tail target resolves
+    expect(resolvePinnedShrink(msgs, branch, "e4")).toBe(3);
+  });
+
+  it("(i) pinned entry in the COMPACTED-AWAY head → null (gone from messages; no leak, no error)", () => {
+    const msgs: MessageLike[] = [user("u"), compactionSummary("s"), asst("c1")]; // 3 msgs
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s" }), entry("e3", "message"),
+    ];
+    // e1 is BEFORE the compaction (compacted-away head) → not in tailEntries → not matched → null.
+    expect(resolvePinnedShrink(msgs, branch, "e1")).toBeNull();
+  });
+
+  it("(j) multiple compactions — only the LAST compaction's tail is retained", () => {
+    const msgs: MessageLike[] = [compactionSummary("s2"), asst("c1")]; // 2 msgs (2nd summary + retained tail e3)
+    const branch: BranchEntry[] = [
+      entry("e1", "message"), entry("c1", "compaction", { summary: "s1" }),
+      entry("e2", "message"), entry("c2", "compaction", { summary: "s2" }), entry("e3", "message"),
+    ];
+    // lastCompactionIdx=3 (c2); tailEntries=[e3]; tailStartIdx=2-1=1 → e3↔idx1. e2 was compacted away by c2.
+    expect(resolvePinnedShrink(msgs, branch, "e3")).toBe(1);    // retained-tail entry resolves
+    expect(resolvePinnedShrink(msgs, branch, "e2")).toBeNull(); // e2 compacted away by c2 → gone
+  });
+
+  it("(k) no compaction on the branch → identical to the legacy forward walk (tailStartIdx === 0)", () => {
+    const msgs: MessageLike[] = [user("u"), asst("c1"), result("c1")];
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message"), entry("e3", "message")];
+    // lastCompactionIdx=-1; tailEntries=[e1,e2,e3]; tailStartIdx=3-3=0 → legacy mapping (entry k ↔ messages[k]).
+    expect(resolvePinnedShrink(msgs, branch, "e1")).toBe(0); // parity with test (a) (which pins e2 → 1)
+    expect(resolvePinnedShrink(msgs, branch, "e3")).toBe(2);
+  });
+
+  it("(l) defensive — tail longer than messages (alignment lost) → null", () => {
+    const msgs: MessageLike[] = [user("u")]; // 1 message
+    const branch: BranchEntry[] = [entry("e1", "message"), entry("e2", "message")]; // 2 retained-tail entries
+    // tailEntries=[e1,e2] (len 2) > messages.length (1) → tailStartIdx = 1-2 = -1 → null.
+    expect(resolvePinnedShrink(msgs, branch, "e1")).toBeNull();
   });
 });
 
