@@ -110,7 +110,7 @@ function refusal(reason: string, name: string): AgentToolResult<CheckpointDetail
  *   2. Delegate to `setCheckpoint(pi, ctx, name)` (markers.ts: walks getBranch() to the last real message,
  *      prefixes with `mulligan:checkpoint:`, try/catches; trusts the caller's name).
  *   3a. On `{ entryId }` → success text (verbatim spec/05 §3) + `{ name, entryId }` details.
- *   3b. On `{ error }` (e.g. "no stable entry to checkpoint" or a swallowed setLabel throw) → refusal text + `{ name }` details.
+ *   3b. On `{ error }` (e.g. "no conversation message to checkpoint" or a swallowed setLabel throw) → refusal text + `{ name }` details.
  * The whole body is wrapped in try/catch → failure text (GOTCHA #5: never throw on the tool hot path).
  *
  * `pi` is captured by the `makeCheckpointTool(pi)` factory closure (it is NOT an execute argument).
@@ -144,7 +144,7 @@ async function checkpointExecute(
         details: { name, entryId: res.entryId },
       };
     }
-    // (3b) wrapper-reported failure (e.g. {error:"no stable entry to checkpoint"} or a swallowed setLabel throw).
+    // (3b) wrapper-reported failure (e.g. {error:"no conversation message to checkpoint"} or a swallowed setLabel throw).
     return refusal(`could not set checkpoint: ${res.error}`, name);
   } catch (e) {
     // Shared tool convention: never throw — return a text result describing the failure (GOTCHA #5).

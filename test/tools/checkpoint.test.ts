@@ -10,7 +10,7 @@
  *   a) success text VERBATIM (spec/05 §3) + setLabel called once with the prefixed name.
  *   b) regex accept boundaries: "a", "a-b_c1", a 40-char name → success.
  *   c) regex reject: "" (empty), "With Space", "UPPER", "dot.dot", "name!", a 41-char name → refusal; setLabel NOT called.
- *   d) no-stable-entry: empty branch → {error:"no stable entry to checkpoint"} → refusal; setLabel NOT called.
+ *   d) no-stable-entry: empty branch → {error:"no conversation message to checkpoint"} → refusal; setLabel NOT called.
  *   e) never-throws: a throwing setLabel (setCheckpoint swallows it → {error}) → still a text result, execute does not throw.
  *   f) result shape: content is [{type:"text",text:string}] AND `details` is present on every path.
  *   g) types: makeCheckpointTool(...) ToMatchTypeOf<ToolDefinition>; params inferred as {name:string}; description === CKPT_DESC.
@@ -264,17 +264,19 @@ describe("mulligan_checkpoint — name regex REJECT (invalid → refusal; setLab
   });
 });
 
-// ── no-stable-entry refusal (setCheckpoint returns {error:"no stable entry to checkpoint"}; tool does NOT call getLeafId itself) ──
+// ── no-stable-entry refusal (setCheckpoint returns {error:"no conversation message to checkpoint"}; tool does NOT call getLeafId itself) ──
 
-describe("mulligan_checkpoint — no-stable-entry refusal (setCheckpoint returns {error:'no stable entry to checkpoint'})", () => {
-  it("branch with no message → refusal text; setLabel NOT called", async () => {
+describe("mulligan_checkpoint — no-stable-entry refusal (setCheckpoint returns {error:'no conversation message to checkpoint'})", () => {
+  it("branch with no message → refusal text with actionable guidance; setLabel NOT called", async () => {
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({ branch: [] });   // empty branch → no stable message
     const res = await run(pi, ctx, "before-refactor");
     expect(labels).toHaveLength(0);
     expect(firstText(res)).toContain("Mulligan: refused —");
     expect(firstText(res)).toContain("could not set checkpoint");
-    expect(firstText(res)).toContain("no stable entry to checkpoint");
+    // MINOR-1 fix: the error now tells the agent WHY (no prior conversation) and WHAT TO DO (emit a message first).
+    expect(firstText(res)).toContain("no conversation message to checkpoint");
+    expect(firstText(res)).toContain("emit a message first");
     expect(res.details).toEqual({ name: "before-refactor" });
   });
 });

@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 3,
+  "summary": "MAJOR: pinned rewind/shrink markers do not compose (2nd rewind's content leaks back; pinned shrink after rewind no-ops) — root cause: resolvePinnedHide/resolvePinnedShrink walk full branchEntries against the reducing message list inside filterPipeline's sequential loop. Plus 2 minor (checkpoint refuses before any conversation; stale VERIFICATION.md)."
+}

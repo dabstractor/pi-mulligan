@@ -366,7 +366,7 @@ function assertCheckpoint({ smoke, piRes }) {
   const rwLine = rwLines[rwLines.length - 1];
   const rwText = rwLine?.detail?.text ?? "";
   // setCheckpoint RAN + SUCCEEDED (not refused). This is the baseline-breakage fix: a fresh 2-prompt session made
-  // setCheckpoint refuse "no stable entry to checkpoint"; the seed flow commits SEED_ANCHOR first so it succeeds.
+  // setCheckpoint refuse "no conversation message to checkpoint"; the seed flow commits SEED_ANCHOR first so it succeeds.
   assert(results, "tool.checkpoint ran", cpLines.length >= 1, "");
   assert(results, "checkpoint SET succeeded (not refused — baseline-breakage fix)", cpLine && !/refused/i.test(cpText), cpText.slice(0, 80));
   // checkpoint rewind RAN + K>0. K=0 (or refusal) is the BUG-003 signature (resolveCheckpoint → remove=[]). The seed

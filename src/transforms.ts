@@ -949,6 +949,53 @@ export function applyShrink(
 }
 
 /**
+ * applyShrinkAt — substitute the message at a PRE-RESOLVED index with the marker's replacement text. This is the
+ * COMPOSITION-RESOLVED twin of applyShrink's pinned branch: filterPipeline resolves the pinned target against the
+ * ORIGINAL message list (aligned with branchEntries) and TRANSLATES that index onto the post-rewind reduced array; it
+ * then hands the reduced index here for substitution. Used ONLY by filterPipeline's pinned-shrink-after-rewind path
+ * (the fix for MAJOR-1b). Everything else routes through applyShrink (which resolves its own index).
+ *
+ * IDENTICAL substitution body to applyShrink (DRY-by-intent: the clone+override logic is duplicated rather than shared
+ * via an extra parameter so applyShrink's tested public signature + behavior stay untouched — GOTCHA #11). Defensive +
+ * total: non-array messages → []; non-record marker → messages UNCHANGED; out-of-range index → messages UNCHANGED
+ * (same-ref no-op, mirroring applyShrink's spec/06 §5:133 contract). NEVER throws (throws → minimal role-preserving
+ * fallback; E13 + E19). Pure: returns a NEW array on a hit (other elements copied BY REFERENCE — GOTCHA #12).
+ *
+ * @param messages the CURRENT (post-rewind) message list; non-array → []
+ * @param marker   { replacement } (a real ShrinkMarkerLike structurally assigns in; only `replacement` is read here
+ *                since the index is already resolved)
+ * @param i        the pre-resolved reduced-array index of the message to substitute; out-of-range → no-op (same ref)
+ * @returns a NEW array with index i substituted, or the SAME array reference on a no-op
+ */
+function applyShrinkAt(
+  messages: MessageLike[],
+  marker: { replacement?: unknown },
+  i: number,
+): MessageLike[] {
+  if (!Array.isArray(messages)) return [];
+  if (!isRecord(marker)) return messages;
+  if (typeof i !== "number" || Number.isNaN(i) || i < 0 || i >= messages.length) return messages;
+
+  const orig = messages[i];
+  const rep = readOwn(marker, "replacement");
+  const text = typeof rep === "string" ? rep : "";
+  const newContent: ContentBlock[] = [{ type: "text", text }];
+
+  // Clone orig's fields via spread + override content (pairing + role preserved — spec/06 §5:145 / spec/08 E19).
+  // try/catch: a throwing-Proxy orig could make {...orig} throw → minimal fallback preserves the safely-read role.
+  const role = readOwn(orig, "role");
+  let replacement: MessageLike;
+  try {
+    replacement = { ...(orig as MessageLike), content: newContent };
+  } catch {
+    replacement = { role: typeof role === "string" ? role : undefined, content: newContent };
+  }
+
+  // New array with index i replaced; other elements copied BY REFERENCE (never read → throwing-Proxy-safe — GOTCHA #12).
+  return messages.map((m, j) => (j === i ? replacement : m));
+}
+
+/**
  * Module-private: stringify a message's `content` for by_content_includes substring search (spec/06 §5 L128
  * "stringified content"). A string content → verbatim; an array content (content blocks) → JSON.stringify (so `text`
  * fields are searchable, e.g. `[{"type":"text","text":"ENOSPC at /disk"}]` includes "ENOSPC"); anything else
@@ -1279,47 +1326,91 @@ export function filterPipeline(
   const rewinds: RewindMarkerLike[] = Array.isArray(rewindsRaw) ? (rewindsRaw as RewindMarkerLike[]) : [];
   const shrinks: ShrinkMarkerLike[] = Array.isArray(shrinksRaw) ? (shrinksRaw as ShrinkMarkerLike[]) : [];
 
+  // ── COMPOSITION MODEL (composition-bug fix: pinned markers are IDENTITY-based, so they resolve against the
+  //    ORIGINAL message list and their effects UNION — they are INDEPENDENT of one another and of relative position.
+  //    The legacy relative resolvers, by contrast, are POSITION-based and MUST resolve against the reducing array per
+  //    spec/03 §5 — those stay sequential. The prior implementation ran EVERY rewind (incl. pinned) in one sequential
+  //    loop against the gap-closing `m`; after the first rewind shrank `m`, a later pinned rewind's branchEntries walk
+  //    misaligned (msgCursor+y > m.length) and refused → only the OLDEST pinned marker applied. Same defect broke a
+  //    pinned shrink whose target lived after a rewind's span: it walked the full branch against the shortened `m`
+  //    and no-op'd. The fix: PINNED rewinds + PINNED shrinks resolve by identity against the ORIGINAL `messages`, and
+  //    their index sets / substitution targets are TRANSLATED onto the reduced array via the index map maintained
+  //    below. Legacy rewinds stay sequential on `m`, exactly as before.) ──
   let m = messages;
 
-  // 1) REWINDS, oldest-first (stableSortBySeq). Each resolves against the CURRENT m; protectedOk gates each.
-  for (const rw of stableSortBySeq(rewinds)) {
+  // reducedToOrig[k] === the ORIGINAL-array index of the message currently at reduced position k. Tracked across every
+  // rewind (pinned OR legacy) so that (a) a legacy rewind's reduced-space `remove` indices can be recorded in original
+  // space (for shrink target-removal detection), and (b) a pinned shrink's original-space target index can be mapped
+  // to its current reduced position (or detected as removed). Ascending by construction; rebuilt on each removal.
+  let reducedToOrig: number[] = messages.map((_v, i) => i);
+
+  // removedOrig — ORIGINAL-array indices dropped by ANY rewind this fire. A pinned shrink whose original-space target
+  // is in this set NO-OPS (its target was already removed — spec/06 §5:143 "shrink after rewind-removed-target … no-ops").
+  const removedOrig = new Set<number>();
+
+  const orderedRewinds = stableSortBySeq(rewinds);
+  const branch = Array.isArray(branchEntries) ? branchEntries : [];
+
+  // 1a) PINNED REWINDS FIRST — resolve EVERY pinned rewind against the ORIGINAL `messages` (the only array 1:1-aligned
+  //     with the full branchEntries), UNION their removal-index sets, then apply ONE applyRewind. This is the fix for
+  //     MAJOR-1a (two pinned rewinds / N pinned rewinds collapse to only the oldest): because all pinned resolvers see
+  //     the SAME unreduced array, their walks never misalign, and the union hides every pinned span. diag.resolvedLen
+  //     for pinned rewinds is messages.length (the array their indices are relative to — matches the single-rewind case).
+  const pinnedRemove: number[] = [];
+  for (const rw of orderedRewinds) {
+    const hideEntryIdsRaw = readOwn(rw, "hideEntryIds");
+    if (!(Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0)) continue; // LEGACY — handled in phase 1b
+    const granularity = readOwn(rw, "granularity");
+    const remove = resolvePinnedHide(messages, branch, hideEntryIdsRaw as string[]);
+
+    if (Array.isArray(diag)) {
+      diag.push({
+        seq: readOwnSeq(rw),
+        granularity: typeof granularity === "string" ? granularity : undefined,
+        mode: "pinned",
+        remove: remove.slice(),
+        resolvedLen: messages.length,
+      });
+    }
+
+    // Defense-in-depth: skip rewinds that cross the protected first:user boundary (checked against the ORIGINAL array,
+    // which is where the pinned indices live). A refused rewind contributes nothing to the union.
+    if (!protectedOk(messages, remove, config)) continue;
+
+    for (const idx of remove) pinnedRemove.push(idx);
+  }
+  if (pinnedRemove.length > 0) {
+    m = applyRewind(m, pinnedRemove);
+    const drop = new Set(pinnedRemove);
+    for (const idx of pinnedRemove) removedOrig.add(idx);
+    reducedToOrig = reducedToOrig.filter((_orig, i) => !drop.has(i));
+  }
+
+  // 1b) LEGACY REWINDS — old markers WITHOUT hideEntryIds (capture-failed / pre-pinning). POSITION-based: each resolves
+  //     against the CURRENT (post-pinned-removal) `m`, gated by turnHasAdvanced (the replay guard). Per spec/03 §5 a
+  //     later rewind resolves against the already-reduced list, so these stay sequential on `m`. (Production markers
+  //     ALWAYS carry hideEntryIds → phase 1a → never here; this loop only affects the rare old/capture-failed marker.)
+  for (const rw of orderedRewinds) {
+    const hideEntryIdsRaw = readOwn(rw, "hideEntryIds");
+    if (Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0) continue; // PINNED — handled in phase 1a
     const granularity = readOwn(rw, "granularity");
     const excludeRaw = readOwn(rw, "excludeToolCallId");
     const excludeId = typeof excludeRaw === "string" ? excludeRaw : undefined;
-
-    // fix_design.md §Change 4: dispatch on PINNED hideEntryIds FIRST (permanent hiding across session growth — fixes
-    // BUG-001/BUG-002). New markers carry hideEntryIds (captureHideEntryIds, P1.M2.T3) — the stable ENTRY ids of the
-    // span to hide, captured ONCE at marker-creation time. resolvePinnedHide maps those ids → current message indices
-    // by IDENTITY every fire → the hidden set never shifts as the session grows (the agent's NEW work has NEW ids NOT
-    // in the pinned set → visible). On compaction/alignment refusal resolvePinnedHide returns [] (NOT null) → no-op
-    // this fire; it does NOT fall back to the relative branches (that re-introduces the bug). Old markers / K=0 /
-    // capture-failure (hideEntryIds absent or []) fall through to the granularity LEGACY branches below.
-    const hideEntryIdsRaw = readOwn(rw, "hideEntryIds");
-    const hasPin = Array.isArray(hideEntryIdsRaw) && hideEntryIdsRaw.length > 0;
-    const advanced = !hasPin && turnHasAdvanced(m, excludeId);
+    const advanced = turnHasAdvanced(m, excludeId);
     let remove: number[];
     let mode: RewindDiag["mode"];
-    if (hasPin) {
-      // PINNED PATH: stable anchors → permanent hiding. branchEntries default [] is safe (resolver returns [] on absent).
-      remove = resolvePinnedHide(m, Array.isArray(branchEntries) ? branchEntries : [], hideEntryIdsRaw as string[]);
-      mode = "pinned";
-    } else if (advanced) {
-      // SAFETY (BUG: turn-replay-loop, BUG_TURN_REPLAY_LOOP.md): no pinned span AND the turn has advanced past this
-      // rewind's own toolGroup (new non-note work was appended after it). The legacy relative resolvers re-resolve
-      // against the grown list every fire, so they would re-target the agent's NEW (in-progress) work and hide it every
-      // fire → the assistant replays its turn from the top after every tool call. No-op instead. (Production markers
-      // always carry hideEntryIds → take the PINNED branch and never reach here; this guard is the backstop for
-      // old/capture-failed markers with no pin.)
+    if (advanced) {
+      // SAFETY (BUG: turn-replay-loop): the turn advanced past this rewind's own toolGroup → the relative resolvers
+      // would re-target the agent's NEW work every fire and replay the turn. No-op instead.
       remove = [];
       mode = "legacy-noop-advanced";
     } else if (granularity === "last_tool_call_group") {
-      // LEGACY (old markers without hideEntryIds), CREATING/RESUME FIRE ONLY (turnHasAdvanced is false): relative
-      // re-resolution. RE-PARTITION fresh each iteration so unit.indices index the CURRENT m.
+      // CREATING/RESUME FIRE ONLY: relative re-resolution. RE-PARTITION fresh so unit.indices index the CURRENT m.
       const units = partitionIntoUnits(m);
       remove = resolveLastToolCallGroup(units, m, excludeId) ?? [];
       mode = "legacy-run";
     } else if (granularity === "last_turn") {
-      // LEGACY, CREATING/RESUME FIRE ONLY. options carries to_previous_prompt VERBATIM (GOTCHA #5).
+      // CREATING/RESUME FIRE ONLY. options carries to_previous_prompt VERBATIM (GOTCHA #5).
       remove = resolveLastTurn(
         m,
         readOwn(rw, "options") as { to_previous_prompt?: boolean } | undefined,
@@ -1327,21 +1418,16 @@ export function filterPipeline(
       ).remove;
       mode = "legacy-run";
     } else if (granularity === "checkpoint") {
-      // LEGACY, CREATING/RESUME FIRE ONLY. resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6).
+      // CREATING/RESUME FIRE ONLY. resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6).
       const cpRaw = readOwn(rw, "checkpoint");
       const cpName = typeof cpRaw === "string" ? cpRaw : "";
-      remove = resolveCheckpoint(m, Array.isArray(branchEntries) ? branchEntries : [], cpName, excludeId)?.remove ?? [];
+      remove = resolveCheckpoint(m, branch, cpName, excludeId)?.remove ?? [];
       mode = "legacy-run";
     } else {
       remove = []; // unknown granularity → no-op
       mode = "unknown-noop";
     }
 
-    // Per-rewind diagnostics (BUG: turn-replay-loop invariant log). When the caller passes a `diag` sink, record what
-    // each rewind resolved to THIS fire: its mode, the remove-index set, and the length of the array it resolved
-    // against (so the indices are interpretable). filter.ts logs a WARN if any rewind's remove touches the freshest
-    // messages (max(remove) >= resolvedLen-3) — the replay signature. Pure + optional: pushes only when the sink is
-    // present, so callers that omit it (the whole unit-test suite) are unaffected.
     if (Array.isArray(diag)) {
       diag.push({
         seq: readOwnSeq(rw),
@@ -1352,18 +1438,55 @@ export function filterPipeline(
       });
     }
 
-    // Defense-in-depth: skip (no-op) rewinds that cross the protected first:user boundary. (filter.ts logs the warn.)
+    // Defense-in-depth: skip rewinds that cross the protected first:user boundary. (filter.ts logs the warn.)
     if (!protectedOk(m, remove, config)) continue;
+    if (remove.length === 0) continue;
 
+    // Record the removed ORIGINAL indices (for pinned-shrink target-removal detection) BEFORE gap-closing, via the
+    // current reducedToOrig map. A legacy rewind's `remove` indices are in reduced-array space; map each to its origin.
+    for (const j of remove) {
+      if (j >= 0 && j < reducedToOrig.length) removedOrig.add(reducedToOrig[j]);
+    }
     m = applyRewind(m, remove);
+    const dropSet = new Set(remove);
+    reducedToOrig = reducedToOrig.filter((_orig, i) => !dropSet.has(i));
   }
 
   // 2) SHRINKS, oldest-first (stableSortBySeq), on the post-rewind array. applyShrink is defensive + total.
   //    `branchEntries` is passed so PINNED shrinks (FINDING 3 — pinnedEntryId) can resolve by identity via
   //    resolvePinnedShrink; live shrinks ignore it. (A real ShrinkMarkerLike is structurally assignable to applyShrink's
   //    {target, replacement, pinnedEntryId?} param — GOTCHA #4.)
+  //
+  //    COMPOSITION FIX (MAJOR-1b — pinned shrink after a rewind): a pinned shrink resolves its target by IDENTITY
+  //    against branchEntries, which is 1:1-aligned ONLY with the ORIGINAL `messages`, NOT the post-rewind reduced `m`.
+  //    So we resolve the pinned id against `messages` (original space); if that original index was removed by ANY
+  //    rewind this fire, the shrink no-ops (target gone — spec/06 §5:143). Otherwise we substitute at the TRANSLATED
+  //    reduced-array index (binary search of reducedToOrig — it is ascending). Live shrinks resolve against `m` as
+  //    before (no identity, no branchEntries alignment requirement).
   for (const sh of stableSortBySeq(shrinks)) {
-    m = applyShrink(m, sh, branchEntries);
+    const pinnedId = readOwn(sh, "pinnedEntryId");
+    if (typeof pinnedId === "string" && pinnedId.length > 0) {
+      // PINNED: resolve against the ORIGINAL messages (aligned with branchEntries). null/absent → no-op this fire
+      // (identity-or-nothing — the rewind precedent; NEVER fall back to live resolution).
+      const origIdx = resolvePinnedShrink(messages, branch, pinnedId);
+      if (origIdx === null) continue;
+      if (removedOrig.has(origIdx)) continue; // target removed by a rewind → no-op (spec/06 §5:143)
+      // Translate original index → reduced index. reducedToOrig is ascending; binary search for origIdx.
+      let lo = 0;
+      let hi = reducedToOrig.length - 1;
+      let reducedIdx = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const v = reducedToOrig[mid];
+        if (v === origIdx) { reducedIdx = mid; break; }
+        if (v < origIdx) lo = mid + 1; else hi = mid - 1;
+      }
+      if (reducedIdx < 0) continue; // defensively not found (shouldn't happen post removedOrig check) → no-op
+      m = applyShrinkAt(m, sh, reducedIdx);
+    } else {
+      // LIVE: re-resolve the selector against the current reduced `m` (compaction-robust; spec/06 §5).
+      m = applyShrink(m, sh, branchEntries);
+    }
   }
 
   return m;

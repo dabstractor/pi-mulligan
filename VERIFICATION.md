@@ -83,17 +83,22 @@ The authoritative leak signal is a **persisted custom message** of that type
   authored during the prior 26 subtasks) — **0 are persisted custom messages**. This is the
   GOTCHA #4 belt-and-suspenders distinction.
 
-### DoD #4 — verified at the unit level in v1 (settings-driven disable is v1.1)
-`src/index.ts:29` calls `setConfig(undefined)` → `DEFAULT_CONFIG` (`enabled:true`) at load. The
-factory does **not** read real `settings.mulligan` (`index.ts:28`: "reading real settings.mulligan
-is v1.1"). So at runtime `enabled` is always `true` via Pi settings in v1. DoD #4 is therefore
-verified at the **unit level**: `setConfig({enabled:false})` then assert each gated entry point
-no-ops/refuses. See `plan/.../P1M7T4S2/research/enabled-disabled-analysis.md`.
+### DoD #4 — settings-driven disable (shipped, end-to-end verified)
+`src/index.ts` calls `setConfig(loadMulliganConfig(process.cwd()))` at load — it **does** read real merged
+Pi settings (global `~/.pi/agent/settings.json` via `getAgentDir` + project-local `<cwd>/.pi/settings.json`),
+via `loadMulliganConfig` (src/settings.ts). `setConfig` validates + caches the result; absent/invalid settings
+fail-open to validated `DEFAULT_CONFIG` (`enabled:true`). So settings-driven disable works end-to-end: an
+`enabled:false` (or `enabled:false` in a project-local `.pi/settings.json`) → the extension loads + every gated
+entry point no-ops/refuses (verified by `validate.sh` Phase 6). (Earlier drafts of this note described a
+`setConfig(undefined)` placeholder from before `settings.ts` shipped; that is stale — corrected here.)
 
-**`audit` + `checkpoint` are intentionally non-gated** (GOTCHA #3 — always-on read-only
-diagnostics / harmless labels). DoD #4's pure-no-op applies to the **5 gated** entry points
-(filter, rewind, shrink, bloat nudge, turn_end nudge), not audit/checkpoint. Adding a gate to
-audit/checkpoint would be a regression.
+**`checkpoint` is non-gated** (always-on; a harmless label write). **`audit` IS gated** on the master
+`config.enabled` switch (BUG-005 fix, src/tools/audit.ts: when `enabled` is false the audit refuses
+"Mulligan is disabled" before doing any work — matching the other gated entry points). DoD #4's pure-no-op
+applies to the gated entry points (filter, rewind, shrink, audit, bloat nudge, turn_end nudge), not checkpoint.
+An earlier draft of this note claimed audit + checkpoint were "intentionally non-gated"; that pre-dates the
+BUG-005 audit gate and is corrected here. (There is still no `config.audit.enabled` sub-switch — audit gates
+on the master only, like the others.)
 
 ### DoD #2/#5 — smoke `soft` notes are not failures
 `run-smoke.mjs` marks model-driven assertions as `soft` (canary-drop, `bloatHit:true`,
@@ -129,7 +134,7 @@ a clean run: clear the smoke session files first
 A v1.1 harness improvement could give each scenario a unique run-scoped `--session-id`.
 
 ### DoD #6 — zero-config smoke: load success ≠ model response
-`pi -e ./src/index.ts -p "..."` loads the factory (`setConfig(undefined)` + 4 `registerTool` +
+`pi -e ./src/index.ts -p "..."` loads the factory (`setConfig(loadMulliganConfig(cwd))` + 4 `registerTool` +
 3 `pi.on` + lifecycle) and THEN makes a model call. The acceptance check (`spec/11` §2 Step 9)
 is the **load** — no "Error loading extension", no factory-time stack trace. A model/API error
 happens AFTER the factory ran and is NOT a load failure (GOTCHA #5). In this pass the model also

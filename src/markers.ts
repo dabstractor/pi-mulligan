@@ -419,9 +419,10 @@ export type SetCheckpointResult = { entryId: string } | { error: string };
  * reads the branch through `ctx.sessionManager.getBranch()` (ROOT→LEAF `SessionEntry[]` — read-only, C1).
  * Reads `ctx.sessionManager` FRESH each call (C12/GOTCHA #10).
  *
- * Returns `{entryId: stableId}` (the labeled message entry id) on success; `{error: "no stable entry to checkpoint"}`
- * when the branch has no `message` entry with a real role (and does NOT call setLabel); or `{error: <msg>}` on any
- * thrown failure (try/catch — e.g. a throwing getBranch). NEVER throws.
+ * Returns `{entryId: stableId}` (the labeled message entry id) on success; `{error: "no conversation message to checkpoint"}`
+ * when the branch has no `message` entry with a real role (the agent called mulligan_checkpoint before any real
+ * user→assistant exchange — there is nothing stable to anchor; the agent should emit a message first and retry) and
+ * does NOT call setLabel; or `{error: <msg>}` on any thrown failure (try/catch — e.g. a throwing getBranch). NEVER throws.
  *
  * NOTE (GOTCHA #7): `name` validation (`/^[a-z0-9_-]{1,40}$/`, spec/05 §3 step 1) is the checkpoint TOOL's job, NOT
  * this wrapper's — the wrapper trusts the caller's `name` and only prefixes it.
@@ -456,7 +457,15 @@ export function setCheckpoint(
         break;
       }
     }
-    if (!stableId) return { error: "no stable entry to checkpoint" };
+    if (!stableId) {
+      // No real conversation message on the branch yet (the agent called mulligan_checkpoint as its very first
+      // action, before any user→assistant exchange). There is nothing stable to anchor: the only entries present
+      // are the session header / non-context-producing Mulligan writes, none of which resolveCheckpoint can map.
+      // Tell the agent WHY (no prior conversation) and WHAT TO DO (emit a message first, then retry) so it can
+      // recover instead of looping on the refusal. We deliberately do NOT fall back to labeling the raw leaf —
+      // that would create an unmappable checkpoint and just defer the failure to rewind time (BUG-003).
+      return { error: "no conversation message to checkpoint (emit a message first, then retry)" };
+    }
     pi.setLabel(stableId, `mulligan:checkpoint:${name}`);
     return { entryId: stableId };
   } catch (e) {

@@ -628,11 +628,11 @@ describe("setCheckpoint — labels the leaf with 'mulligan:checkpoint:<name>' (s
     expect(labels[0].label).toBe("mulligan:checkpoint:x_y-z1");
   });
 
-  it("returns {error:'no stable entry to checkpoint'} when the branch has no message, and does NOT call setLabel", () => {
+  it("returns {error:'no conversation message to checkpoint'} when the branch has no message, and does NOT call setLabel", () => {
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({ leafId: null });   // → defaultBranch = [] (no stable message)
     const res = setCheckpoint(pi, ctx, "x");
-    expect(res).toEqual({ error: "no stable entry to checkpoint" });
+    expect(res).toEqual({ error: "no conversation message to checkpoint (emit a message first, then retry)" });
     expect(labels).toHaveLength(0);
   });
 
