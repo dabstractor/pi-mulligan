@@ -95,7 +95,7 @@ All 20 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `nudges.perTurnDrift` | `true` | Inject a one-line drift nudge when a turn grew past the token threshold. |
 | `nudges.bloatThresholdBytes` | `16384` | Global catch-all: in-context byte size of a single tool result above which the bloat reminder fires (16 KB — below Pi's ~50 KB cap). A tool listed in `bloatThresholdBytesByTool` uses its own value instead; tools not listed fall back to this. |
 | `nudges.bloatThresholdBytesByTool` | `{ "read": 24576 }` | Per-tool byte thresholds (keyed by Pi `toolName`). A tool listed here uses its own value instead of the global `bloatThresholdBytes`; tools not listed fall back to the global. `bash` is intentionally NOT listed — it is the primary bloat surface, so it uses the 16 KB global default to stay maximally sensitive; `read` gets 24 KB because large source-file reads are routine. |
-| `nudges.driftThresholdTokens` | `6000` | Windowed (`spec/07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from the previous 3k default after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
+| `nudges.driftThresholdTokens` | `4000` | Windowed (`spec/07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. The moving average over `driftWindowTurns` is compared with `>=` (not `>`), so sustained growth of ~4k/turn over the window fires (§5.1 criterion (b)) while a single heavy turn amid small ones does not (§5.1 (a)); the earlier 6k + strict-`>` default failed to fire on three consecutive ~4k turns. |
 | `nudges.driftWindowTurns` | `3` | Rolling window (in turns) over which the per-turn token delta is smoothed before thresholding (`spec/07-preventive-and-nudges.md` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered — fires once on crossing, clears when the total drops back below). Catches slow, steady accumulation the delta nudge misses. |
 | **audit** | | |
@@ -113,14 +113,14 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
   //   "enabled": true,
   //   "rewind": { "maxDepth": 5, "maxRetriesPerPrompt": 5, "abortContextFraction": 0.9 },
   //   "shrink": { "maxActive": 32, "staleAfterFires": 3, "notifyMaxChars": 2048 },
-  //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "read": 24576 }, "driftThresholdTokens": 6000, "driftWindowTurns": 3, "highWaterFraction": 0.7 }
+  //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "read": 24576 }, "driftThresholdTokens": 4000, "driftWindowTurns": 3, "highWaterFraction": 0.7 }
   // }
 }
 ```
 
 #### Disabling
 
-`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and the four state-affecting tools refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (`rewind`, `shrink`, `cancel`, **and `audit`** all gate on the master switch — audit refuses when disabled while staying read-only). Only `checkpoint` remains available as an always-on read-only diagnostic (it sets a harmless label, no transform). The human can disable Mulligan without uninstalling it.
+`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and **all five tools** refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (`rewind`, `shrink`, `cancel`, `audit`, **and `checkpoint`** all gate on the master switch — each refuses before doing any work; `audit` refuses while staying read-only in its normal operation). The human can disable Mulligan without uninstalling it.
 
 ---
 
