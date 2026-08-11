@@ -388,9 +388,19 @@ async function cancelExecute(
     // else: neither markerId nor target → targetUuid stays null → step 4 no-op (Decision D2 — no new refusal).
 
     // (4) not-found no-op (spec/05 §5 step 4; E21 (d) — safe no-op, never throws). appendCancelMarker NOT called.
+    //     BUG-006: emit path-specific text. markerId path keeps "with that id"; target/neither path uses
+    //     the spec/05 §5 verbatim "for that target" text (Decision D1 — markerId wins when both are given).
+    const usedMarkerId = typeof params.markerId === "string" && params.markerId.length > 0;
     if (targetUuid === null) {
       return {
-        content: [{ type: "text", text: "Mulligan: no active marker found with that id — nothing to cancel." }],
+        content: [
+          {
+            type: "text",
+            text: usedMarkerId
+              ? "Mulligan: no active marker found with that id — nothing to cancel."
+              : "Mulligan: no active marker found for that target — nothing to cancel.",
+          },
+        ],
         details: { cancelled: false },
       };
     }

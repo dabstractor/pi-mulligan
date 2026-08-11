@@ -556,9 +556,9 @@ describe("mulligan_cancel — types (ToolDefinition + CancelParams inference)", 
 // the uuid mapping (a bug forwarding the entry id fails the assertion). nextSeq leaks across tests via the
 // shared runtime map → clearAll() in the global beforeEach/afterEach (GOTCHA #8) + resetSnapshotSeq() here.
 //
-// ⚠️ VERIFY-AT-IMPLEMENTATION RESOLUTION (research flagged this): S2's cancel.ts returns the SAME not-found
-// text for BOTH paths — "Mulligan: no active marker found with that id — nothing to cancel." (NOT a separate
-// "...for that target" string). The target-path no-op cases below pin that shared string.
+// BUG-006 (fixed): cancel.ts emits PATH-SPECIFIC not-found text. The markerId path returns "with that id"
+// (unchanged); the target path returns the spec/05 §5 verbatim "for that target" text. The target-path
+// no-op cases below pin the target-specific string (markerId-path cases above pin "with that id").
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════
 
 describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
@@ -762,7 +762,7 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
 
     expect(appended).toHaveLength(0); // markers EXIST but none COVER → no-op
-    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
     expect(res.details).toEqual({ cancelled: false });
   });
 
@@ -781,7 +781,7 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
 
     expect(appended).toHaveLength(0);
-    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
     expect(res.details).toEqual({ cancelled: false });
   });
 
@@ -800,7 +800,7 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
 
     expect(appended).toHaveLength(0);
-    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
     expect(res.details).toEqual({ cancelled: false });
   });
 
@@ -905,7 +905,7 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     await expect(run(pi, ctx, { target: { by_tool_call_id: "call-A" } })).resolves.toBeDefined();
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
     expect(appended).toHaveLength(0); // null targetUuid → no-op
-    expect(firstText(res)).toBe("Mulligan: no active marker found with that id — nothing to cancel.");
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
     expect(res.details).toEqual({ cancelled: false });
   });
 });
