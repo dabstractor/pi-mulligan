@@ -27,7 +27,7 @@ describe("DEFAULT_CONFIG", () => {
         perTurnDrift: true,
         bloatThresholdBytes: 16384,
         bloatThresholdBytesByTool: { read: 24576 },
-        driftThresholdTokens: 6000,
+        driftThresholdTokens: 4000,
         driftWindowTurns: 3,
         highWaterFraction: 0.7,
       },
@@ -60,7 +60,7 @@ describe("validateConfig", () => {
   it("deep-merges partial valid overrides over defaults", () => {
     const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } });
     expect(cfg.nudges.bloatThresholdBytes).toBe(100);
-    expect(cfg.nudges.driftThresholdTokens).toBe(6000); // unchanged default
+    expect(cfg.nudges.driftThresholdTokens).toBe(4000); // unchanged default (BUG-003: lowered from 6000)
     expect(cfg.enabled).toBe(true); // unchanged
   });
 
@@ -218,7 +218,7 @@ describe("validateConfig", () => {
     try {
       const cfg = validateConfig({ nudges: { bloatThresholdBytes: 100 } }); // driftThresholdTokens absent
       expect(cfg.nudges.bloatThresholdBytes).toBe(100);
-      expect(cfg.nudges.driftThresholdTokens).toBe(6000); // absent → default, silently
+      expect(cfg.nudges.driftThresholdTokens).toBe(4000); // absent → default, silently
       expect(warn).not.toHaveBeenCalled(); // ZERO warns for a fully-valid partial override
       // …but a present-but-INVALID value DOES warn (exactly once, naming the field):
       warn.mockClear();
@@ -335,14 +335,14 @@ describe("shrink.maxActive & shrink.staleAfterFires (P3.M2.T1.S1 / spec/09 §2-�
   });
 });
 
-describe("nudges.driftWindowTurns & nudges.highWaterFraction + driftThresholdTokens 6000 (P3.M3.T1.S1 / spec/09 §2-§4)", () => {
-  it("(a) defaults: driftWindowTurns 3, highWaterFraction 0.7, driftThresholdTokens 6000 — NO warn", () => {
+describe("nudges.driftWindowTurns & nudges.highWaterFraction + driftThresholdTokens 4000 (P3.M3.T1.S1 / spec/09 §2-§4, BUG-003)", () => {
+  it("(a) defaults: driftWindowTurns 3, highWaterFraction 0.7, driftThresholdTokens 4000 — NO warn", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const cfg = validateConfig({});
       expect(cfg.nudges.driftWindowTurns).toBe(3);
       expect(cfg.nudges.highWaterFraction).toBe(0.7);
-      expect(cfg.nudges.driftThresholdTokens).toBe(6000);
+      expect(cfg.nudges.driftThresholdTokens).toBe(4000);
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

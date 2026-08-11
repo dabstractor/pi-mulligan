@@ -280,18 +280,16 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
  * bloatHit survives ONLY in the no-delta fallback so a bloated result on turn 1 (before any baseline exists) still
  * nudges.
  *
- * SPEC-AMBIGUITY RESOLUTION (architecture implementation_patterns.md Pattern 8): spec/07 §5.1 gives two acceptance
- * criteria — (1) a single 8k-token turn amid small turns does NOT fire; (2) three ~4k turns in a row DO — and
- * offers "moving-average, OR M-of-N" with threshold 6000, window 3. Neither pure algorithm satisfies BOTH literally
- * at threshold 6000: moving-average [8k,0.5k,0.5k]=3k<6k→no fire ✓ but [4k,4k,4k]=4k<6k→no fire ✗; sum
- * [8k,0.5k,0.5k]=9k>6k→fire ✗ but [4k,4k,4k]=12k>6k→fire ✓. The PRIMARY intent of §5.1 (and the reason it exists)
- * is to SUPPRESS SINGLE SPIKES — a single heavy turn is routinely legitimate (reading files, pasting docs). Moving
- * average is the algorithm that satisfies that primary intent (criterion 1). Criterion 2 ("three ~4k turns fire")
- * is ILLUSTRATIVE of "sustained growth fires"; with the §5.1-windowing-justified raised threshold of 6000
- * (config.ts: "the §5.1 windowing makes 6000 a quiet, accurate trip point"), three 4k turns averaging 4k correctly
- * do NOT fire — sustained growth whose windowed AVERAGE exceeds 6000 (e.g. three ~7k turns) DOES. Chosen algorithm:
- * MOVING AVERAGE vs threshold, DELTA-ONLY (bloat demoted to the no-delta fallback per P4.M2.T1.S1 / spec/07 §5.1).
- * (Matches the item contract + Pattern 8 FINAL ANSWER, updated for the bloat demotion.)
+ * SPEC-AMBIGUITY RESOLUTION (spec/07 §5.1, BUG-003 fix): spec/07 §5.1 gives three acceptance criteria —
+ * (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire; (c) a single
+ * large result with ~0 net growth does NOT fire. With the DEFAULT threshold LOWERED to 4000 (config.ts) and the
+ * comparison changed from `>` to `>=`, the moving-average algorithm satisfies ALL THREE literally:
+ *   (a) avg([8k,0.5k,0.5k])=3k >= 4k? No → no fire ✓
+ *   (b) avg([4k,4k,4k])=4k   >= 4k? Yes → fire ✓   (was 4k > 6k → no fire — the BUG-003 violation)
+ *   (c) avg(~0)              >= 4k? No → no fire ✓
+ * Chosen algorithm: MOVING AVERAGE vs threshold, DELTA-ONLY (bloat demoted to the no-delta fallback per
+ * P4.M2.T1.S1 / spec/07 §5.1). The earlier "ILLUSTRATIVE" recharacterization of criterion (b) is RETIRED —
+ * (b) is now a firm, satisfied acceptance criterion at the lowered default.
  *
  * The bloat fallback uses `=== true` (not truthy) so a malformed metric — readMarkers casts raw session data, so
  * `bloatHit` could be undefined/non-boolean — fails safe to "no bloat". Delta values are guarded with
@@ -307,7 +305,7 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
  *                       (MarkersBundle.recentMetrics from P3.M3.T3.S1). This function slices the first
  *                       `driftWindowTurns` itself; the caller passes the full array.
  * @param config        the MulliganConfig (reads nudges.driftWindowTurns + nudges.driftThresholdTokens).
- * @returns true iff the windowed moving-average delta > driftThresholdTokens (delta-only when delta data exists);
+ * @returns true iff the windowed moving-average delta >= driftThresholdTokens (delta-only when delta data exists);
  *          bloatHit is a fallback ONLY when no window metric has a usable delta (first turn / post-reload).
  */
 export function shouldNudge(recentMetrics: TurnMetric[], config: MulliganConfig): boolean {
@@ -317,7 +315,7 @@ export function shouldNudge(recentMetrics: TurnMetric[], config: MulliganConfig)
     .filter((d): d is number => typeof d === "number" && Number.isFinite(d));
   if (deltas.length === 0) return window.some((m) => m.bloatHit === true);
   const avg = deltas.reduce((a, b) => a + b, 0) / deltas.length;
-  return avg > config.nudges.driftThresholdTokens;
+  return avg >= config.nudges.driftThresholdTokens;
 }
 
 /**

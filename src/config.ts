@@ -96,8 +96,10 @@ export interface MulliganConfig {
      *  a higher bar (24 KB) because large source-file reads are routine and legitimate. */
     bloatThresholdBytesByTool?: Record<string, number>;
     /** Turn token-delta above which the per-turn drift nudge fires. Must be > 0.
-     *  Default: 6000 (raised from 3000; spec/09 §3: the §5.1 windowing makes 6000
-     *  a quiet, accurate trip point). */
+     *  Default 4000. The moving-average over driftWindowTurns (default 3) compared with `>=` satisfies all three
+     *  spec/07 §5.1 acceptance criteria: (a) a single 8k turn amid small turns averages <4000 → no fire;
+     *  (b) three ~4k turns average ~4000 >= 4000 → fire; (c) a single large result with ~0 net growth averages
+     *  ~0 → no fire. (Lowered from 6000 + `>=` — BUG-003: at 6000 with `>`, criterion (b) never fired.) */
     driftThresholdTokens: number;
     /** Rolling window (in turns) over which the per-turn token delta is smoothed
      *  before thresholding (spec/07 §5.1). Positive integer (>= 1; fractional values that floor below 1
@@ -153,7 +155,7 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     perTurnDrift: true,
     bloatThresholdBytes: 16384,
     bloatThresholdBytesByTool: { read: 24576 },
-    driftThresholdTokens: 6000,
+    driftThresholdTokens: 4000,
     driftWindowTurns: 3,
     highWaterFraction: 0.7,
   },

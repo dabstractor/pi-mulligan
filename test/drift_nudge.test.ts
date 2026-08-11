@@ -118,6 +118,24 @@ describe("shouldNudge — windowed drift gate (spec/07 §5.1)", () => {
     expect(result).toBe(false);
     expect(typeof result).toBe("boolean");
   });
+
+  it("FIRES on three ~4k turns in a row at the lowered default threshold 4000 (BUG-003 / spec/07 §5.1 criterion b)", () => {
+    // Lowered default 4000 + `>=`: avg([4k,4k,4k]) = 4000 >= 4000 → fire.
+    // (Before the fix: avg 4000 > 6000 → false → criterion (b) violated.)
+    expect(shouldNudge([m(4000, false, 3), m(4000, false, 2), m(4000, false, 1)], cfg(3, 4000))).toBe(true);
+  });
+
+  it("boundary: windowed average EXACTLY equal to threshold fires (`>=`); one tick below does NOT", () => {
+    // avg([4k,4k,4k]) === driftThresholdTokens (4000) → fire (the >= edge that satisfies criterion b).
+    expect(shouldNudge([m(4000, false, 3), m(4000, false, 2), m(4000, false, 1)], cfg(3, 4000))).toBe(true);
+    // avg([3999,4k,4k]) = 3999.67 < 4000 → no fire.
+    expect(shouldNudge([m(3999, false, 3), m(4000, false, 2), m(4000, false, 1)], cfg(3, 4000))).toBe(false);
+  });
+
+  it("does NOT fire on a single heavy turn amid small turns at threshold 4000 (criterion a holds at new default)", () => {
+    // avg([8k,0.5k,0.5k]) = 3000 >= 4000? No → no fire (criterion a preserved at the lowered default).
+    expect(shouldNudge([m(8000, false, 3), m(500, false, 2), m(500, false, 1)], cfg(3, 4000))).toBe(false);
+  });
 });
 
 // ── injectNudge ─────────────────────────────────────────────────────────────────────────────
