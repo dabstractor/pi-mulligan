@@ -121,7 +121,7 @@
       "type": "Phase",
       "id": "P2",
       "title": "SnapshotStore backends — store.ts interface + GitBackend + CasBackend",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Build the bulk of the new code: the SnapshotStore interface + factory + AsyncMutex (store.ts), the external shadow-repo GitBackend (git.ts), and the content-addressed CasBackend with both cas and explicit-paths modes (cas.ts). Depends on P1 (config, paths.ts, types).",
       "milestones": [
         {
@@ -231,14 +231,14 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "CasBackend — content-addressed store + non-git modes",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Create src/snapshot/cas.ts implementing the SnapshotStore interface via a minimal content-addressed store. Supports 'cas' mode (whole-tree walk with mtime short-circuit) and 'explicit-paths' mode (capture only write/edit tool paths).",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "Implement CasBackend (src/snapshot/cas.ts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The universal non-git backend. ~300 LOC: SHA-256 hashing, blob dedupe, JSON manifest, mtime/size short-circuit for cas mode, explicit-paths capture for the conservative mode, dirtyCheck via hash equality, restore via blob write, retire via manifest delete.",
               "subtasks": [
                 {
@@ -264,7 +264,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S2",
                   "title": "CAS 'cas' mode whole-tree capture with mtime short-circuit",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M3.T1.S1"
@@ -280,7 +280,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S3",
                   "title": "CAS explicit-paths mode + dirtyCheck + restore + retire + has",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M3.T1.S2"

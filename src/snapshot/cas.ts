@@ -5,9 +5,11 @@ import {
   mkdir as fsMkdir,
   access as fsAccess,
   stat as fsStat,
+  readdir as fsReaddir,
 } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { AsyncMutex, type SnapshotStore, type RestoreOpts, type RestoreResult } from "./store.js";
+import { normalizeRelPath, isDangerousWorkspaceRel } from "./paths.js";
 import type { MulliganConfig } from "../config.js";
 
 /**
@@ -161,6 +163,8 @@ export interface CasFs {
   access(path: string): Promise<void>;
   /** stat() — S2's capture reads size/mtimeMs (S1's storeBlob does NOT stat). */
   stat(path: string): Promise<{ size: number; mtimeMs: number }>;
+  /** readdir({withFileTypes:true}) — S2's capture walks the cwd tree. */
+  readdir(path: string, opts: { withFileTypes: true }): Promise<import("node:fs").Dirent[]>;
 }
 
 /**
@@ -187,6 +191,7 @@ const realFs: CasFs = {
   mkdir: fsMkdir,
   access: fsAccess,
   stat: fsStat,
+  readdir: fsReaddir,
 };
 
 /**
@@ -205,6 +210,9 @@ export class CasBackend implements SnapshotStore {
   private readonly sessionDir: string | null;
   private readonly mutex = new AsyncMutex();
   private readonly fs: CasFs;
+  /** maxSnapshotsPerTurn cap; incremented per successful capture. Reset by lifecycle P3 at turn
+   *  boundary (parity with GitBackend — spec §4.3). */
+  private capturesThisTurn = 0;
 
   /**
    * @param cwd            the workspace root to snapshot (resolved).
@@ -306,12 +314,153 @@ export class CasBackend implements SnapshotStore {
     return this.fs.readFile(this.blobPath(hash));
   }
 
-  // ── P2.M3.T1.S2 stub (capture) — NOT implemented here. ─────────────────────────────────────
-  // Throwing (not a silent no-op) so a premature caller fails loud. detectAndCreate is not wired
-  // into index.ts until P3.M1.T2 (after S2/S3 land), so no live code hits this. Async (the interface
-  // is async — a sync stub would fail `implements SnapshotStore`).
-  async capture(_label: string): Promise<string | null> {
-    throw new Error("CasBackend.capture not implemented — see P2.M3.T1.S2");
+  /**
+   * @internal Load the previous manifest's per-file entries for `label` into a Map keyed by
+   * workspace-relative path, for the mtime/size short-circuit (spec/14 §4.1: "if (mtime,size) matches
+   * the previous manifest, reuse its hash and skip re-read/re-hash"). Returns an EMPTY map when the
+   * label has no manifest yet OR the stored manifest is missing/corrupt (parseManifest throws on a
+   * bad version → swallowed → full capture with NO short-circuit). NEVER throws — a failure here is
+   * a benign fall-back to a full read/hash/store pass. The manifest is read from
+   * `<storageDir>/manifests/<label>.json` (consecutive capture('turn') overwrites it; this reads the
+   * prior turn's entry map). spec/14 §4.1.
+   */
+  private async loadPrevEntries(
+    label: string,
+  ): Promise<Map<string, { hash: string; size: number; mtime: number }>> {
+    const map = new Map<string, { hash: string; size: number; mtime: number }>();
+    try {
+      const p = this.manifestPath(label);
+      await this.fs.access(p); // rejects if absent → empty map (first capture for this label)
+      const buf = await this.fs.readFile(p); // CasFs.readFile returns a Buffer
+      const m = parseManifest(buf.toString("utf8")); // parseManifest takes a STRING; throws on bad version
+      for (const [path, e] of Object.entries(m.files)) {
+        map.set(path, { hash: e.hash, size: e.size, mtime: e.mtime });
+      }
+    } catch {
+      // missing label OR corrupt JSON → no short-circuit (full capture). Silent — first capture.
+    }
+    return map;
+  }
+
+  /**
+   * @internal Recursively walk `absDir`, invoking `visit(rel, abs, stat)` for every allowed FILE
+   * (dirs recurse; symlinks/sockets/etc. are ignored — only `isFile()` is captured, mirroring
+   * git.ts's scanForCaps walk exactly so the two backends share lexical safety + exclusion
+   * semantics, spec §4.3 backend parity). PRUNES any subtree rooted at a dangerous dir
+   * (`.git`/`.pi`/`node_modules` — isDangerousWorkspaceRel, paths.ts safety floor) or whose rel
+   * path has a `/`-segment case-insensitively matching an excludeGlob (config perf filter). An
+   * unreadable dir/file is SKIPPED (best-effort — never throws from the walk itself; visitor errors
+   * propagate to capture's single try/catch). spec/14 §4.1 (walk cwd recursively), §4.3 (path safety).
+   */
+  private async walkTree(
+    absDir: string,
+    excludeSet: Set<string>,
+    visit: (rel: string, abs: string, st: { size: number; mtimeMs: number }) => Promise<void>,
+  ): Promise<void> {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await this.fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir → skip subtree (mirror git.ts)
+    }
+    for (const entry of entries) {
+      const abs = join(absDir, entry.name);
+      const rel = normalizeRelPath(this.cwd, abs);
+      if (isDangerousWorkspaceRel(rel)) continue; // safety floor — PRUNE subtree
+      if (rel.split("/").some((s) => excludeSet.has(s.toLowerCase()))) continue; // perf filter — PRUNE
+      if (entry.isDirectory()) {
+        await this.walkTree(abs, excludeSet, visit);
+      } else if (entry.isFile()) {
+        let st: { size: number; mtimeMs: number };
+        try {
+          st = await this.fs.stat(abs);
+        } catch {
+          continue; // unreadable file → skip
+        }
+        await visit(rel, abs, st);
+      }
+      // symlinks/sockets/etc. → ignored (only real files captured; symlinked dirs NOT recursed —
+      // entry.isDirectory() is false for symlinks, mirroring git.ts).
+    }
+  }
+
+  /**
+   * Snapshot the whole working set NOW (the 'cas' default non-git mode) and return `label` as the
+   * ref. Walks cwd (minus excludeGlobs + dangerous dirs), stats every file, and:
+   *  - reuses the previous manifest's hash when (mtimeMs,size) is unchanged (git's index-refresh
+   *    trick — O(changed-files) steady-state I/O, spec/14 §4.1);
+   *  - else reads + hashes + stores (deduped) the content into the blob store.
+   * Caps (spec §5, E29): maxFileBytes → skip+warn (fail-closed); maxTotalBytes → skip files beyond
+   * the budget + mark the manifest PARTIAL (capture STILL returns the label — CAS is file-by-file,
+   * NOT atomic, so it diverges from git.ts which ABORTS here; this divergence is the deliberate
+   * design — E29); maxSnapshotsPerTurn → return null (abort). Serialized by the per-instance
+   * AsyncMutex (§4.3) — max-in-flight 1 across capture/dirtyCheck/restore/retire/gc.
+   * BEST-EFFORT: any thrown error → console.warn + return null (never rejects). @14 §4.1.
+   *
+   * @returns the manifest label (ref === label; `<storageDir>/manifests/<label>.json` is resolvable
+   *          by S3's has/retire/dirtyCheck/restore). `null` only on count-cap abort OR a thrown error.
+   */
+  async capture(label: string): Promise<string | null> {
+    const release = await this.mutex.acquire(); // spec §4.3 — whole body serialized
+    try {
+      // Cap 1 — per-turn snapshot count (parity with GitBackend; reset by lifecycle P3).
+      if (this.capturesThisTurn >= this.cfg.maxSnapshotsPerTurn) {
+        console.warn(
+          `[mulligan] snapshot.capture: maxSnapshotsPerTurn (${this.cfg.maxSnapshotsPerTurn}) reached — skipping ${label}`,
+        );
+        return null;
+      }
+      const prev = await this.loadPrevEntries(label); // short-circuit source; empty on miss/corrupt
+      const files: Record<string, CasManifestEntry> = {};
+      let totalBytes = 0;
+      let partial = false;
+      const excludeSet = new Set(this.cfg.excludeGlobs.map((g) => g.toLowerCase()));
+
+      await this.walkTree(this.cwd, excludeSet, async (rel, abs, st) => {
+        // oversize → fail-closed skip+warn (never silently claim restorable)
+        if (st.size > this.cfg.maxFileBytes) {
+          console.warn(
+            `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
+          );
+          return;
+        }
+        // mtime/size short-circuit — reuse stored hash, NO read/re-hash/store
+        const pe = prev.get(rel);
+        if (pe && pe.size === st.size && pe.mtime === st.mtimeMs) {
+          files[rel] = { hash: pe.hash, size: st.size, mtime: st.mtimeMs, existed: true };
+          return;
+        }
+        // byte budget → stop accepting NEW data, mark PARTIAL (E29). NOT abort (CAS is file-by-file;
+        // git.ts aborts here because git is atomic — this is the deliberate divergence, §4.3).
+        if (totalBytes + st.size > this.cfg.maxTotalBytes) {
+          partial = true;
+          console.warn(
+            `[mulligan] snapshot.capture: maxTotalBytes (${this.cfg.maxTotalBytes}) reached — partial snapshot, skipping: ${rel}`,
+          );
+          return;
+        }
+        const content = await this.fs.readFile(abs);
+        const hash = await this.hashContent(content);
+        await this.storeBlob(content); // deduped via access (S1)
+        files[rel] = { hash, size: st.size, mtime: st.mtimeMs, existed: true };
+        totalBytes += st.size;
+      });
+
+      const manifest: CasManifest = { version: 1, label, turnIndex: 0, ts: Date.now(), files };
+      await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
+      await this.fs.writeFile(this.manifestPath(label), Buffer.from(serializeManifest(manifest), "utf8"));
+      this.capturesThisTurn++;
+      if (partial) {
+        console.warn(`[mulligan] snapshot.capture: wrote PARTIAL manifest for ${label} (maxTotalBytes cap)`);
+      }
+      return label; // ref === label
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[mulligan] snapshot.capture failed: ${msg}`);
+      return null;
+    } finally {
+      release();
+    }
   }
 
   // ── P2.M3.T1.S3 stubs (dirtyCheck/restore/has/retire) — NOT implemented here. ──────────────
