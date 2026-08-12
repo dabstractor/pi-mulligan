@@ -281,18 +281,19 @@ function assistantIssuedCall(
  * A TURN = a user message plus everything after it up to (not including) the next user message. The last turn
  * begins at iLastUser = index of the last message with role "user".
  *
- * ALGORITHM (spec/06 §4, steps 1–3):
+ * ALGORITHM (spec/06 §4, v1.1):
  *   1. Find iLastUser = index of the last "user" message. If none → { remove: [] } (nothing to rewind — protected).
- *   2. DEFAULT (opts.to_previous_prompt !== true): KEEP the user message; remove every message AFTER iLastUser
- *      EXCEPT (a) the rewind's OWN unit (the assistant message that issued `excludeToolCallId` + its results —
- *      partitioned via partitionIntoUnits, detected via assistantIssuedCall from S1), and (b) any `mulligan:*`
- *      custom messages at the tail (the note MUST survive so the resumed model reads it). The surviving tail is
- *      [user message] + [mulligan:note] + [rewind assistant + result]; the model resumes at the current prompt.
- *   3. NUCLEAR (opts.to_previous_prompt === true): ALSO remove the user message at iLastUser (plus the same
- *      after-iLastUser removal with the same exclusions). The model resumes at the PREVIOUS user prompt. REFUSED
- *      (returns { remove: [] }) when iLastUser is the FIRST user message (iFirstUser === iLastUser) — that would
- *      cross the protected first-user / original-task boundary (spec/06 §8, spec/08 E3). The default case is always
- *      protected-safe by construction (min(remove) > iLastUser >= iFirstUser).
+ *   2. KEEP the user message; remove every message AFTER iLastUser EXCEPT (a) the rewind's OWN unit (the assistant
+ *      message that issued `excludeToolCallId` + its results — partitioned via partitionIntoUnits, detected via
+ *      assistantIssuedCall from S1), and (b) any `mulligan:*` custom messages at the tail (the note MUST survive so
+ *      the resumed model reads it). The surviving tail is [user message] + [mulligan:note] + [rewind assistant +
+ *      result]; the model resumes at the current prompt.
+ *
+ * V1.1 GUARDRAIL (spec/13 §1): last_turn always keeps the user message — it never wipes user input. To rewind
+ * across your own subsequent prompts, set a checkpoint first. The removal loop starts at iLastUser + 1, so iLastUser
+ * is NEVER pushed → NEVER in `remove` → the guardrail holds BY CONSTRUCTION. (v1.0's wipe-user-message mode is
+ * gone; the legacy options field survives on RewindMarkerLike for backward-compat reads of old markers, but the
+ * v1.1 resolver ignores it — see RewindMarkerLike.)
  *
  * PAIRING (spec/06 §4 pt 4): removal is index-based but pairing-safe in well-formed input — every assistant+result
  * pair produced in the rewound turn lives entirely after iLastUser, so both sides are removed together. The
@@ -303,22 +304,18 @@ function assistantIssuedCall(
  * safe; the note still survives — a real rewind marker always carries a valid excludeToolCallId).
  *
  * RETURNS `{ remove: number[] }` (NOT number[] | null — empty array = no-op/refusal). The single consumer
- * `filterPipeline` (P1.M3.T5.S1) uses `remove = resolveLastTurn(m, rw.options, rw.excludeToolCallId).remove`
- * (spec/06 §12). `rw.options` carries `to_previous_prompt` (snake_case — the persisted marker field, spec/04 §3);
- * this function reads it VERBATIM (NOT spec/06 §4's `toPreviousPrompt`, which is a spec typo — see D1).
+ * `filterPipeline` (P1.M3.T5.S1) uses `remove = resolveLastTurn(m, excludeId).remove` (spec/06 §12).
  *
- * Pure + defensive: a non-array `messages` → { remove: [] }; malformed messages, throwing-Proxy messages, a
- * non-string/empty `excludeToolCallId`, and malformed `opts` are all handled gracefully — NEVER throws (E13;
- * context-handler hot path). Every field read goes through the module-private isRecord/readOwn.
+ * Pure + defensive: a non-array `messages` → { remove: [] }; malformed messages, throwing-Proxy messages, and a
+ * non-string/empty `excludeToolCallId` are all handled gracefully — NEVER throws (E13; context-handler hot path).
+ * Every field read goes through the module-private isRecord/readOwn.
  *
  * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → { remove: [] }
- * @param opts { to_previous_prompt?: boolean } — the rewind marker's options, passed verbatim by filterPipeline
  * @param excludeToolCallId the rewind's own toolCall id (its unit is kept); undefined/empty/non-string → not kept
  * @returns { remove: number[] } — ascending message indices to remove; [] for no-op/refusal
  */
 export function resolveLastTurn(
   messages: MessageLike[],
-  opts: { to_previous_prompt?: boolean } | undefined,
   excludeToolCallId?: string,
 ): { remove: number[] } {
   // Defensive: a non-array messages (shouldn't happen) → nothing to rewind.
@@ -330,20 +327,6 @@ export function resolveLastTurn(
     if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") iLastUser = i;
   }
   if (iLastUser === -1) return { remove: [] }; // no user message → nothing to rewind (protected)
-
-  const nuclear = opts !== undefined && opts.to_previous_prompt === true;
-
-  // 3) Nuclear protected check: refuse if iLastUser is the FIRST user message (would cross the original-task line).
-  if (nuclear) {
-    let iFirstUser = -1;
-    for (let i = 0; i < messages.length; i++) {
-      if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") {
-        iFirstUser = i;
-        break;
-      }
-    }
-    if (iFirstUser === iLastUser) return { remove: [] }; // nuclear refused (spec/06 §8, spec/08 E3)
-  }
 
   // 2) rewindOwnIndices = the set of message indices in the rewind's OWN unit (kept whole). Only when
   //    excludeToolCallId is a non-empty string; the unit is found via partitionIntoUnits + assistantIssuedCall (S1).
@@ -359,10 +342,10 @@ export function resolveLastTurn(
     }
   }
 
-  // 4) Build the removal set, ASCENDING. Nuclear removes iLastUser too (pushed first); then every index > iLastUser
-  //    except the rewind's own unit and mulligan:* custom messages.
+  // 3) Build the removal set, ASCENDING. The loop starts at iLastUser + 1 → iLastUser is NEVER pushed → the
+  //    v1.1 guardrail holds BY CONSTRUCTION (last_turn always keeps the latest user message). Every index > iLastUser
+  //    is removed except the rewind's own unit and mulligan:* custom messages.
   const remove: number[] = [];
-  if (nuclear) remove.push(iLastUser);
   for (let j = iLastUser + 1; j < messages.length; j++) {
     if (rewindOwnIndices.has(j)) continue; // the rewind's own assistant + results survive
     if (isMulliganCustomMessage(messages[j])) continue; // the note / nudge survives
@@ -1119,7 +1102,8 @@ export interface RewindMarkerLike {
   seq: number;
   /** The targeting spec the filter resolves each inference (config.ts Granularity union). */
   granularity: "last_tool_call_group" | "last_turn" | "checkpoint";
-  /** last_turn only — nuclear mode (also discard the most recent user message). Default false. */
+  /** Legacy v1.0 field; ignored by the v1.1 resolver (last_turn always keeps the latest user message by
+   * construction). Kept optional for backward-compat reads of old persisted markers. */
   options?: { to_previous_prompt?: boolean };
   /** toolCallId of THIS rewind's own tool call (filter skips its group for last_tool_call_group; keeps its unit for
    *  last_turn/checkpoint). Absent/empty/non-string → not skipped/kept. */
@@ -1210,9 +1194,9 @@ function readOwnSeq(marker: unknown): number {
  *
  * RULE (spec/06 §8, verbatim): "compute iFirstUser and iLatestUser in messages. A rewind's remove set MUST satisfy
  * min(remove) > iFirstUser." This function enforces the FIRST:USER boundary — a rewind may not remove the original-task
- * user message (or anything at/before it). The LATEST:USER boundary + the to_previous_prompt refusal are enforced BY
- * CONSTRUCTION in resolveLastTurn (default keeps iLastUser; nuclear refuses when iFirstUser===iLastUser — already
- * implemented + tested). protectedOk is the filter's DOUBLE-CHECK (spec/06 §8 "the filter double-checks and no-ops as
+ * user message (or anything at/before it). The LATEST:USER boundary is enforced BY CONSTRUCTION in resolveLastTurn
+ * (the removal loop starts at iLastUser + 1, so the latest user message is never in `remove` — v1.1 guardrail,
+ * spec/13 §1). protectedOk is the filter's DOUBLE-CHECK (spec/06 §8 "the filter double-checks and no-ops as
  * defense-in-depth") so a buggy/adversarial resolver cannot cross the line (GOTCHA #7: the real resolvers never cross
  * iFirstUser by construction, so this block is defense-in-depth).
  *
@@ -1359,8 +1343,8 @@ function turnHasAdvanced(messages: MessageLike[] | unknown, excludeToolCallId?: 
  *     resolveLastToolCallGroup(units, m, excludeToolCallId). (The §12 pseudocode partitions ONCE before the loop — a
  *     stale-index bug after the first rewind reduces m, because resolveLastToolCallGroup returns unit.indices that index
  *     the partitioned array. Re-partitioning each iteration keeps them valid against the current m.)
- *   - "last_turn": resolveLastTurn(m, rw.options, excludeToolCallId).remove. (options carries to_previous_prompt
- *     VERBATIM — GOTCHA #5.)
+ *   - "last_turn": resolveLastTurn(m, excludeToolCallId).remove. (v1.1: the resolver keeps the latest user
+ *     message by construction — no options read; spec/13 §1.)
  *   - "checkpoint": resolveCheckpoint(m, branchEntries ?? [], rw.checkpoint, excludeToolCallId)?.remove ?? []. (Takes
  *     branchEntries DATA, NOT ctx — GOTCHA #6.)
  *
@@ -1487,12 +1471,9 @@ export function filterPipeline(
       remove = resolveLastToolCallGroup(units, m, excludeId) ?? [];
       mode = "legacy-run";
     } else if (granularity === "last_turn") {
-      // CREATING/RESUME FIRE ONLY. options carries to_previous_prompt VERBATIM (GOTCHA #5).
-      remove = resolveLastTurn(
-        m,
-        readOwn(rw, "options") as { to_previous_prompt?: boolean } | undefined,
-        excludeId,
-      ).remove;
+      // CREATING/RESUME FIRE ONLY. last_turn no longer reads options — the resolver keeps the latest user
+      // message by construction (v1.1 guardrail, spec/13 §1).
+      remove = resolveLastTurn(m, excludeId).remove;
       mode = "legacy-run";
     } else if (granularity === "checkpoint") {
       // CREATING/RESUME FIRE ONLY. resolveCheckpoint takes branchEntries DATA, not ctx (GOTCHA #6).
