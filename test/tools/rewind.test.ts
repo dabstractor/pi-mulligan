@@ -882,6 +882,232 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
   });
 });
 
+// ── E5 reverted reword (P4.M2.T2.S1; spec/08 E5 v1.2 clause; spec/05 §1 step 7 v1.2; @14 §7) ────
+// When step 6b REVERTED files (revertSummary.reverted > 0), the file-state portion of the hidden span's effects
+// was restored, so the appended E5 warning is reworded (MUTATION_WARNING_REVERTED) to name ONLY the
+// non-filesystem effects that still persist + any failed/refused files. Every NON-reverted outcome (no flags /
+// disabled / group / missing checkpoint / dirty-guard REFUSED / restore ran but reverted 0) keeps the ORIGINAL
+// wording unchanged (those file effects DO persist). hasWarning stays the gate; filesWereReverted picks wording.
+//
+// Reuse: seedProceedLastTurn (line ~2303) seeds a last_turn proceed with `asst("X")` (EMPTY ledger). For the
+// reverted-wording tests that need hasWarning true, we build an equivalent seed inline with asstWrite in the span
+// (modifiedFiles=["src/a.ts"]) — revert only runs at last_turn/checkpoint (NOT last_tool_call_group).
+
+describe("mulligan_rewind — E5 reverted reword (P4.M2.T2.S1)", () => {
+  // (a) FILES REVERTED + side effects → MUTATION_WARNING_REVERTED wording (original 'PERSIST' wording ABSENT).
+  it("files REVERTED + side effects → MUTATION_WARNING_REVERTED wording (original 'PERSIST' wording ABSENT)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asstWrite("WRITE", "src/a.ts")), // modifiedFiles=["src/a.ts"] → hasWarning true
+        msgEntry(result("WRITE")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({
+      drifted: [], // clean dirtyCheck → S2 proceeds → restore
+      restoreResult: {
+        reverted: ["src/a.ts"],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+      restoreCalls,
+    });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    // REVERTED wording present:
+    expect(firstText(res)).toContain("ran side-effecting commands (see note)");
+    expect(firstText(res)).toContain("Non-filesystem effects PERSIST on disk");
+    expect(firstText(res)).toContain("were reverted to their pre-span state");
+    // ORIGINAL wording ABSENT:
+    expect(firstText(res)).not.toContain(
+      "modified files/ran side-effecting commands",
+    );
+    expect(firstText(res)).not.toContain(
+      "Those effects PERSIST on disk; do not blindly redo them.",
+    );
+    expect(restoreCalls).toHaveLength(1);
+    expect(res.details.revertSummary?.reverted).toBe(1);
+  });
+
+  // (b) REVERTED but requireMutationWarning===false → NO warning at all (hasWarning gate).
+  it("files REVERTED but requireMutationWarning===false → NO warning at all (hasWarning gate)", async () => {
+    // requireMutationWarning is a SIBLING of config.revert (NOT nested inside it) — two top-level keys.
+    setConfig({
+      revert: { enabled: true },
+      rewind: { requireMutationWarning: false },
+    });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asstWrite("WRITE", "src/a.ts")), // modifiedFiles non-empty, but requireMutationWarning===false
+        msgEntry(result("WRITE")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({
+      drifted: [],
+      restoreResult: {
+        reverted: ["src/a.ts"],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+    });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).not.toContain("⚠");
+    expect(firstText(res)).not.toContain(
+      "Non-filesystem effects PERSIST on disk",
+    );
+    expect(firstText(res)).not.toContain("modified files/ran side-effecting");
+    expect(res.details.revertSummary?.reverted).toBe(1); // revert still ran
+  });
+
+  // (c) DIRTY-GUARD REFUSED + side effects → ORIGINAL wording (files persist; no special-case branch).
+  it("dirty-guard REFUSED + side effects → ORIGINAL wording (files persist; no special-case branch)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asstWrite("WRITE", "src/a.ts")), // modifiedFiles non-empty → hasWarning true
+        msgEntry(result("WRITE")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: ["src/a.ts"] }); // dirtyCheck → drift → S1 refuse → no restore
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "modified files/ran side-effecting commands",
+    );
+    expect(firstText(res)).toContain(
+      "Those effects PERSIST on disk; do not blindly redo them.",
+    );
+    expect(firstText(res)).not.toContain("Non-filesystem effects PERSIST");
+    expect(res.details.revertRefused).toBe(true);
+    expect(res.details.revertSummary).toBeUndefined();
+  });
+
+  // (d) RESTORE RAN but reverted 0 (all failed) → ORIGINAL wording (files persist).
+  it("restore ran but reverted 0 (all failed) → ORIGINAL wording (files persist)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asstWrite("WRITE", "src/a.ts")), // modifiedFiles non-empty → hasWarning true
+        msgEntry(result("WRITE")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({
+      drifted: [],
+      restoreResult: {
+        reverted: [], // nothing reverted (all failed)
+        deleted: [],
+        failed: ["src/a.ts"],
+        skipped: [],
+        refused: [],
+      },
+      restoreCalls,
+    });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "Those effects PERSIST on disk; do not blindly redo them.",
+    );
+    expect(firstText(res)).not.toContain(
+      "were reverted to their pre-span state",
+    );
+    expect(restoreCalls).toHaveLength(1);
+    expect(res.details.revertSummary?.reverted).toBe(0);
+  });
+
+  // (e) FILES REVERTED but EMPTY ledger (no side effects) → NO warning; the S2 revert clause still appears.
+  it("files REVERTED but EMPTY ledger (no side effects) → NO warning; the S2 revert clause still appears", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")), // unknown tool → empty ledger → hasWarning false
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({
+      drifted: [],
+      restoreResult: {
+        reverted: ["src/x.ts"], // files WERE reverted — but hasWarning false ⇒ no warning at all
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+    });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).not.toContain("⚠");
+    expect(firstText(res)).toContain("Reverted 1 file(s)"); // the S2 revert clause still appears
+    expect(res.details.revertSummary?.reverted).toBe(1);
+  });
+});
+
 // ── best-effort ledger (E8/E13): snapshot failure → empty ledger + K=0 + STILL success ──
 
 describe("mulligan_rewind — best-effort ledger (E8/E13: snapshot failure never blocks)", () => {

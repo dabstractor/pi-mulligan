@@ -168,6 +168,23 @@ const MUTATION_WARNING =
   "Those effects PERSIST on disk; do not blindly redo them.";
 
 /**
+ * MUTATION_WARNING_REVERTED — the v1.2 reworded E5 warning (spec/08 E5 v1.2 clause; spec/05 §1 step 7
+ * v1.2; @14 §7). Used INSTEAD of MUTATION_WARNING when step 6b REVERTED files
+ * (revertSummaryDetails.reverted > 0): the FILE-STATE portion of the hidden span's effects was restored
+ * to its pre-span state, so the warning names ONLY the non-filesystem effects that still persist on
+ * disk (commits made, dependency installs, network/DB/process effects, staged index changes) + any
+ * files in the restore's `failed`/`refused` buckets (which were NOT restored). A reverted `sed` edit
+ * persists no more than a reverted `edit` — so the original "Those effects PERSIST" wording would be
+ * FALSE after a successful revert. Leading space + ⚠ are load-bearing (do NOT rephrase). Module-local.
+ * VERBATIM from the item contract (P4.M2.T2.S1).
+ */
+const MUTATION_WARNING_REVERTED =
+  "⚠ The hidden span ran side-effecting commands (see note). " +
+  "Non-filesystem effects PERSIST on disk (commits made, dependency installs, network/DB/process effects, staged index changes). " +
+  "Any files in 'failed' or 'refused' were NOT restored — do not blindly redo those. " +
+  "All other file modifications were reverted to their pre-span state.";
+
+/**
  * RevertDecision — the outcome of step 6b's working-tree-revert decision tree (spec/05 §1 step 6b;
  * @14 §6/§7). S1 (this item, P4.M2.T1.S1) computes the decision; S2 (P4.M2.T1.S2) consumes the "proceed"
  * variant to call `store.restore` + fold the `RestoreResult` into the marker's `revert` field + the
@@ -261,6 +278,7 @@ function successText(
   k: number,
   hasWarning: boolean,
   revertClause = "",
+  filesReverted = false, // [P4.M2.T2.S1] v1.2 reverted-span wording selector
 ): { text: string } {
   const kClause =
     k === 0
@@ -268,7 +286,12 @@ function successText(
       : `${k} messages will be hidden from your view starting next turn`;
   let text = `Mulligan: rewound ${granularity}. ${kClause}. Note left.`;
   if (revertClause) text += " " + revertClause; // [P4.M2.T1.S1] v1.2 revert notice (terminal branches)
-  if (hasWarning) text += " " + MUTATION_WARNING; // spec/08 E5 VERBATIM
+  if (hasWarning) {
+    // spec/08 E5 VERBATIM; [P4.M2.T2.S1] v1.2: when step 6b reverted files, the file-state portion of
+    // the effects was restored → name ONLY the non-filesystem effects that still persist.
+    text +=
+      " " + (filesReverted ? MUTATION_WARNING_REVERTED : MUTATION_WARNING);
+  }
   return { text };
 }
 
@@ -982,8 +1005,17 @@ async function rewindExecute(
     }
 
     // (8) mutation warning (step 7 / E5) — VERBATIM (spec/08 E5) iff configured + the ledger shows side effects.
-    //     [P4.M2.T2.T1] when revertRefused OR files were reverted, reword the E5 warning to name only
-    //     non-working-tree effects — out of scope here; hasWarning is left unchanged.
+    //     [P4.M2.T2.S1] when step 6b REVERTED files (revertSummaryDetails.reverted > 0 — the signal S2 exposes),
+    //     select MUTATION_WARNING_REVERTED: the FILE-STATE portion of the effects was restored, so the warning
+    //     names ONLY non-filesystem effects that still persist (commits/installs/network/DB/process/staged +
+    //     failed/refused files). Every NON-reverted outcome (no flags / disabled / group / missing /
+    //     dirty-guard REFUSED / restore ran but reverted 0) → revertSummaryDetails is undefined OR .reverted===0
+    //     → filesWereReverted false → ORIGINAL warning unchanged (those file effects DO persist). The
+    //     dirty-guard refuse is handled HERE, not by a special branch: refused ⇒ no restore ⇒ reverted 0.
+    //     hasWarning stays the gate (requireMutationWarning + non-empty ledger); filesWereReverted picks wording.
+    const filesWereReverted = !!(
+      revertSummaryDetails && revertSummaryDetails.reverted > 0
+    );
     const hasWarning =
       config.rewind.requireMutationWarning &&
       (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
@@ -992,7 +1024,13 @@ async function rewindExecute(
     //     notices; revertRefused surfaces the refuse flag to logs/audit + P4.M2.T2.T1 (CRITICAL #10: used);
     //     [P4.M2.T1.S2] revertSummary surfaces the 5-bucket COUNTS + backend on the proceed branch (undefined on
     //     every non-proceed branch) for the E5 warning reword (P4.M2.T2.T1) + logs/audit.
-    const { text } = successText(granularity, k, hasWarning, revertClause);
+    const { text } = successText(
+      granularity,
+      k,
+      hasWarning,
+      revertClause,
+      filesWereReverted,
+    );
     return {
       content: [{ type: "text", text }],
       details: {
