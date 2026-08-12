@@ -62,21 +62,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Major Fix — Cross-Reload Snapshot Rebuild (BUG-002)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Add the missing read-side of the E32 cross-reload for checkpoint snapshots. The mulligan:revert-checkpoint control entry is written by /mulligan_checkpoint but never read by session_start. After resetRuntime on session_start, rt.snapshots is a fresh empty Map so checkpoint snapshots are lost across /resume. The fix adds a session_start pass that scans getEntries() for mulligan:revert-checkpoint entries and rebuilds rt.snapshots.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Add session_start checkpoint snapshot rebuild from persisted mulligan:revert-checkpoint entries",
-              "status": "Planned",
+              "status": "Researching",
               "description": "In src/index.ts session_start handler, after detectAndCreate creates rt.store, add a pass that scans ctx.sessionManager.getEntries() for mulligan:revert-checkpoint control entries and rebuilds rt.snapshots so checkpoint snapshots survive /resume in production. Also update the integration test that manually simulates this rebuild.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Implement session_start rt.snapshots rebuild from mulligan:revert-checkpoint entries in index.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-002. The write site is src/commands.ts:~226: `pi.appendEntry('mulligan:revert-checkpoint', { label: 'ckpt:'+name, ref: ckptRef, backend })`. The read site is MISSING in src/index.ts session_start handler (~lines 113-126). After resetRuntime(sid), rt.snapshots is a fresh empty Map. A grep confirms `revert-checkpoint` appears ONLY at the write site (commands.ts:226) and in comments — there is no production read site.\n2. INPUT: ctx.sessionManager.getEntries() (the raw entry stream — each mulligan:revert-checkpoint entry has type 'custom', customType 'mulligan:revert-checkpoint', data { label: string, ref: string, backend: 'git'|'cas' }). rt.store (just created by detectAndCreate). rt.snapshots (fresh empty Map from resetRuntime). The RevertCheckpoint interface from src/markers.ts: { label, backend, beforeRef, afterRef?, turnIndex, ts }.\n3. LOGIC: In src/index.ts, inside the `if (getConfig().revert.enabled)` block of the session_start handler, AFTER `rt.store = await detectAndCreate(ctx.cwd, getConfig().revert)` and AFTER `await gcTurnSnapshots(rt)`, add a rebuild pass: (a) scan `ctx.sessionManager.getEntries()` for entries where `type === 'custom' && customType === 'mulligan:revert-checkpoint'`; (b) for each match, read `data.label`, `data.ref`, `data.backend` defensively (typeof string checks — fail-open skip on bad data); (c) construct a RevertCheckpoint: `{ label: data.label, backend: data.backend, beforeRef: data.ref, turnIndex: -1, ts: Date.now() }` (turnIndex: -1 sentinel for checkpoints — matches commands.ts); (d) OPTIONALLY verify the ref still exists via `await rt.store.has(data.ref)` before setting (if has() returns false, skip — the snapshot was GC'd or lost); (e) set it: `rt.snapshots.set(data.label, ckptCheckpoint)`. Wrap the WHOLE pass in try/catch (best-effort — a rebuild failure must NEVER block session_start). Follow the existing defensive entry-scanning idiom used throughout rewind.ts/commands.ts (per-entry typeof guards, try/catch per entry). NOTE: multiple entries with the same label may exist if the checkpoint was set multiple times — the LAST one wins (the entry stream is append-only; iterate in order and the last set() call wins naturally, OR iterate in reverse and break on first match per label). IMPORTANT: this must run AFTER gcTurnSnapshots (which only clears 'turn*' keys, not 'ckpt:*') so checkpoint entries are preserved.\n4. OUTPUT: src/index.ts where session_start rebuilds rt.snapshots from persisted mulligan:revert-checkpoint entries. After /resume, rt.snapshots.get('ckpt:X') is populated for pre-existing checkpoints. The existing session_start flow (config reload, resetRuntime, detectAndCreate, gcTurnSnapshots) is unchanged — this is purely additive after gcTurnSnapshots.\n5. DOCS: [Mode A] Update the JSDoc comment on the session_start handler's revert block to document the new checkpoint-rebuild pass (reference spec/14 §5 E32 'resolved in v1.2' and BUG-002). No user-facing/config/API surface change.",
@@ -91,7 +91,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Update cross-reload integration test to verify production rebuild path (remove manual simulation)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

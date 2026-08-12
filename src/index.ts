@@ -118,11 +118,71 @@ export default function (pi: ExtensionAPI): void {
     // pass"). detectAndCreate NEVER rejects (→ NoOpStore on any error, E28); gcTurnSnapshots NEVER
     // throws. The try/catch is belt-and-suspenders for this CRITICAL path — a store failure must
     // NEVER block config reload / runtime reset / banner reconcile.
+    //
+    // [P1.M2.T1.S1 / spec/14 §5 / E32] BUG-002 fix: AFTER gcTurnSnapshots, rebuild rt.snapshots from
+    // the persisted mulligan:revert-checkpoint control entries (/mulligan_checkpoint's step 4b write).
+    // E32 ("post-reload snapshot loss → RESOLVED in v1.2") requires the read-side: resetRuntime wiped
+    // rt.snapshots, so a /resume re-reads the {label, ref, backend} control data, reconstructs each
+    // RevertCheckpoint (beforeRef←ref, turnIndex:-1, no afterRef — checkpoints capture once), verifies
+    // the ref still exists via store.has(ref) (fail-open skip on absent/NoOpStore), and repopulates the
+    // Map so a checkpoint-granularity rewind finds its snapshot. Best-effort: a malformed entry or
+    // missing ref is skipped; a rebuild failure never blocks session_start.
     if (!getConfig().revert.enabled) return; // layer-1 gate (default false → zero capture, zero storage)
     try {
       const rt = getRuntime(sid); // the FRESH runtime resetRuntime just (re)created (store undefined, empty snapshots)
       rt.store = await detectAndCreate(ctx.cwd, getConfig().revert); // create + cache (NEVER rejects → NoOpStore)
       await gcTurnSnapshots(rt); // REUSE capture.ts's pass — gc() drops all turn/* refs on disk + clears in-memory
+      // [P1.M2.T1.S1 / spec/14 §5 / E32] BUG-002 fix: rebuild rt.snapshots from the persisted
+      // mulligan:revert-checkpoint control entries that /mulligan_checkpoint wrote (commands.ts step 4b).
+      // resetRuntime above wiped rt.snapshots to a fresh empty Map; a /resume must RE-read the refs so a
+      // later checkpoint-granularity rewind finds its snapshot (E32 "post-reload snapshot loss → RESOLVED
+      // in v1.2"). Runs AFTER gcTurnSnapshots (which exempts ckpt:* refs) so surviving checkpoint refs are
+      // confirmed by has(). Purely additive; a malformed/absent ref is skipped (fail-open) — a rebuild
+      // failure NEVER blocks session_start (the outer try/catch + per-entry try/catch both cover it).
+      try {
+        let entries: unknown;
+        try {
+          entries = ctx.sessionManager.getEntries(); // read FRESH (C12)
+        } catch {
+          entries = undefined; // getEntries threw → no rebuild (fail-open)
+        }
+        if (Array.isArray(entries)) {
+          for (const e of entries) {
+            if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+            try {
+              const ee = e as { type?: unknown; customType?: unknown; data?: unknown };
+              if (ee.type !== "custom") continue;
+              if (ee.customType !== "mulligan:revert-checkpoint") continue;
+              const data = ee.data;
+              if (typeof data !== "object" || data === null || Array.isArray(data)) continue;
+              const d = data as { label?: unknown; ref?: unknown; backend?: unknown };
+              if (typeof d.label !== "string" || d.label.length === 0) continue;
+              if (typeof d.ref !== "string" || d.ref.length === 0) continue;
+              if (d.backend !== "git" && d.backend !== "cas") continue;
+              // optional E32 verification: the ref must STILL exist in the store (survived gc / storage
+              // intact). NoOpStore.has→false (backend 'none' ⇒ nothing to restore); a throw ⇒ skip.
+              let present = true;
+              try {
+                present = await rt.store!.has(d.ref);
+              } catch {
+                present = false;
+              }
+              if (!present) continue;
+              rt.snapshots?.set(d.label, {
+                label: d.label,
+                backend: d.backend,
+                beforeRef: d.ref,
+                turnIndex: -1, // checkpoint sentinel (matches commands.ts step 4b)
+                ts: Date.now(),
+              });
+            } catch {
+              // a throwing-Proxy entry → skip (fail-open, never throw on the session_start path)
+            }
+          }
+        }
+      } catch {
+        // belt-and-suspenders — the outer session_start catch already covers this; keep the rebuild isolated
+      }
     } catch (e) {
       try {
         log("error", "session_start.store", sid, { error: String(e) });
