@@ -168,6 +168,8 @@ Mulligan registers four agent-callable tools. The descriptions below are **verba
 
 The `replacement` must be non-empty and **faithful** — the model treats it as ground truth from then on.
 
+**View substitution (trust note).** Shrink never deletes anything — it is a *view substitution*: the original message stays on disk and is recoverable by the human via `/tree`, so only the model's in-context copy is replaced — even summarizing a user message (E19) is lossless at the session level.
+
 Checkpoints moved to the human in v1.1 (the destructive cross-prompt power belongs to the user). See [Human commands (v1.1)](#human-commands-v11) below for `/mulligan_checkpoint` and `/mulligan_checkpoint_revoke`. The agent still rewinds to a checkpoint via `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")`; a checkpoint auto-expires once a rewind targets it.
 
 ### `mulligan_audit`

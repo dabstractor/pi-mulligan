@@ -492,21 +492,21 @@
       "type": "Phase",
       "id": "P4",
       "title": "Shrink preservation invariant (spec/08 E19 mid-session clarification)",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Mid-session PRD change (commit d5701c8f; diff verified against plan/007_67d7d8c6e4c5/prd_snapshot.md). This is the ONLY change between the session-start PRD snapshot and the current PRD: spec/08-edge-cases.md E19 (selector h2.100) gains one bullet stating the 'hard invariant' — shrink is a view substitution, the user's actual message stays on disk and is recoverable via /tree (D2 / soft-delete), so summarizing user input is acceptable precisely because the original always survives; only the model's in-context copy is replaced. IMPACT TYPE: modified requirement (spec clarification — no requirement was added/removed; an invariant already-true-by-construction is now documented explicitly). CODE IMPACT: NONE — the invariant is ALREADY enforced by construction. applyShrink (src/transforms.ts:963) is pure/non-mutating: it returns a NEW array via messages.map(...) and builds each replacement via { ...orig, content: newContent } (spread clone), so the input array and its message objects are never mutated; the soft-delete design (C1: ReadonlySessionManager; C4: context event is non-destructive per-inference) guarantees originals persist in the session JSONL. Therefore NO src/ edit is required. The gap is VERIFICATION COVERAGE: the existing pure E19 tests (test/edge-cases.test.ts:1029-1060) assert role preservation + content replacement in the RETURNED array but do NOT explicitly assert non-mutation of the INPUT (the in-code proof of 'original survives'); F-shrink-persist (test/integration/smoke.ts:181) asserts on-disk survival generally but does not single out the user-message shrink case that E19 now emphasizes ('summarizing user input is acceptable because the original always survives'). This phase adds explicit verification to lock the invariant in against future regressions, plus a one-line README trust note. It is ORTHOGONAL to the v1.1 human-facing delta (P1–P3) and has NO dependencies on it — may run in parallel. The spec file is already updated by commit d5701c8f, so no spec edit is part of this phase.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P4.M1",
           "title": "Verify the shrink-preservation hard invariant (no code change)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Add tests that explicitly assert E19's 'original is never lost' hard invariant, plus a one-line README trust note. No src/ edits — applyShrink already satisfies the invariant by construction (pure, non-mutating; soft-delete via C1/C4). All work is test/doc only, and locks the invariant in against future regressions.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M1.T1",
               "title": "Lock in the 'original never lost' invariant via tests + README note",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Three subtasks: (S1) pure-helper test asserting applyShrink does NOT mutate its input (the in-memory proof of 'original survives on disk'); (S2) integration scenario F-shrink-persist strengthened to explicitly cover the user-message shrink case and assert the original survives on disk; (S3) one-line README trust note documenting the invariant. No behavior change; the invariant holds by construction — these assert and document it.",
               "subtasks": [
                 {
@@ -541,7 +541,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T1.S3",
                   "title": "README: one-line trust note for the shrink-preservation invariant (Mode B)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P4.M1.T1.S1",
