@@ -549,21 +549,21 @@
       "type": "Phase",
       "id": "P5",
       "title": "Integration tests + changeset-level documentation",
-      "status": "Planned",
+      "status": "Ready",
       "description": "The 8 integration test scenarios from spec/10 (each validates a specific cross-cutting behavior path) and the README.md changeset-level documentation sync. Unit tests for each component are implicit in the implementation subtasks (TDD per §3); this phase covers integration-level verification and the Mode-B doc sweep.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P5.M1",
           "title": "Integration test scenarios (R6b)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "The 8 v1.2 integration scenarios from spec/10 §2.1. Each tests a specific end-to-end revert behavior path: git/cas/explicit backends, failopen, delete gating, dirty guard refusal, granularity mismatch, reload persistence.",
           "tasks": [
             {
               "type": "Task",
               "id": "P5.M1.T1",
               "title": "Integration test scenarios F-revert-* (8 scenarios)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement the 8 integration scenarios. Each requires a temp working directory, file mutations via write/edit/bash, a rewind call with revert flags, and assertions on file contents, marker fields, and git/CAS state.",
               "subtasks": [
                 {
@@ -611,7 +611,7 @@
                   "type": "Subtask",
                   "id": "P5.M1.T1.S3",
                   "title": "F-revert-granularity + F-revert-reload",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M2.T2.S1",
@@ -635,21 +635,21 @@
           "type": "Milestone",
           "id": "P5.M2",
           "title": "Sync changeset-level documentation (Mode B — R7)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Cross-cutting docs that only make sense once R1–R6 land. The README gets a new 'Working-tree revert (v1.2)' section. Depends on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P5.M2.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Update README.md with the working-tree revert feature section. Grep for stale v1.1 language. Verify no orphan references.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P5.M2.T1.S1",
                   "title": "README.md 'Working-tree revert (v1.2)' section + stale-reference sweep",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
