@@ -812,6 +812,132 @@ export class CasBackend implements SnapshotStore {
   }
 
   /**
+   * Return the workspace-relative POSIX paths that differ between the `beforeRef` snapshot manifest
+   * and the CURRENT working tree — exactly the set of files `restore()` would touch. This is the
+   * spec-mandated AFFECTED SET for the rewind dirty guard — spec/14 §6 step 2 verbatim: "**Determine
+   * the affected set** = paths that differ between `beforeRef` and the current tree (the files
+   * restore would touch)." This is the BUG-004 fix (E30): the rewind tool's dirty guard currently
+   * uses the HEURISTIC `ledger.modifiedFiles`, which MISSES files mutated via `python -c`,
+   * `node script.js`, `perl -i`, heredocs, `awk -i inplace` (those land in `ledger.bashSideEffects`,
+   * not `modifiedFiles`), so the guard inspects a SUBSET of what restore touches and can silently
+   * clobber concurrent human edits. This method returns the REAL affected set so the guard inspects
+   * EVERY file restore would touch.
+   *
+   * MODE-AWARE (mirrors capture()/restore()'s mode dispatch — spec §4.2):
+   *   - `'cas'` mode (the default — comprehensive, whole-tree): `walkTree(this.cwd, excludeSet, …)`
+   *     reads + hashes each CURRENT file and compares to `manifest.files[rel]`. A file is CHANGED if
+   *       • NEW since capture (present now, NOT in the manifest) — e.g. a python/node-created file;
+   *       • MODIFIED (current hash ≠ stored hash).
+   *     A second loop then flags manifest `existed:true` entries now MISSING (deleted since) — the walk
+   *     only visits PRESENT files, so a second pass catches deletes (the cas analog of `git diff`
+   *     reporting Deleted paths). Returns the UNION of new + modified + deleted.
+   *   - `'explicit-paths'` mode (conservative): iterates `manifest.files` ONLY (NO tree walk — the
+   *     manifest is the scope; bash-created files are deliberately NOT promised restorable per §4.2,
+   *     so they are out of scope here too). Flags MODIFIED (hash differs — an `existed:false` entry
+   *     now existing has stored hash "" vs a real hash, so the compare flags it naturally) or DELETED
+   *     (`existed:true` + now gone).
+   *
+   * DELIBERATELY NO mtime/size SHORT-CIRCUIT (the central correctness decision). `CasManifestEntry`
+   * carries `{hash,size,mtime}` and capture() skips re-hashing when `(size,mtime)` match the previous
+   * manifest. changedPaths MUST NOT do this: a tool that mutates content while preserving (size,mtime)
+   * (e.g. a `touch -d`-prefixed write, some editors that reset mtime) would evade detection ⇒ the
+   * dirty guard would not inspect that file ⇒ restore() would overwrite a concurrent human edit ⇒ the
+   * EXACT E30 silent-clobber this method exists to close. Full content-hash compare ONLY (the sibling
+   * `dirtyCheck` also does full hashing — mirror it).
+   *
+   * CONSUMED BY rewindExecute step 6b (P1.M4.T2.S1 — the rewind wiring) to replace the heuristic
+   * `ledger.modifiedFiles`, so the dirty guard inspects every file restore() would touch. The
+   * refuse/allow decision is the CALLER's (rewindExecute step 6b).
+   *
+   * BEST-EFFORT (E27): NEVER rejects. A missing/corrupt beforeRef manifest OR any error is caught,
+   * warned, and returns `[]` (a rejecting changedPaths would propagate into rewindExecute and could
+   * block a context rewind — the feature's overriding rule forbids that). Serialized by the
+   * per-backend AsyncMutex (spec §4.3 — every IO-bearing store op is serialized). @14 §6 step 2 +
+   * §4.3 + BUG-004 + E30. IMPLEMENTED BY: git/cas.
+   */
+  async changedPaths(beforeRef: string): Promise<string[]> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    try {
+      if (!beforeRef) return []; // no baseline ⇒ no changed paths (mirrors dirtyCheck's empty-ref guard)
+      let manifest: CasManifest;
+      try {
+        const buf = await this.fs.readFile(this.manifestPath(beforeRef));
+        manifest = parseManifest(buf.toString("utf8")); // throws on bad version ⇒ [] below
+      } catch {
+        return []; // missing/corrupt beforeRef ⇒ no changed paths (best-effort). Never rejects.
+      }
+      const changed: string[] = [];
+
+      if (this.cfg.nonGitMode === "cas") {
+        // 'cas' mode (§4.2/§4.1): comprehensive — walk the tree, hash each file, compare to the
+        // beforeRef manifest. A file NEW since capture (not in manifest) or MODIFIED (hash differs)
+        // is changed. (Deliberately NO mtime/size short-circuit — a content mutation that preserves
+        // mtime must NOT evade detection; this method exists to close exactly that E30 hole.)
+        const seen = new Set<string>();
+        const excludeSet = new Set(
+          this.cfg.excludeGlobs.map((g) => g.toLowerCase()),
+        );
+        await this.walkTree(this.cwd, excludeSet, async (rel, abs) => {
+          seen.add(rel); // visited during the walk (used by the missing-entry loop below)
+          let currentHash: string;
+          try {
+            currentHash = await this.hashContent(await this.fs.readFile(abs));
+          } catch {
+            return; // unreadable file mid-walk ⇒ skip (walkTree already prunes; belt-and-suspenders)
+          }
+          const entry = manifest.files[rel];
+          if (!entry) {
+            changed.push(rel); // NEW since beforeRef (not in manifest)
+          } else if (currentHash !== entry.hash) {
+            changed.push(rel); // MODIFIED (content drifted; also flags an existed:false entry now existing)
+          }
+        });
+        // manifest entries that existed at beforeRef but are now MISSING (deleted since). The walk
+        // only visits present files, so a second pass catches deletes (the cas analog of `git diff`
+        // reporting Deleted paths). existed:false + still absent ⇒ correctly not changed.
+        for (const [rel, entry] of Object.entries(manifest.files)) {
+          if (seen.has(rel)) continue; // visited during the walk (already classified above)
+          if (isDangerousWorkspaceRel(rel)) continue; // safety floor — never report a dangerous path
+          if (entry.existed) changed.push(rel); // was at beforeRef, now gone ⇒ changed
+        }
+      } else {
+        // explicit-paths mode (§4.2): conservative — check ONLY the manifest entries' paths (no
+        // tree walk). The manifest is the scope (bash-created files are deliberately NOT promised
+        // restorable per §4.2, so they are out of scope here too).
+        for (const [rel, entry] of Object.entries(manifest.files)) {
+          if (isDangerousWorkspaceRel(rel)) continue; // safety floor
+          let currentHash: string | null = null;
+          let existsNow = false;
+          try {
+            const abs = resolveSafeWorkspacePath(this.cwd, rel); // escape ⇒ existsNow stays false
+            currentHash = await this.hashContent(await this.fs.readFile(abs));
+            existsNow = true;
+          } catch {
+            existsNow = false; // ENOENT or escape ⇒ file not (safely) readable now
+          }
+          if (existsNow) {
+            if (currentHash !== entry.hash) {
+              changed.push(rel); // MODIFIED (content drifted; existed:false-now-existing ⇒ hash ""≠real ⇒ changed)
+            }
+          } else if (entry.existed) {
+            changed.push(rel); // was at beforeRef, now gone ⇒ deleted ⇒ changed
+          }
+          // !existsNow && !entry.existed ⇒ absent then, absent now ⇒ not changed (skip)
+        }
+      }
+      return changed;
+    } catch (err) {
+      // E27 best-effort: any error ⇒ [] (no changed paths detected). Never rejects.
+      console.warn(
+        `[mulligan] snapshot.changedPaths failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    } finally {
+      release();
+    }
+  }
+
+  /**
    * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state).
    * spec/14 §6 (restore semantics), §2 (the interface). Serialized by the mutex (spec §4.3).
    * CONSUMED BY: rewindExecute step 6b (P4.M2.T1.S2) after the dirty guard passes.
