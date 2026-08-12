@@ -103,9 +103,11 @@ function makeEvent(turnIndex: number): TurnEndEvent {
   } as unknown as TurnEndEvent;
 }
 
-/** A message whose stringified content is exactly `chars` characters → estimateTokens = ceil(chars/4). */
+/** A message whose stringified content is exactly `chars` characters → estimateTokens = ceil(chars/4).
+ *  Uses role "assistant" so the message is AGENT-ATTRIBUTABLE (D10): turnEndMetricHandler now measures `now`
+ *  via estimateAgentTokens (excludes user messages), so fixtures must be non-user to exercise the token math. */
 function msgOfChars(chars: number): Record<string, unknown> {
-  return { role: "user", content: "x".repeat(chars) };
+  return { role: "assistant", content: "x".repeat(chars) };
 }
 
 // ── registration ─────────────────────────────────────────────────────────────

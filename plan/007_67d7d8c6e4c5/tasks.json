@@ -97,14 +97,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Agent-attributable drift delta (D10)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The drift nudge's deltaTokens excludes user messages (a user's prompt is ground-truth, never sheddable bloat). The high-water signal is unchanged (it measures total filtered context — correctly fills on a big user paste). New pure helper in the Pi-free tier.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "estimateAgentTokens + wire into turnEndMetricHandler",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add a new pure helper estimateAgentTokens to tokens.ts that sums estimateTokens over non-user messages. Replace the estimateTokens call in turnEndMetricHandler's `now` computation with the new helper. Keep the getContextUsage() fallback as-is.",
               "subtasks": [
                 {
@@ -125,7 +125,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "nudges.ts turnEndMetricHandler: use estimateAgentTokens",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -141,7 +141,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Tests for agent-attributable delta",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1",

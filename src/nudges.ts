@@ -39,7 +39,7 @@ import type { MulliganConfig } from "./config.js";
 import { getRuntime } from "./runtime.js";
 import type { SessionRuntime } from "./runtime.js";
 import { log } from "./log.js";
-import { resultBytes, approxTokens, estimateTokens } from "./tokens.js";
+import { resultBytes, approxTokens, estimateAgentTokens } from "./tokens.js";
 import type { ResultContentBlock } from "./tokens.js";
 import { renderBloatReminder, renderDriftNudge } from "./notes.js";
 import {
@@ -216,12 +216,15 @@ export function turnEndMetricHandler(
 
     if (!config.enabled || !config.nudges.perTurnDrift) return; // both gates AFTER the bloat clear (GOTCHA #8)
 
-    // (4) Current filtered token count. lastFiltered is the filter's cached output (what the model actually saw
-    //     — D5/D6 honest bookkeeping). Fallback to ctx.getContextUsage() only when no filtered view exists yet
-    //     (first turn / context never fired). NO cast: rt.lastFiltered is AgentMessage[] (Record<string,unknown>[]),
-    //     structurally assignable to estimateTokens' MessageLike[] (GOTCHA #3, verified by tsc).
+    // (4) Current AGENT-ATTRIBUTABLE filtered token count (D10): user prompts are EXCLUDED — they are ground-truth
+    //     input, never bloat to shed, and the drift nudge prescribes rewind/shrink (which can only legitimately
+    //     target agent output). lastFiltered is the filter's cached output (what the model actually saw — D5/D6).
+    //     Fallback to ctx.getContextUsage() only when no filtered view exists yet (first turn / context never
+    //     fired) — it counts the raw session, acceptable as a pre-baseline fallback (the no-delta path is
+    //     unaffected). NO cast: rt.lastFiltered is AgentMessage[] (Record<string,unknown>[]), structurally
+    //     assignable to estimateAgentTokens' MessageLike[] (GOTCHA #3).
     const now = rt.lastFiltered
-      ? estimateTokens(rt.lastFiltered).tokens
+      ? estimateAgentTokens(rt.lastFiltered)
       : (ctx.getContextUsage()?.tokens ?? 0);
 
     // (5) Delta vs the baseline captured at the previous turn_end (or session_start). null on first turn.
