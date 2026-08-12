@@ -1021,4 +1021,46 @@ describe("E19 — Shrink target is a non-toolResult message (role preserved)", (
     });
     expect(shrunk?.role).toBe("assistant");
   });
+
+  // (a) THE HARD INVARIANT — the input array survives byte-identical; applyShrink returns a NEW array.
+  //     This is the in-code proof of spec/08 E19 "the original is never lost (view substitution)".
+  it("applyShrink does NOT mutate its input array (original survives — the hard invariant)", () => {
+    const msgs: MessageLike[] = [user("hello world")];
+    const snapshot = JSON.parse(JSON.stringify(msgs)); // deep clone the pre-call state
+    const out = applyShrink(msgs, { target: { by_content_includes: "hello" }, replacement: "X" });
+    expect(out).not.toBe(msgs); // a NEW array (map) — never the input reference
+    // The input is byte-identical to its pre-call snapshot → the original user content SURVIVES untouched.
+    expect(JSON.stringify(msgs)).toBe(JSON.stringify(snapshot));
+  });
+
+  // (b) The pure-helper analog of "the original stays on disk; only the model's in-context copy is replaced":
+  //     the INPUT element still holds the raw string; only the RETURNED copy carries the stamped replacement.
+  it("applyShrink on a USER message: the input array still holds the original content; only the returned copy is replaced", () => {
+    const msgs: MessageLike[] = [user("hello world")];
+    const out = applyShrink(msgs, { target: { by_content_includes: "hello" }, replacement: "X" });
+    // INPUT: still the raw user string — NOT the stamped replacement.
+    expect(msgs[0].content).toBe("hello world"); // user() content is a bare STRING
+    expect(msgs[0].content).not.toBe(stampShrink("X")); // belt-and-suspenders (a raw string ≠ a stamped envelope)
+    // RETURNED COPY: content is the stamped replacement block array.
+    const outBlock = out[0].content as Array<Record<string, unknown>>;
+    expect(outBlock[0].text).toBe(stampShrink("X"));
+  });
+
+  // (c) Multi-message: the matched index is replaced in the output, but EVERY index's original survives in
+  //     the INPUT (byte-identical), and non-matched indices pass through by ref.
+  it("applyShrink at index i leaves every OTHER index's original intact in the input (multi-message)", () => {
+    // "shrink me" is unique to index 1 → unambiguous match (by_content_includes is a substring match).
+    const msgs: MessageLike[] = [user("keep me"), asstText("shrink me please"), user("also keep")];
+    const snapshot = JSON.parse(JSON.stringify(msgs));
+    const out = applyShrink(msgs, { target: { by_content_includes: "shrink me" }, replacement: "Z" });
+    expect(out).not.toBe(msgs); // a NEW array
+    // The ENTIRE input is byte-identical to its pre-call snapshot (no index mutated).
+    expect(JSON.stringify(msgs)).toBe(JSON.stringify(snapshot));
+    // Specifically: the non-matched indices in the INPUT still hold their raw originals.
+    expect(msgs[0].content).toBe("keep me");
+    expect(msgs[2].content).toBe("also keep");
+    expect((msgs[1].content as Array<Record<string, unknown>>)[0].text).toBe("shrink me please"); // the matched index's INPUT is also untouched (asstText content is an array)
+    // And in the OUTPUT, only index 1 was replaced; the others are the original object refs.
+    expect((out[1].content as Array<Record<string, unknown>>)[0].text).toBe(stampShrink("Z"));
+  });
 });
