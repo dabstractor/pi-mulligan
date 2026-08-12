@@ -438,31 +438,10 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
 
 // ── refusal path 5b: protected message (spec/08 E3; spec/10 §2.1 F-protected) ─────────────────────────
 
-describe("mulligan_rewind — refusal: protected message (step 5b; spec/08 E3, spec/10 §2.1 F-protected)", () => {
-  it("nuclear last_turn (to_previous_prompt:true) on the FIRST/ONLY user message → refusal; NO marker created (BUG-006)", async () => {
-    // Reproduces BUG-006: resolveLastTurn (transforms.ts:345) CORRECTLY returns {remove:[]} for the
-    // nuclear-first-user case (iFirstUser===iLastUser), but rewindExecute treated k===0 as a legitimate K=0
-    // rewind and PERSISTED a no-op marker anyway — violating spec/08 E3 ("refuses before persisting") and
-    // spec/10 §2.1 F-protected ("no marker created"). Step 5b now refuses BEFORE renderNote/persist when
-    // last_turn + to_previous_prompt + k===0. A SINGLE user message is both the first AND latest user message.
-    const { appended, sent, pi } = makePi();
-    const { ctx } = makeCtx({
-      contextEntries: [
-        msgEntry(user("the original task")),
-        msgEntry(asst("call-1")),
-        msgEntry(result("call-1")),
-      ],
-    });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn", to_previous_prompt: true }, "call-1");
-    // E3 refusal text (refusal() adds the "Mulligan: refused — " prefix + trailing "."):
-    expect(firstText(res)).toContain("Mulligan: refused —");
-    expect(firstText(res)).toContain("would cross a protected message");
-    // F-protected: NO marker persisted, NO note left (refuse BEFORE step 6 renderNote + step 7 persist):
-    expect(appended).toHaveLength(0); // no mulligan:rewind marker
-    expect(sent).toHaveLength(0); // no mulligan:note
-    expect(res.details).toEqual({ granularity: "last_turn" });
-  });
-});
+// Note: the v1.0 protected-first-user refusal test (the discarded-latest-user-message rewind) was removed in
+// v1.1 — that option no longer exists and last_turn now keeps the latest user message by construction
+// (the resolver loop starts at iLastUser + 1). The positive guardrail (user message survives) lives in
+// transforms.test.ts; the first:user protectedOk defense-in-depth is covered by edge-cases.test.ts.
 
 // ── P4.M1.T2.S3: refused-rewind flag (rt.rewindRefusedTurnIndex) ────────────
 
@@ -526,7 +505,7 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
     expect(appended[0].customType).toBe("mulligan:rewind");
     const entry = appended[0].data as RewindMarker;
     expect(entry.granularity).toBe("last_tool_call_group");
-    expect(entry.options).toEqual({ to_previous_prompt: undefined, protect: ["first:user", "latest:user"] });
+    expect(entry.options).toEqual({ protect: ["first:user", "latest:user"] });
     expect(entry.excludeToolCallId).toBe("call-1"); // GOTCHA #2: === toolCallId (the execute first arg)
     expect(entry.note).toEqual(VALID_NOTE);
     expect(entry.ledger).toBeDefined(); // a FileLedger object
@@ -563,27 +542,6 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
     const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
     expect(res.details.k).toBe(2);
     expect(firstText(res)).toContain("2 messages will be hidden");
-  });
-
-  it("persisted options.to_previous_prompt === undefined when omitted; === the passed value when set (last_turn)", async () => {
-    const { appended, pi } = makePi();
-    // last_turn NUCLEAR (to_previous_prompt:true) with TWO user messages: iFirstUser(0) !== iLastUser(3) → NOT the
-    // protected first-user case (step 5b refuses only a single-user-message nuclear rewind). The rewind's own unit
-    // (call-1) is excluded → resolveLastTurn returns remove=[3] → K=1, marker persists with options.to_previous_prompt===true.
-    const { ctx } = makeCtx({
-      contextEntries: [
-        msgEntry(user("first prompt")),
-        msgEntry(asst("X")),
-        msgEntry(result("X")),
-        msgEntry(user("please do X")),
-        msgEntry(asst("call-1")),
-        msgEntry(result("call-1")),
-      ],
-    });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn", to_previous_prompt: true }, "call-1");
-    const entry = appended[0].data as RewindMarker;
-    expect(entry.options).toEqual({ to_previous_prompt: true, protect: ["first:user", "latest:user"] });
-    expect(entry.granularity).toBe("last_turn");
   });
 
   it("excludeToolCallId === toolCallId regardless of the toolCallId value", async () => {
@@ -848,7 +806,7 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
     expectTypeOf(tool.name).toEqualTypeOf<string>();
   });
 
-  it("RewindArgs (Static<typeof RewindParams>) has note + granularity + optional to_previous_prompt + checkpoint", () => {
+  it("RewindArgs (Static<typeof RewindParams>) has note + granularity + checkpoint", () => {
     const args = {} as RewindArgs;
     expectTypeOf(args.note).toEqualTypeOf<{
       what_happened: string;
@@ -856,7 +814,6 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
       next: string;
     }>();
     expectTypeOf(args.granularity).toEqualTypeOf<"last_tool_call_group" | "last_turn" | "checkpoint">();
-    expectTypeOf(args.to_previous_prompt).toEqualTypeOf<boolean | undefined>();
     expectTypeOf(args.checkpoint).toEqualTypeOf<string | undefined>();
   });
 

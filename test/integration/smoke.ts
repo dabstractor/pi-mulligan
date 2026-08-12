@@ -107,7 +107,7 @@ async function rewindNow(
   ctx: ExtensionContext,
   toolCallId: string,
   granularity: "last_tool_call_group" | "last_turn" | "checkpoint",
-  opts?: { to_previous_prompt?: boolean; checkpoint?: string },
+  opts?: { checkpoint?: string },
 ): Promise<{ text: string }> {
   try {
     const tool = makeRewindTool(pi); // shared module → REAL tool bound to the same pi
@@ -116,7 +116,6 @@ async function rewindNow(
       {
         note: SMOKE_NOTE,
         granularity,
-        to_previous_prompt: opts?.to_previous_prompt,
         checkpoint: opts?.checkpoint,
       },
       undefined,
@@ -230,11 +229,11 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         break;
       }
       case "F-protected": {
-        // Rewind last_turn + to_previous_prompt when only the /mulligan_smoke prompt exists → the BUG-006
-        // protected-refusal check (rewind.ts:step-5b) refuses BEFORE persisting (crossing the first:user
-        // boundary). The tool's refusal TEXT + ZERO persisted mulligan:rewind markers are the assertions.
-        await rewindNow(pi, ctx, "smoke-prot-1", "last_turn", { to_previous_prompt: true });
-        // No followUp: pure pre-persist refusal; the assertions are the refusal text + zero markers in assertProtected.
+        // v1.1: F-protected = a checkpoint rewind whose scope would reach first:user is refused/blocked.
+        // last_turn can no longer cross a user message (the resolver loop starts at iLastUser + 1), so the
+        // discarded-user-message drive no longer exists. The first:user crossing is now covered by
+        // protectedOk in the filter pipeline (see transforms.test.ts / edge-cases.test.ts).
+        smokeLog("F-protected", "info", { note: "moved to checkpoint scope; see spec/10 §2.1" });
         break;
       }
       case "F-maxdepth": {

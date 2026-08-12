@@ -168,7 +168,7 @@ function makeRewindEntry(
       kind: "rewind",
       id: uuid,
       granularity: "last_turn",
-      options: { to_previous_prompt: false, protect: ["first:user", "latest:user"] },
+      options: { protect: ["first:user", "latest:user"] },
       excludeToolCallId: "call-1",
       note: {
         what_happened: "x",
@@ -556,7 +556,7 @@ describe("mulligan_cancel — types (ToolDefinition + CancelParams inference)", 
 // the uuid mapping (a bug forwarding the entry id fails the assertion). nextSeq leaks across tests via the
 // shared runtime map → clearAll() in the global beforeEach/afterEach (GOTCHA #8) + resetSnapshotSeq() here.
 //
-// BUG-006 (fixed): cancel.ts emits PATH-SPECIFIC not-found text. The markerId path returns "with that id"
+// BUG (fixed): cancel.ts emits PATH-SPECIFIC not-found text. The markerId path returns "with that id"
 // (unchanged); the target path returns the spec/05 §5 verbatim "for that target" text. The target-path
 // no-op cases below pin the target-specific string (markerId-path cases above pin "with that id").
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════

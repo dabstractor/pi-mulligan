@@ -315,7 +315,6 @@ function rewindParams(over: Partial<RewindArgs> = {}): RewindArgs {
   return {
     note: { ...VALID_NOTE, ...(over.note ?? {}) },
     granularity: over.granularity ?? "last_tool_call_group",
-    to_previous_prompt: over.to_previous_prompt,
     checkpoint: over.checkpoint,
   } as RewindArgs;
 }
@@ -401,23 +400,10 @@ describe("E2 — Rewinding the executing turn (own toolGroup excluded)", () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("E3 — Rewinding across a protected message (filter-side defense)", () => {
-  // GOTCHA #10: the REAL behavior is two-layer (resolver refuses nuclear + protectedOk blocks first:user
-  // crossing). The TOOL does NOT pre-check protected — it persists; the filter no-ops. We pin the code's
-  // actual behavior, NOT a non-existent "tool refuses before persisting".
-
-  it("resolveLastTurn nuclear (to_previous_prompt) REFUSES when iFirstUser === iLastUser (single user msg)", () => {
-    const msgs: MessageLike[] = [user("only-prompt")];
-    const out = resolveLastTurn(msgs, { to_previous_prompt: true }, "rw-1");
-    expect(out.remove).toEqual([]); // nuclear refused — would cross the original-task line
-  });
-
-  it("resolveLastTurn nuclear removes iLastUser NOT iFirstUser when they differ", () => {
-    const msgs: MessageLike[] = [user("first"), asstText("a"), result("x"), user("second")];
-    const out = resolveLastTurn(msgs, { to_previous_prompt: true }, "rw-1");
-    // removes index 3 (the SECOND user) + everything after it; index 0 (FIRST user) is NEVER removed.
-    expect(out.remove).toContain(3);
-    expect(out.remove).not.toContain(0);
-  });
+  // GOTCHA #10: the REAL behavior is that protectedOk blocks first:user crossing in the filter pipeline.
+  // (v1.1 removed the discarded-latest-user-message path entirely — last_turn now keeps the latest user message
+  // by construction, so the resolver never crosses first:user for a last_turn rewind. protectedOk remains
+  // defense-in-depth.)
 
   it("protectedOk returns false when min(remove) === iFirstUser (a rewind crossing first:user is blocked)", () => {
     const msgs: MessageLike[] = [user("first"), asstText("a")];
@@ -430,35 +416,6 @@ describe("E3 — Rewinding across a protected message (filter-side defense)", ()
     const msgs: MessageLike[] = [user("first"), asstText("a"), result("c1")];
     const cfg: ProtectedConfig = { rewind: { protectedRoles: ["first:user"] } };
     expect(protectedOk(msgs, [1, 2], cfg)).toBe(true); // min=1 > iFirstUser=0
-  });
-
-  it("filterPipeline NO-OPS a rewind whose remove would cross first:user (protectedOk defense-in-depth)", () => {
-    // A last_turn rewind over a single-user list with to_previous_prompt → resolveLastTurn returns [] (nuclear
-    // refused). The pipeline therefore has nothing to apply → SAME reference (true no-op).
-    const msgs: MessageLike[] = [user("only")];
-    const cfg: ProtectedConfig = { rewind: { protectedRoles: ["first:user"] } };
-    const markers: MarkerBundle = {
-      rewinds: [{ seq: 1, granularity: "last_turn", options: { to_previous_prompt: true }, excludeToolCallId: "rw-1" }],
-      shrinks: [],
-    };
-    const out = filterPipeline(msgs, markers, cfg);
-    expect(out).toBe(msgs); // no-op (the message is protected)
-  });
-
-  it("the TOOL refuses a nuclear protected rewind before persisting (spec/08 E3; spec/10 §2.1 F-protected; BUG-006)", async () => {
-    const { appended, sent, pi } = makePi();
-    const { ctx } = makeCtx();
-    const tool = makeRewindTool(pi);
-    // A last_turn nuclear rewind (to_previous_prompt:true) on a snapshot with NO user message is the protected
-    // first-user case (iFirstUser===iLastUser → resolveLastTurn returns {remove:[]} → k===0). Step 5b now refuses
-    // BEFORE renderNote/persist (the filter's protectedOk remains defense-in-depth for the non-nuclear cases).
-    const res = await tool.execute("rw-prot", rewindParams({ granularity: "last_turn", to_previous_prompt: true }), undefined, undefined, ctx);
-    expect(firstText(res)).toContain("Mulligan: refused —"); // tool refused before persisting (spec/08 E3)
-    expect(firstText(res)).toContain("would cross a protected message");
-    // F-protected (spec/10 §2.1): NO marker persisted, NO note left.
-    expect(appended).toHaveLength(0); // no mulligan:rewind marker
-    expect(sent).toHaveLength(0); // no mulligan:note
-    expect(res.details).toEqual({ granularity: "last_turn" });
   });
 });
 
@@ -626,7 +583,7 @@ describe("E6 — Parallel tool mode (shared assistant message kept whole)", () =
     const msgs: MessageLike[] = [
       user("u"), asst("S", "R"), result("S"), result("R"),
     ];
-    const out = resolveLastTurn(msgs, undefined, "R");
+    const out = resolveLastTurn(msgs, "R");
     // rewindOwnIndices contains the shared assistant (1) + result(S) (2); the rewind's own result (3) too —
     // the whole unit [1,2,3] is KEPT (spec/06 §9: keep the entire shared message). remove is empty here because
     // everything after iLastUser=0 is the rewind's own unit.

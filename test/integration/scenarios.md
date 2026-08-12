@@ -207,7 +207,7 @@ model-driven — SOFT.)*
 
 ### F-protected
 
-**Tests:** a rewind that would cross the first-user boundary is refused before persisting (the BUG-006 protected-refusal check in `rewind.ts:step-5b`).
+**Tests:** a rewind that would cross the first-user boundary is blocked by the filter's `protectedOk` check (defense-in-depth; v1.1 removed the discarded-latest-user-message drive, so the deterministic F-protected scenario is a no-op — the protection is asserted in `transforms.test.ts` / `edge-cases.test.ts`).
 
 **Run (deterministic):**
 ```bash

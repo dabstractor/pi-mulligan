@@ -119,7 +119,7 @@ function makeCtx(opts: {
 
 const REWIND_DATA: RewindMarkerInput = {
   granularity: "last_tool_call_group",
-  options: { to_previous_prompt: false },
+  options: { protect: ["first:user", "latest:user"] },
   excludeToolCallId: "call-rewind-self",
   note: {
     what_happened:
@@ -172,7 +172,7 @@ describe("appendRewindMarker — envelope + customType + seq + ts stamping (spec
     appendRewindMarker(pi, ctx, REWIND_DATA);
     const entry = appended[0].data as RewindMarker;
     expect(entry.granularity).toBe("last_tool_call_group");
-    expect(entry.options).toEqual({ to_previous_prompt: false });
+    expect(entry.options).toEqual({ protect: ["first:user", "latest:user"] });
     expect(entry.excludeToolCallId).toBe("call-rewind-self");
     expect(entry.note).toEqual(REWIND_DATA.note);
     expect(entry.ledger).toEqual(REWIND_DATA.ledger);

@@ -315,24 +315,16 @@ function assertProtected({ smoke, piRes }) {
   const results = [];
   const sessionFile = smoke.sessionFile;
   const entries = readSessionEntries(sessionFile);
-  // BUG-006 fix (verified): the rewind tool REFUSES before persisting when a nuclear last_turn rewind would
-  // cross the first/only user message (the /mulligan_smoke prompt is the only user message, so iFirstUser ===
-  // iLastUser and the protected-refusal check in rewind.ts:step-5b trips). Assert: the turn survives (pi exit 0)
-  // AND the tool text is a refusal AND ZERO mulligan:rewind markers were persisted (the refusal is pre-persist).
-  const rewindLines = smoke.lines.filter((l) => l.test === "tool.rewind");
-  const lastRewind = rewindLines[rewindLines.length - 1];
-  assert(results, "tool.rewind ran", !!lastRewind, "");
-  const text = lastRewind?.detail?.text ?? "";
-  // The protected check now manifests as a tool-level refusal ("would cross a protected message").
-  const refused = /refused/i.test(text);
-  assert(results, "protected rewind refused (crosses first user message)", refused, text.slice(0, 80));
+  // v1.1: the discarded-latest-user-message rewind drive no longer exists — last_turn now
+  // keeps the latest user message by construction (the resolver loop starts at iLastUser + 1). The F-protected
+  // scenario is therefore a no-op drive here; the first:user protection is covered by the filter's protectedOk
+  // defense-in-depth, asserted in transforms.test.ts / edge-cases.test.ts. We record that the scenario ran and
+  // that global invariants still hold.
   assert(results, "pi exited 0 (turn survived)", piRes.status === 0, `exit=${piRes.status}`);
   if (entries.length > 0) {
-    const rewindCount = countCustom(entries, "mulligan:rewind", "rewind");
-    assert(results, "JSONL has 0 mulligan:rewind (refusal pre-persist)", rewindCount === 0, `${rewindCount} found`);
     assertGlobalInvariants(results, entries);
   }
-  return { results, entries, note: "F-protected deterministic path asserts the tool refuses pre-persist (BUG-006); no marker is created" };
+  return { results, entries, note: "F-protected v1.1: first:user protection moved to unit tests (protectedOk); scenario is a no-op drive" };
 }
 
 function assertMaxdepth({ smoke, piRes }) {
