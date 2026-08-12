@@ -5,7 +5,10 @@ import { setLogFile } from "./log.js";
 import { resetRuntime, clearAll } from "./runtime.js";
 import { registerFilterHandler } from "./filter.js";
 import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
-import { registerTurnStartCapture } from "./capture.js";
+import {
+  registerTurnStartCapture,
+  registerAgentEndCapture,
+} from "./capture.js";
 import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
@@ -78,6 +81,8 @@ export default function (pi: ExtensionAPI): void {
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
   registerTurnStartCapture(pi); // pi.on("turn_start", …) — v1.2 working-tree revert prompt-boundary
   // GC + capture("turn"). Self-guards on revert.enabled (fail-open).
+  registerAgentEndCapture(pi); // pi.on("agent_end", …) — v1.2 working-tree revert: capture("turn-after")
+  // for the dirty guard (E30). Self-guards on revert.enabled (fail-open).
 
   // 6. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
   //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory

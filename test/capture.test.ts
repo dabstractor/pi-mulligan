@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   TurnStartEvent,
+  AgentEndEvent,
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -13,10 +14,13 @@ import {
   turnStartCaptureHandler,
   registerTurnStartCapture,
   gcTurnSnapshots,
+  agentEndCaptureHandler,
+  registerAgentEndCapture,
 } from "../src/capture.js";
 import { setConfig, DEFAULT_CONFIG } from "../src/config.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
 import { setLogFile, type LogLine } from "../src/log.js";
+import type { RevertCheckpoint } from "../src/markers.js";
 
 // ── module-level state reset (GOTCHA: runtime map + logFile + config cache are module-scoped) ──
 let dir: string;
@@ -447,5 +451,274 @@ describe("gcTurnSnapshots — shared prompt-boundary GC helper", () => {
     // call again to confirm clearing still happens after a throwing gc
     await gcTurnSnapshots(rt);
     expect(rt.snapshots?.has("turn")).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// registerAgentEndCapture
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("registerAgentEndCapture — arms pi.on('agent_end', agentEndCaptureHandler)", () => {
+  it("registers a handler for 'agent_end' (and only 'agent_end')", () => {
+    const { handlers, pi } = makePi();
+    registerAgentEndCapture(pi);
+    expect(typeof handlers["agent_end"]).toBe("function");
+    expect(Object.keys(handlers)).toEqual(["agent_end"]);
+  });
+
+  it("registers EXACTLY ONE handler (calling on once)", () => {
+    const { handlers, pi } = makePi();
+    registerAgentEndCapture(pi);
+    const keys = Object.keys(handlers);
+    expect(keys).toEqual(["agent_end"]);
+  });
+
+  it("does not register on any other event (e.g. not 'turn_end', not 'turn_start')", () => {
+    const { handlers, pi } = makePi();
+    registerAgentEndCapture(pi);
+    expect(handlers["turn_end"]).toBeUndefined();
+    expect(handlers["turn_start"]).toBeUndefined();
+    expect(handlers["context"]).toBeUndefined();
+  });
+
+  it("registers the EXACT exported agentEndCaptureHandler reference", () => {
+    const { handlers, pi } = makePi();
+    registerAgentEndCapture(pi);
+    expect(handlers["agent_end"]).toBe(agentEndCaptureHandler);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// agentEndCaptureHandler — gating
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+/** Synthetic AgentEndEvent (messages is unused by the handler). */
+function makeAgentEndEvent(): AgentEndEvent {
+  return { type: "agent_end", messages: [] };
+}
+
+describe("agentEndCaptureHandler — gating", () => {
+  it("no-ops (no store.capture call) when getConfig().revert.enabled === false (gate is FIRST)", async () => {
+    setConfig({ revert: { enabled: false } });
+    const store = makeStore();
+    const rt = getRuntime("gate-off");
+    rt.store = store;
+    setLogFile(file); // capture any errant log lines
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "gate-off" }),
+    );
+    expect(store.calls).toEqual([]); // capture never fired
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+    expect(readLogLines()).toEqual([]); // no log line (clean no-op, not an error)
+  });
+
+  it("no-ops when rt.store is undefined (does not throw; rt.snapshots untouched)", async () => {
+    const rt = getRuntime("no-store");
+    expect(rt.store).toBeUndefined(); // fresh runtime has no store
+    await expect(
+      agentEndCaptureHandler(
+        makeAgentEndEvent(),
+        makeCtx({ sessionId: "no-store" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+  });
+
+  it("does NOT call store.capture when revert is disabled — assert the fake capture spy call count is 0", async () => {
+    setConfig({ revert: { enabled: false } });
+    const store = makeStore();
+    const rt = getRuntime("disabled");
+    rt.store = store;
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "disabled" }),
+    );
+    expect(store.calls.filter((c) => c.startsWith("capture:"))).toHaveLength(0);
+  });
+
+  it("does NOT throw when store.capture throws — logs + returns (fail-open)", async () => {
+    setLogFile(file);
+    const store = makeStore({ captureThrows: true });
+    const rt = getRuntime("throw");
+    rt.store = store;
+    await expect(
+      agentEndCaptureHandler(
+        makeAgentEndEvent(),
+        makeCtx({ sessionId: "throw" }),
+      ),
+    ).resolves.toBeUndefined();
+    // capture threw → logged as capture.agent_end error
+    const lines = readLogLines();
+    expect(
+      lines.some((l) => l.event === "capture.agent_end" && l.level === "error"),
+    ).toBe(true);
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// agentEndCaptureHandler — in-place afterRef mutation
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("agentEndCaptureHandler — in-place afterRef mutation", () => {
+  it("sets afterRef on the EXISTING 'turn' entry when capture('turn-after') returns a non-null ref", async () => {
+    const store = makeStore({ captureRef: "after-abc123" });
+    const rt = getRuntime("mutate");
+    rt.store = store;
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "git",
+      beforeRef: "before-xyz",
+      turnIndex: 3,
+      ts: 1000,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "mutate" }),
+    );
+    expect(store.calls).toContain("capture:turn-after");
+    const turn = rt.snapshots?.get("turn");
+    expect(turn?.afterRef).toBe("after-abc123");
+  });
+
+  it("MUTATES IN PLACE — the SAME object reference (not a Map.set replacement)", async () => {
+    const store = makeStore({ captureRef: "after-ref" });
+    const rt = getRuntime("same-obj");
+    rt.store = store;
+    const preStored: RevertCheckpoint = {
+      label: "turn",
+      backend: "git",
+      beforeRef: "b1",
+      turnIndex: 0,
+      ts: 1,
+    };
+    rt.snapshots?.set("turn", preStored);
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "same-obj" }),
+    );
+    // the object held by `preStored` IS the object in the map (mutated, not replaced)
+    expect(rt.snapshots?.get("turn")).toBe(preStored);
+    expect(preStored.afterRef).toBe("after-ref");
+  });
+
+  it("preserves the existing beforeRef/turnIndex/ts/backend (only afterRef is added)", async () => {
+    const store = makeStore({ captureRef: "after-ref" });
+    const rt = getRuntime("preserve");
+    rt.store = store;
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "cas",
+      beforeRef: "before-keep",
+      turnIndex: 9,
+      ts: 4242,
+    } satisfies RevertCheckpoint);
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "preserve" }),
+    );
+    const turn = rt.snapshots?.get("turn");
+    expect(turn).toEqual({
+      label: "turn",
+      backend: "cas",
+      beforeRef: "before-keep",
+      afterRef: "after-ref",
+      turnIndex: 9,
+      ts: 4242,
+    });
+  });
+
+  it("leaves afterRef unset when capture('turn-after') returns null (caps exceeded / IO error)", async () => {
+    const store = makeStore({ captureRef: null });
+    const rt = getRuntime("null-cap");
+    rt.store = store;
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "git",
+      beforeRef: "b1",
+      turnIndex: 0,
+      ts: 1,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "null-cap" }),
+    );
+    expect(store.calls).toContain("capture:turn-after");
+    const turn = rt.snapshots?.get("turn");
+    expect(turn?.afterRef).toBeUndefined(); // null capture → afterRef stays unset
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// agentEndCaptureHandler — no 'turn' entry
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("agentEndCaptureHandler — no 'turn' entry", () => {
+  it("does NOT throw and does NOT create a new entry when rt.snapshots.get('turn') is undefined", async () => {
+    const store = makeStore({ captureRef: "after-ref" });
+    const rt = getRuntime("no-turn");
+    rt.store = store;
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+    await expect(
+      agentEndCaptureHandler(
+        makeAgentEndEvent(),
+        makeCtx({ sessionId: "no-turn" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.snapshots?.get("turn")).toBeUndefined(); // still no entry created
+  });
+
+  it("does NOT call Map.set (assert the snapshots map size is unchanged)", async () => {
+    const store = makeStore({ captureRef: "after-ref" });
+    const rt = getRuntime("no-set");
+    rt.store = store;
+    const sizeBefore = rt.snapshots?.size ?? 0;
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "no-set" }),
+    );
+    expect(rt.snapshots?.size).toBe(sizeBefore); // no new entry added
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// agentEndCaptureHandler — fail-open
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("agentEndCaptureHandler — fail-open", () => {
+  it("NEVER throws when store.capture('turn-after') rejects — logs 'capture.agent_end' + returns", async () => {
+    setLogFile(file);
+    const store = makeStore({ captureThrows: true });
+    const rt = getRuntime("reject");
+    rt.store = store;
+    await expect(
+      agentEndCaptureHandler(
+        makeAgentEndEvent(),
+        makeCtx({ sessionId: "reject" }),
+      ),
+    ).resolves.toBeUndefined();
+    const lines = readLogLines();
+    expect(lines.some((l) => l.event === "capture.agent_end")).toBe(true);
+  });
+
+  it("leaves the existing 'turn' entry's afterRef unset when capture rejects", async () => {
+    setLogFile(file);
+    const store = makeStore({ captureThrows: true });
+    const rt = getRuntime("reject-unset");
+    rt.store = store;
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "git",
+      beforeRef: "b1",
+      turnIndex: 0,
+      ts: 1,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "reject-unset" }),
+    );
+    const turn = rt.snapshots?.get("turn");
+    expect(turn?.afterRef).toBeUndefined(); // capture threw → afterRef never set
   });
 });

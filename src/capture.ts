@@ -36,6 +36,7 @@
  */
 import type {
   TurnStartEvent,
+  AgentEndEvent,
   ExtensionContext,
   ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -129,4 +130,73 @@ export async function turnStartCaptureHandler(
  */
 export function registerTurnStartCapture(pi: ExtensionAPI): void {
   pi.on("turn_start", turnStartCaptureHandler);
+}
+
+/**
+ * agentEndCaptureHandler — the v1.2 agent_end capture hook (spec/14-working-tree-revert.md §5/§6). Fires at
+ * the end of the agent's loop (after all tool calls + the final assistant message): snapshots the working
+ * tree via `capture("turn-after")` and sets the ref as `afterRef` on the EXISTING `"turn"` RevertCheckpoint
+ * in rt.snapshots (the object the turn_start hook stored). This after-ref is the baseline the dirty guard
+ * (rewindExecute step 6b, P4.M2.T1.S1) compares the current tree against to detect a human/other-process
+ * edit made AFTER the agent's turn — the E30 refuse-on-dirty guarantee (never silently clobber an unsaved
+ * edit). ASYNC (Pi awaits event handlers; awaits store.capture).
+ *
+ * NEVER throws (E27): the WHOLE body is ONE try/catch → log + return. Read sessionId FIRST so the catch can
+ * log it. Self-guards on config.revert.enabled (layer 1) + rt.store (undefined until P3.M1.T2.S1 wires it).
+ * MUTATES the existing turn checkpoint in place (does NOT Map.set a replacement). No-ops cleanly when: revert
+ * is off / the store is absent / there is no "turn" entry to annotate (no before-ref to pair with) / capture
+ * returns null (caps exceeded — E29 / IO error). Best-effort: a capture failure is logged and the turn ends
+ * (afterRef stays unset → the rewind's dirty guard degrades to its just-in-time after-ref path, PRD §6 step 3).
+ *
+ * @14 §5 (capture lifecycle — agent_end → capture("turn-after") → the turn's after ref; "the after-ref is
+ *   what makes dirtyCheck effective (it detects post-turn drift)"), §6 step 3 (restore dirty-guard: if
+ *   afterRef exists, dirtyCheck(afterRef, affected); any dirty path → REFUSE the file-revert; mid-turn
+ *   limitation before agent_end → just-in-time after-ref → guard trivially satisfied).
+ *
+ * @param event { type:"agent_end"; messages: AgentMessage[] } — messages is UNUSED by this handler.
+ * @param ctx   the Pi ExtensionContext (sessionManager.getSessionId read FRESH — C12).
+ */
+export async function agentEndCaptureHandler(
+  event: AgentEndEvent,
+  ctx: ExtensionContext,
+): Promise<void> {
+  let sessionId = "";
+  try {
+    sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); first so the catch can log it
+    if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
+    const rt = getRuntime(sessionId); // STRING arg, not ctx (NOT ctx.sessionId)
+    if (!rt.store) return; // store not created (config off / T2.S1 not wired)
+    const afterRef = await rt.store.capture("turn-after");
+    if (afterRef) {
+      // MUTATE the existing "turn" checkpoint in place (spec/14 §5: the after-ref rides the same
+      // RevertCheckpoint the turn_start before-ref lives on). Do NOT Map.set a replacement — held
+      // references must see the update.
+      const existing = rt.snapshots?.get("turn");
+      if (existing) existing.afterRef = afterRef;
+      // else: no "turn" entry (turn_start didn't fire / capture null / GC'd) → nothing to annotate → no-op.
+    }
+    // capture returned null → no-op (afterRef stays unset; the rewind's dirty guard degrades gracefully).
+  } catch (e) {
+    // FAIL-OPEN (E27): log + return — the turn is NEVER broken by an after-capture failure.
+    try {
+      log("error", "capture.agent_end", sessionId, { error: String(e) });
+    } catch {
+      /* log() never throws, but be safe */
+    }
+  }
+}
+
+/**
+ * registerAgentEndCapture — arm the v1.2 agent_end hook. index.ts (step 5) calls this once at startup:
+ *   `registerAgentEndCapture(pi);`. The handler needs no `pi` (it reads rt.store, getConfig, getRuntime,
+ *   log — all module globals), so it is registered DIRECTLY (mirrors registerBloatReminder /
+ *   registerTurnStartCapture; contrast registerTurnEndMetric which wraps to capture pi). Unconditional
+ *   registration — the gate lives INSIDE the handler (free when revert is off).
+ *
+ * @14 §5 (agent_end → capture("turn-after") → the turn's after ref — the dirty-guard baseline).
+ *
+ * @param pi the Pi ExtensionAPI (on() lives here).
+ */
+export function registerAgentEndCapture(pi: ExtensionAPI): void {
+  pi.on("agent_end", agentEndCaptureHandler);
 }

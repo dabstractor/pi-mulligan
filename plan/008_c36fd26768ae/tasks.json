@@ -310,14 +310,14 @@
           "type": "Milestone",
           "id": "P3.M1",
           "title": "Event hooks + store wiring in index.ts",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Register turn_start and agent_end handlers, thread the store through SessionRuntime, and add session_shutdown teardown. The store is created in session_start and destroyed in session_shutdown.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M1.T1",
               "title": "turn_start + agent_end capture hooks",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Register two new event handlers (only active when config.revert.enabled). turn_start runs prompt-boundary GC then captures the before-snapshot. agent_end captures the after-snapshot for dirty-check drift detection.",
               "subtasks": [
                 {
@@ -341,7 +341,7 @@
                   "type": "Subtask",
                   "id": "P3.M1.T1.S2",
                   "title": "agent_end hook (capture 'turn-after' for dirtyCheck)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S1"
@@ -359,14 +359,14 @@
               "type": "Task",
               "id": "P3.M1.T2",
               "title": "Thread store through index.ts factory + session_shutdown teardown",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add a store handle to SessionRuntime, create it in session_start, register the capture hooks in the factory, and add teardown to session_shutdown.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T2.S1",
                   "title": "Wire store into index.ts + session_start GC + session_shutdown teardown",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S1",

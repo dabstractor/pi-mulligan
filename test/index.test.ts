@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import indexFactory from "../src/index.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
@@ -27,7 +30,8 @@ beforeEach(() => {
  * (GOTCHA #10 — index.ts calls both; the established makePi only captured `.on`).
  */
 function makePi() {
-  const handlers: Record<string, ((...a: unknown[]) => unknown) | undefined> = {};
+  const handlers: Record<string, ((...a: unknown[]) => unknown) | undefined> =
+    {};
   const tools: { name: string }[] = [];
   const commands: { name: string }[] = [];
   const pi = {
@@ -54,7 +58,8 @@ function makeCtx(sessionId = "sess-test", cwd = "/test/cwd") {
     },
   };
   return {
-    sessionManager: sessionManager as unknown as ExtensionContext["sessionManager"],
+    sessionManager:
+      sessionManager as unknown as ExtensionContext["sessionManager"],
     cwd,
   } as ExtensionContext;
 }
@@ -73,7 +78,12 @@ describe("index.ts extension factory", () => {
 
     expect(tools).toHaveLength(4);
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["mulligan_audit", "mulligan_cancel", "mulligan_rewind", "mulligan_shrink"].sort(),
+      [
+        "mulligan_audit",
+        "mulligan_cancel",
+        "mulligan_rewind",
+        "mulligan_shrink",
+      ].sort(),
     );
   });
 
@@ -87,7 +97,11 @@ describe("index.ts extension factory", () => {
     const { commands, pi } = makePi();
     indexFactory(pi);
     expect(commands.map((c) => c.name).sort()).toEqual(
-      ["mulligan_checkpoint", "mulligan_checkpoint_revoke", "mulligan_audit"].sort(),
+      [
+        "mulligan_checkpoint",
+        "mulligan_checkpoint_revoke",
+        "mulligan_audit",
+      ].sort(),
     );
   });
 
@@ -95,9 +109,20 @@ describe("index.ts extension factory", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
 
-    const expected = ["context", "tool_result", "turn_end", "turn_start", "session_start", "session_shutdown"];
+    const expected = [
+      "agent_end",
+      "context",
+      "tool_result",
+      "turn_end",
+      "turn_start",
+      "session_start",
+      "session_shutdown",
+    ];
     for (const event of expected) {
-      expect(handlers[event], `expected handler armed for "${event}"`).toBeTypeOf("function");
+      expect(
+        handlers[event],
+        `expected handler armed for "${event}"`,
+      ).toBeTypeOf("function");
     }
   });
 
@@ -105,7 +130,15 @@ describe("index.ts extension factory", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
     expect(Object.keys(handlers).sort()).toEqual(
-      ["context", "session_shutdown", "session_start", "tool_result", "turn_end", "turn_start"].sort(),
+      [
+        "agent_end",
+        "context",
+        "session_shutdown",
+        "session_start",
+        "tool_result",
+        "turn_end",
+        "turn_start",
+      ].sort(),
     );
   });
 
@@ -197,9 +230,14 @@ describe("index.ts session_start config re-read (T2.S2)", () => {
     indexFactory(pi);
     // The factory (step 2) also calls setLogFile; clear it so only the session_start re-fire is counted.
     vi.mocked(setLogFile).mockClear();
-    vi.mocked(loadMulliganConfig).mockReturnValue({ log: { file: "/proj.log" } });
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      log: { file: "/proj.log" },
+    });
 
-    handlers["session_start"]!(makeStartEvent("reload"), makeCtx("s1", "/proj"));
+    handlers["session_start"]!(
+      makeStartEvent("reload"),
+      makeCtx("s1", "/proj"),
+    );
 
     expect(loadMulliganConfig).toHaveBeenCalledWith("/proj");
     expect(getConfig().log.file).toBe("/proj.log");
