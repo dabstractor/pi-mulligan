@@ -130,6 +130,21 @@ export interface SessionRuntime {
    *  non-persisted; auto-cleared (resetRuntime deletes the entry on session_start; clearAll wipes
    *  all on shutdown). Backend "none" (NoOpStore) is a valid assignment — the hooks guard on it. */
   store?: SnapshotStore;
+
+  /** [P1.M3.T1.S1 / spec/14 §4.2 / BUG-003] Per-turn accumulator of write/edit tool paths observed
+   *  by the tool_call capture hook (pendingExplicitPaths) for CasBackend explicit-paths mode. The hook
+   *  pushes `event.input.path` here BEFORE the tool runs; the turn_start/agent_end capture hooks (S2)
+   *  thread it into `rt.store.capture("turn", rt.pendingExplicitPaths)` as the CasBackend-specific 2nd
+   *  arg, then clear it at the next turn_start (parity with gcTurnSnapshots' turn/* clear). EMPTY/never
+   *  populated when revert is off, the backend is not CasBackend, or nonGitMode !== "explicit-paths"
+   *  (the hook early-returns in all those cases) — so captureExplicitPaths loops [] and writes an empty
+   *  manifest, exactly the current (pre-fix) behavior, i.e. S1 is inert until S2 threads the arg.
+   *
+   *  WHO WRITES: toolCallCaptureHandler (src/capture.ts). WHO READS+CLEARS: S2's capture call sites +
+   *  turn_start clear. OPTIONAL in the interface so a hand-built {} type-checks; freshRuntime ALWAYS
+   *  initializes it to a fresh [] (per-session isolated — GOTCHA #5). Auto-reset by resetRuntime
+   *  (entry deleted on session_start) and clearAll (shutdown). In-memory, non-persisted (spec/04 §8). */
+  pendingExplicitPaths?: string[];
 }
 
 /**
@@ -157,6 +172,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     aboveHighWater: false,
     rewindRefusedTurnIndex: null,
     snapshots: new Map<string, RevertCheckpoint>(),
+    pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003 — fresh [] per session (GOTCHA #5)
   };
 }
 

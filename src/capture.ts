@@ -37,12 +37,14 @@
 import type {
   TurnStartEvent,
   AgentEndEvent,
+  ToolCallEvent,
   ExtensionContext,
   ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { getConfig } from "./config.js";
 import { getRuntime } from "./runtime.js";
 import type { SessionRuntime } from "./runtime.js";
+import type { CasBackend } from "./snapshot/cas.js";
 import { log } from "./log.js";
 
 /**
@@ -267,4 +269,118 @@ export async function agentEndCaptureHandler(
  */
 export function registerAgentEndCapture(pi: ExtensionAPI): void {
   pi.on("agent_end", agentEndCaptureHandler);
+}
+
+/**
+ * toolCallCaptureHandler — [P1.M3.T1.S1 / spec/14-working-tree-revert.md §4.2 / BUG-003] the PRODUCER
+ * half of the explicit-paths non-git-mode fix. Fires BEFORE each tool runs (the `tool_call` event is
+ * the only place write/edit tool paths are observable before mutation, §4.2). In a CasBackend +
+ * `revert.nonGitMode === "explicit-paths"` workspace it (a) for `write`/`edit` tools, pushes
+ * `event.input.path` into `rt.pendingExplicitPaths` — the accumulator S2 will thread into
+ * `rt.store.capture("turn", rt.pendingExplicitPaths)` so `captureExplicitPaths` has a non-empty manifest
+ * (BUG-003 root cause: no caller ever passed the 2nd arg → empty manifest → restore reverted nothing);
+ * and (b) for the `bash` tool, delegates to `(rt.store as CasBackend).notifyBashUsed()` to emit the
+ * once-per-turn "bash changes NOT captured" warning (its file mutations are invisible to path-based
+ * capture). All other tools (read/grep/find/ls/custom) are clean no-ops (no file mutation captured by
+ * path). ASYNC (Pi awaits event handlers) but does no awaiting itself in S1 (push + a sync method call).
+ *
+ * NEVER throws (E27): the WHOLE body is ONE try/catch → log + return. A capture-hook failure must NEVER
+ * block a tool_call (the event can block tool execution). Read sessionId FIRST inside the try{} so the
+ * catch{} can log it (mirrors turnStartCaptureHandler/agentEndCaptureHandler GOTCHA #1).
+ *
+ * GATE ORDER (mirrors turnStartCaptureHandler EXACTLY — reordering breaks the fail-open logging contract):
+ *   1. sessionId (FRESH read — C12) — first so the catch can log it;
+ *   2. getConfig().revert.enabled (layer-1 gate — FIRST check; free when revert is off);
+ *   3. getRuntime(sessionId) (STRING arg, not ctx — GOTCHA #5);
+ *   4. rt.store (undefined until P3.M1.T2.S1 wires detectAndCreate at session_start) — early return;
+ *   5. rt.store.describe().backend !== "cas" — explicit-paths is CasBackend-specific (a git repo captures
+ *      the whole tree via git; a NoOpStore captures nothing) → correctly skips git AND none;
+ *   6. getConfig().revert.nonGitMode !== "explicit-paths" — 'cas' mode walks the whole tree (no path list
+ *      needed) → no accumulation to do.
+ *
+ * NARROWING CAVEAT (CRITICAL #1): `event.toolName === "write"` is a VALID runtime value-check but does
+ * NOT narrow `event.input` in TS (CustomToolCallEvent.toolName is `string`, overlapping every literal).
+ * So after the `===` check the handler casts defensively: `const path = (event.input as { path?: string
+ * }).path;` then guards `typeof path === "string" && path.length > 0`. (Alternative: isToolCallEventType
+ * narrows cleanly — see PRP Implementation Patterns; PATTERN A is used here per the PRP.)
+ *
+ * CAST REQUIREMENT (CRITICAL #2): `notifyBashUsed()` is a PUBLIC CasBackend method NOT on the SnapshotStore
+ * interface, so `rt.store.notifyBashUsed()` is a TYPE ERROR. The handler casts: `(rt.store as
+ * CasBackend).notifyBashUsed()`. CasBackend is imported TYPE-ONLY (erased by tsc; no runtime graph cycle).
+ * The method self-guards on `nonGitMode === "explicit-paths"` + once-per-turn (`bashWarnedThisTurn`) — by
+ * the time the handler reaches this call it has ALREADY gated nonGitMode, so the warning WILL fire; the
+ * handler does NOT replicate those guards (CasBackend owns them).
+ *
+ * SCOPE NOTE: this handler is registered by `registerToolCallCapture` below, which index.ts step 5 will
+ * call once at startup — but NOT in S1. S1 is PRODUCER-ONLY and stays DORMANT until S2 (a) wires the
+ * registration, (b) threads `rt.pendingExplicitPaths` into the capture("turn")/capture("turn-after") calls,
+ * and (c) clears the accumulator at the next turn_start. Until S2, the accumulator is populated here but
+ * never consumed → captureExplicitPaths still loops [] and writes an empty manifest (the current pre-fix
+ * behavior). So S1 alone has NO user-visible effect.
+ *
+ * @param event the ToolCallEvent (`{ type:"tool_call"; toolCallId; toolName; input }`). `input` shape varies
+ *   by toolName (Write/EditToolInput carry a `path`; BashToolInput does not).
+ * @param ctx   the Pi ExtensionContext (sessionManager.getSessionId read FRESH — C12).
+ */
+export async function toolCallCaptureHandler(
+  event: ToolCallEvent,
+  ctx: ExtensionContext,
+): Promise<void> {
+  let sessionId = "";
+  try {
+    sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); first so the catch can log it
+    if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
+    const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
+    if (!rt.store) return; // store not created (config off / T2.S1 not wired)
+    const backend = rt.store.describe().backend;
+    if (backend !== "cas") return; // explicit-paths is CasBackend-specific (skips git + none)
+    if (getConfig().revert.nonGitMode !== "explicit-paths") return; // 'cas' mode won't consume the paths
+    // ── write/edit: accumulate the path BEFORE the tool runs (spec/14 §4.2) ──
+    if (event.toolName === "write" || event.toolName === "edit") {
+      // `===` is runtime-correct but does NOT narrow event.input in TS (CustomToolCallEvent.toolName is
+      // `string`, overlapping all literals) → defensive cast + typeof guard (CRITICAL #1 / Pattern A).
+      const path = (event.input as { path?: string }).path;
+      if (typeof path === "string" && path.length > 0) {
+        rt.pendingExplicitPaths?.push(path); // S2 threads rt.pendingExplicitPaths into capture()
+      }
+      return;
+    }
+    // ── bash: warn once per turn that its changes are not captured (notifyBashUsed self-guards) ──
+    if (event.toolName === "bash") {
+      // notifyBashUsed is PUBLIC on CasBackend but NOT on the SnapshotStore interface → cast required
+      // (CRITICAL #2). The method self-guards on nonGitMode==='explicit-paths' (already gated above) +
+      // once-per-turn; the handler does NOT replicate those guards — CasBackend owns them.
+      (rt.store as CasBackend).notifyBashUsed();
+      return;
+    }
+    // read/grep/find/ls/custom → no file mutation captured by path → no-op (fall through to return)
+  } catch (e) {
+    // FAIL-OPEN (E27): log + return — a tool_call must NEVER be blocked by a capture-hook failure.
+    try {
+      log("error", "capture.tool_call", sessionId, {
+        error: String(e),
+        toolName: event?.toolName,
+      });
+    } catch {
+      /* log() never throws, but be safe (and event could be malformed) */
+    }
+  }
+}
+
+/**
+ * registerToolCallCapture — arm the [P1.M3.T1.S1] `tool_call` capture hook. index.ts (step 5) will call
+ * this once at startup: `registerToolCallCapture(pi);`. The handler needs no `pi` (it reads rt.store,
+ * getConfig, getRuntime, log — all module globals), so it is registered DIRECTLY (mirrors
+ * registerBloatReminder / registerTurnStartCapture / registerAgentEndCapture). Unconditional registration
+ * — the gate lives INSIDE the handler (free when revert is off).
+ *
+ * NOTE (S1 scope): index.ts does NOT call this in S1 — registration is S2's contract. The export exists
+ * so S2 can wire it without touching capture.ts again.
+ *
+ * @14 §4.2 (the tool-call hook reads `event.input.path` and snapshots that path's state before the tool runs).
+ *
+ * @param pi the Pi ExtensionAPI (on() lives here).
+ */
+export function registerToolCallCapture(pi: ExtensionAPI): void {
+  pi.on("tool_call", toolCallCaptureHandler);
 }

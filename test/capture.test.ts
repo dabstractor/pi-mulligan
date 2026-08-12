@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   TurnStartEvent,
   AgentEndEvent,
+  ToolCallEvent,
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -17,6 +18,8 @@ import {
   rebuildCheckpointSnapshots,
   agentEndCaptureHandler,
   registerAgentEndCapture,
+  toolCallCaptureHandler,
+  registerToolCallCapture,
 } from "../src/capture.js";
 import { setConfig, DEFAULT_CONFIG } from "../src/config.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
@@ -841,5 +844,358 @@ describe("agentEndCaptureHandler — fail-open", () => {
     );
     const turn = rt.snapshots?.get("turn");
     expect(turn?.afterRef).toBeUndefined(); // capture threw → afterRef never set
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// registerToolCallCapture — [P1.M3.T1.S1]
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("registerToolCallCapture — arms pi.on('tool_call', toolCallCaptureHandler)", () => {
+  it("registers a handler for 'tool_call' (and only 'tool_call')", () => {
+    const { handlers, pi } = makePi();
+    registerToolCallCapture(pi);
+    expect(typeof handlers["tool_call"]).toBe("function");
+    expect(Object.keys(handlers)).toEqual(["tool_call"]);
+  });
+
+  it("registers EXACTLY ONE handler (calling on once)", () => {
+    const { handlers, pi } = makePi();
+    registerToolCallCapture(pi);
+    const keys = Object.keys(handlers);
+    expect(keys).toEqual(["tool_call"]);
+  });
+
+  it("does not register on any other event (e.g. not 'turn_start', not 'agent_end')", () => {
+    const { handlers, pi } = makePi();
+    registerToolCallCapture(pi);
+    expect(handlers["turn_start"]).toBeUndefined();
+    expect(handlers["turn_end"]).toBeUndefined();
+    expect(handlers["agent_end"]).toBeUndefined();
+    expect(handlers["context"]).toBeUndefined();
+  });
+
+  it("registers the EXACT exported toolCallCaptureHandler reference", () => {
+    const { handlers, pi } = makePi();
+    registerToolCallCapture(pi);
+    expect(handlers["tool_call"]).toBe(toolCallCaptureHandler);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// toolCallCaptureHandler — [P1.M3.T1.S1] fakes
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A CasBackend-shaped fake: like makeStore() but also records `notifyBashUsed` calls. The handler casts
+ * `rt.store as CasBackend`, so the fake must implement that PUBLIC method (NOT on the SnapshotStore
+ * interface — the existing RecordingStore lacks it).
+ */
+function makeCasStore(): { store: SnapshotStore; calls: string[] } {
+  const calls: string[] = [];
+  const store = {
+    calls,
+    describe() {
+      return { backend: "cas" } as { backend: "git" | "cas" | "none" };
+    },
+    async capture(label: string): Promise<string | null> {
+      calls.push(`capture:${label}`);
+      return "cas-ref";
+    },
+    async gc(): Promise<void> {
+      calls.push("gc");
+    },
+    async dirtyCheck(): Promise<string[]> {
+      return [];
+    },
+    async restore(): Promise<import("../src/snapshot/store.js").RestoreResult> {
+      return { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+    },
+    async has(): Promise<boolean> {
+      return true;
+    },
+    async retire(): Promise<void> {
+      /* no-op */
+    },
+    notifyBashUsed(): void {
+      calls.push("notifyBashUsed"); // PUBLIC CasBackend method the handler casts to
+    },
+  };
+  return { store: store as unknown as SnapshotStore, calls };
+}
+
+/** Synthetic ToolCallEvent with a controllable toolName + input. */
+function makeToolCallEvent(toolName: string, input: Record<string, unknown>): ToolCallEvent {
+  return { type: "tool_call", toolCallId: "tc1", toolName, input } as ToolCallEvent;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// toolCallCaptureHandler — gating (early-return, no work)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("toolCallCaptureHandler — gating", () => {
+  it("no-ops when getConfig().revert.enabled === false (layer-1 gate is FIRST) — pendingExplicitPaths stays []", async () => {
+    setConfig({ revert: { enabled: false } });
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime("gate-off");
+    rt.store = store;
+    setLogFile(file);
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "gate-off" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // freshRuntime inits []; gate-off → never pushed
+    expect(calls).toEqual([]); // no notifyBashUsed, no capture
+    expect(readLogLines()).toEqual([]); // clean no-op, not an error
+  });
+
+  it("no-ops when rt.store is undefined (does not throw; pendingExplicitPaths untouched)", async () => {
+    const rt = getRuntime("no-store");
+    expect(rt.store).toBeUndefined(); // fresh runtime has no store
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("write", { path: "src/a.ts" }),
+        makeCtx({ sessionId: "no-store" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.pendingExplicitPaths).toEqual([]); // never pushed
+  });
+
+  it("no-ops when backend === 'git' (explicit-paths is cas-only; git captures the whole tree)", async () => {
+    const store = makeStore({ backend: "git" }); // RecordingStore, no notifyBashUsed
+    const rt = getRuntime("git");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "git" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // backend gate → never pushed
+    expect(store.calls).toEqual([]); // no capture
+  });
+
+  it("no-ops when backend === 'none' (NoOpStore captures nothing)", async () => {
+    const store = makeStore({ backend: "none" });
+    const rt = getRuntime("none");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "none" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]);
+  });
+
+  it("no-ops when nonGitMode === 'cas' (default) even with a cas backend — write event does NOT push", async () => {
+    // default config has nonGitMode 'cas'; setConfig in beforeEach already enabled revert.
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime("cas-mode");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "cas-mode" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // nonGitMode !== 'explicit-paths' → no push
+    expect(calls).toEqual([]); // no notifyBashUsed either
+  });
+
+  it("does NOT throw when getSessionId throws — fail-open: error is logged (capture.tool_call)", async () => {
+    setLogFile(file);
+    const { store } = makeCasStore();
+    const rt = getRuntime("throw-sid");
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("write", { path: "src/a.ts" }),
+        makeCtx({ sessionId: "throw-sid", throwOnGetSessionId: true }),
+      ),
+    ).resolves.toBeUndefined();
+    const lines = readLogLines();
+    expect(
+      lines.some((l) => l.event === "capture.tool_call" && l.level === "error"),
+    ).toBe(true);
+    expect(rt.pendingExplicitPaths).toEqual([]); // threw before the push → never pushed
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// toolCallCaptureHandler — accumulation (write/edit happy path)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("toolCallCaptureHandler — accumulation (write/edit push into pendingExplicitPaths)", () => {
+  beforeEach(() => {
+    // explicit-paths mode + revert on (default beforeEach enables revert; set the mode)
+    setConfig({ revert: { enabled: true, nonGitMode: "explicit-paths" } });
+  });
+
+  it("pushes event.input.path for a 'write' event into rt.pendingExplicitPaths", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("write-1");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "write-1" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual(["src/a.ts"]);
+  });
+
+  it("pushes event.input.path for an 'edit' event into rt.pendingExplicitPaths", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("edit-1");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("edit", { path: "src/b.ts", edits: [{ oldText: "x", newText: "y" }] }),
+      makeCtx({ sessionId: "edit-1" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual(["src/b.ts"]);
+  });
+
+  it("accumulates across MULTIPLE write/edit events in the SAME turn (cumulative push)", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("accum");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "accum" }),
+    );
+    await toolCallCaptureHandler(
+      makeToolCallEvent("edit", { path: "src/b.ts" }),
+      makeCtx({ sessionId: "accum" }),
+    );
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/c.ts" }),
+      makeCtx({ sessionId: "accum" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+  });
+
+  it("does NOT push when input.path is MISSING (defensive typeof guard)", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("no-path");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", {}), // no path key
+      makeCtx({ sessionId: "no-path" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // typeof guard rejected undefined
+  });
+
+  it("does NOT push and does NOT throw when input.path is a NON-STRING (defensive typeof guard)", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("bad-path");
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("write", { path: 12345 }),
+        makeCtx({ sessionId: "bad-path" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.pendingExplicitPaths).toEqual([]); // typeof !== "string" → no push
+  });
+
+  it("does NOT push when input.path is an EMPTY string (length>0 guard)", async () => {
+    const { store } = makeCasStore();
+    const rt = getRuntime("empty-path");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "" }),
+      makeCtx({ sessionId: "empty-path" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // empty string rejected
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// toolCallCaptureHandler — bash delegation
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("toolCallCaptureHandler — bash delegation to (rt.store as CasBackend).notifyBashUsed()", () => {
+  beforeEach(() => {
+    setConfig({ revert: { enabled: true, nonGitMode: "explicit-paths" } });
+  });
+
+  it("calls notifyBashUsed exactly once for a 'bash' event (cas + explicit-paths)", async () => {
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime("bash-1");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("bash", { command: "echo hi" }),
+      makeCtx({ sessionId: "bash-1" }),
+    );
+    expect(calls.filter((c) => c === "notifyBashUsed")).toHaveLength(1);
+    expect(rt.pendingExplicitPaths).toEqual([]); // bash never pushes a path
+  });
+
+  it("calls notifyBashUsed on EVERY bash event (the once-per-turn dedup lives INSIDE CasBackend, NOT the handler)", async () => {
+    // S1's handler does NOT dedup — it always delegates. CasBackend.notifyBashUsed owns the dedup.
+    // The fake here records EVERY call (it does NOT replicate the dedup), proving the handler calls
+    // it each time. (The real CasBackend would warn once; the handler stays a thin delegator.)
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime("bash-repeat");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("bash", { command: "a" }),
+      makeCtx({ sessionId: "bash-repeat" }),
+    );
+    await toolCallCaptureHandler(
+      makeToolCallEvent("bash", { command: "b" }),
+      makeCtx({ sessionId: "bash-repeat" }),
+    );
+    expect(calls.filter((c) => c === "notifyBashUsed")).toHaveLength(2); // handler delegated both times
+  });
+
+  it("does NOT call notifyBashUsed when backend === 'git' (backend gate)", async () => {
+    // override beforeEach's mode is irrelevant — the backend gate fires before nonGitMode matters;
+    // use a git-shaped store (RecordingStore has no notifyBashUsed, so a call would throw).
+    const store = makeStore({ backend: "git" });
+    const rt = getRuntime("bash-git");
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("bash", { command: "echo" }),
+        makeCtx({ sessionId: "bash-git" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(store.calls).toEqual([]); // no notifyBashUsed, no capture
+  });
+
+  it("does NOT call notifyBashUsed when nonGitMode === 'cas' (mode gate)", async () => {
+    setConfig({ revert: { enabled: true, nonGitMode: "cas" } }); // override beforeEach
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime("bash-cas-mode");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("bash", { command: "echo" }),
+      makeCtx({ sessionId: "bash-cas-mode" }),
+    );
+    expect(calls).toEqual([]); // nonGitMode gate fired before the bash branch
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// toolCallCaptureHandler — inert tools (read/grep/find/ls/custom)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("toolCallCaptureHandler — inert tools (no path push, no bash warning)", () => {
+  beforeEach(() => {
+    setConfig({ revert: { enabled: true, nonGitMode: "explicit-paths" } });
+  });
+
+  it.each([
+    ["read", { path: "src/x.ts" }],
+    ["grep", { pattern: "foo" }],
+    ["find", { path: "." }],
+    ["ls", { path: "." }],
+    ["custom", { anything: true }],
+  ])("is a clean no-op for a '%s' tool_call event (cas + explicit-paths)", async (toolName, input) => {
+    const { store, calls } = makeCasStore();
+    const rt = getRuntime(`inert-${toolName}`);
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent(toolName, input),
+        makeCtx({ sessionId: `inert-${toolName}` }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.pendingExplicitPaths).toEqual([]); // no path pushed
+    expect(calls).toEqual([]); // no notifyBashUsed, no capture
   });
 });

@@ -35,6 +35,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
       snapshots: new Map(),
+      pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003
     });
   });
 
@@ -58,6 +59,14 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
     expect(a.shrinkMissCounts).not.toBe(b.shrinkMissCounts);
     a.shrinkMissCounts.set("shrink-1", 1);
     expect(b.shrinkMissCounts.get("shrink-1")).toBeUndefined(); // b unaffected
+  });
+
+  it("each fresh runtime gets its OWN pendingExplicitPaths array — no cross-session sharing (P1.M3.T1.S1 / GOTCHA #5)", () => {
+    const a = getRuntime("s1");
+    const b = getRuntime("s2");
+    expect(a.pendingExplicitPaths).not.toBe(b.pendingExplicitPaths);
+    a.pendingExplicitPaths!.push("src/a.ts");
+    expect(b.pendingExplicitPaths).toHaveLength(0); // b unaffected
   });
 
   it("rewindRefusedTurnIndex is mutable and isolated per session (P4.M1.T2.S3)", () => {
@@ -151,6 +160,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
       snapshots: new Map(),
+      pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003
     });
   });
 
@@ -288,6 +298,7 @@ describe("types", () => {
     expectTypeOf(rt.pendingBloatHits).toEqualTypeOf<BloatHit[]>();
     expectTypeOf(rt.shrinkMissCounts).toEqualTypeOf<Map<string, number>>();
     expectTypeOf(rt.aboveHighWater).toEqualTypeOf<boolean>();
+    expectTypeOf(rt.pendingExplicitPaths).toEqualTypeOf<string[] | undefined>(); // P1.M3.T1.S1 / BUG-003
     expectTypeOf<BloatHit>().toEqualTypeOf<{ toolName: string; approxTokens: number }>();
   });
 
