@@ -471,14 +471,14 @@
               "type": "Task",
               "id": "P4.M2.T1",
               "title": "rewindExecute step 6b (revert execution)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add step 6b to rewindExecute: after marker persist, before mutation warning. Decision tree: neither flag → unchanged; flags but disabled → notice; flags at last_tool_call_group → mismatch notice; else → resolve RevertCheckpoint → dirty guard → store.restore → fold results into success text + marker.revert.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M2.T1.S1",
                   "title": "Step 6b decision tree + checkpoint resolution + dirty guard",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1",
@@ -500,7 +500,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "store.restore + fold results into marker.revert + success text",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T1.S1"

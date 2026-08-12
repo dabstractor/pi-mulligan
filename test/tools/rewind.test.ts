@@ -27,7 +27,8 @@ import { clearAll, getRuntime } from "../../src/runtime.js";
 import { setConfig } from "../../src/config.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js"; // P4.M1.T3.S1 test (d)/(e): shrink stays callable after the rewind budget/context-fraction refuse
 import { listCheckpoints } from "../../src/tools/audit.js"; // P1.M3.T1.S2: pure-fn assertions on the consumed-state entries
-import type { RewindMarker, RewindMarkerInput } from "../../src/markers.js";
+import type { RewindMarker, RewindMarkerInput, RevertCheckpoint } from "../../src/markers.js";
+import type { SnapshotStore, RestoreResult, RestoreOpts } from "../../src/snapshot/store.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -1421,5 +1422,384 @@ describe("mulligan_rewind — v1.2 revert params (P4.M1.T1.S1)", () => {
     // CRITICAL #5: NO step-6b logic in this item → the success text must NOT contain a "Reverted" clause
     // (that wording lands in P4.M2.T1).
     expect(firstText(res)).not.toContain("Reverted");
+  });
+});
+
+// ── P4.M2.T1.S1: step 6b working-tree-revert decision tree (spec/05 §1 step 6b; @14 §6/§7) ─────
+//
+// The decision tree: gate on config → gate on granularity → resolve checkpoint → dirty guard → proceed.
+// Each terminal branch appends an EXACT notice string to the success text; the proceed branch is a comment
+// seam for S2 (P4.M2.T1.S2 does the actual store.restore). These tests SEED rt.store + rt.snapshots via the
+// hand-rolled makeFakeStore (NO vi.fn() — closure-driven) so the resolve/guard branches are unit-testable.
+// The success path needs a contextEntries snapshot so the rewind reaches step 6b (mirror the existing success
+// test idiom: a user msg + a non-excluded toolGroup so resolveLastTurn returns a non-empty remove set; K may
+// be 0, that is fine — 6b runs regardless of K as long as the rewind is not refused earlier).
+
+/**
+ * makeFakeStore — a hand-rolled SnapshotStore fake for the 6b tests (mirrors the file's idiom: NO vi.fn()).
+ * Scripts `dirtyCheck` via a closure: `drifted` is the list it returns; `throwOnCheck` makes it throw (E13).
+ * `restoreCalled` lets the PROCEED test assert S1 does NOT call restore (the S2 seam must stay inert).
+ * `restoreResult` is what restore returns (unused in S1 — restore is never called).
+ */
+function makeFakeStore(opts: {
+  drifted?: string[];
+  throwOnCheck?: boolean;
+  restoreCalled?: () => void;
+}): SnapshotStore {
+  return {
+    describe: () => ({ backend: "git" }),
+    capture: async () => "ref-x",
+    dirtyCheck: async (_afterRef: string, _paths: string[]) => {
+      if (opts.throwOnCheck) throw new Error("dirtyCheck boom");
+      return [...(opts.drifted ?? [])];
+    },
+    restore: async (
+      _beforeRef: string,
+      _o: RestoreOpts,
+    ) => {
+      opts.restoreCalled?.();
+      return {
+        reverted: [],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      } as RestoreResult;
+    },
+    has: async () => true,
+    retire: async () => {
+      /* no-op */
+    },
+    gc: async () => {
+      /* no-op */
+    },
+    destroy: async () => {
+      /* no-op */
+    },
+  } as unknown as SnapshotStore;
+}
+
+/** Seed a "turn" checkpoint into rt.snapshots (the last_turn key). */
+function seedTurnCheckpoint(rt: {
+  snapshots?: Map<string, RevertCheckpoint>;
+}): void {
+  rt.snapshots!.set("turn", {
+    label: "turn",
+    backend: "git",
+    beforeRef: "rb",
+    afterRef: "ra",
+    turnIndex: 0,
+    ts: Date.now(),
+  });
+}
+
+/** Seed a checkpoint-granularity checkpoint into rt.snapshots under the "ckpt:<name>" key. */
+function seedCkptCheckpoint(
+  rt: { snapshots?: Map<string, RevertCheckpoint> },
+  name: string,
+): void {
+  rt.snapshots!.set(`ckpt:${name}`, {
+    label: `ckpt:${name}`,
+    backend: "git",
+    beforeRef: "rb",
+    // checkpoints capture once → NO afterRef (the afterRef ?? beforeRef fallback exercises the checkpoint path)
+    turnIndex: 0,
+    ts: Date.now(),
+  });
+}
+
+describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
+  // (a) NO FLAGS REGRESSION — NEITHER revert flag set ⇒ step 6b skipped entirely; byte-identical v1.1 path.
+  it("skips 6b entirely when NEITHER revert flag is set (byte-identical v1.1 path; no 'file revert' text)", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" }, "call-1");
+    // the EXACT v1.1 string (K=2, no warning, no revert clause)
+    expect(firstText(res)).toBe(
+      "Mulligan: rewound last_turn. 2 messages will be hidden from your view starting next turn. Note left.",
+    );
+    expect(firstText(res)).not.toContain("file revert"); // 6b never ran
+    expect(res.details.revertRefused).toBe(false); // flag stays false (never refused; not undefined — it is always present on the success path)
+  });
+
+  // (b) DISABLED — flags set but config.revert.enabled=false → disabled notice; skip.
+  it("appends '(file revert requested but disabled in config)' when flags set but config.revert.enabled=false", async () => {
+    setConfig({ revert: { enabled: false } });
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert requested but disabled in config)",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind STILL succeeds
+  });
+
+  // (c) GROUP GRANULARITY — flags set at last_tool_call_group → granularity-mismatch notice; skip.
+  it("appends the granularity-mismatch notice when flags set at last_tool_call_group", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn.",
+    );
+    expect(res.details.revertRefused).toBe(false); // granularity skip ≠ refuse (false, not undefined — always present on the success path)
+  });
+
+  // (d) MISSING SNAPSHOT — flags set + enabled + supported granularity but NO rt.snapshots entry → skip notice.
+  it("appends the skip notice (0 reverted) when the checkpoint is MISSING (no rt.snapshots entry)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: [] }); // store present but NO "turn" checkpoint seeded
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind STILL succeeds
+    expect(firstText(res)).not.toContain("refused");
+  });
+
+  // (e) NO STORE — rt.store is undefined (store never created at session_start) → same skip notice.
+  it("appends the skip notice when rt.store is undefined (store never created)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    seedTurnCheckpoint(rt); // checkpoint present but NO store
+    rt.store = undefined;
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)",
+    );
+  });
+
+  // (f) DIRTY GUARD REFUSE — dirtyCheck returns drifted paths → refuse notice + details.revertRefused===true.
+  it("REFUSES the whole file-revert when dirtyCheck returns drifted paths; details.revertRefused===true", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: ["src/a.ts", "src/b.ts"] });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert refused: 2 path(s) changed since the turn ended — not overwritten; re-request if intended)",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // the REWIND still proceeds (only the file-revert refused)
+    expect(res.details.revertRefused).toBe(true);
+  });
+
+  // (g) PROCEED — dirty guard clean → S1 must NOT call store.restore (the S2 seam stays inert); no revert clause.
+  it("PROCEEDS (no clause, no restore yet) when dirtyCheck returns [] — S1 must NOT call store.restore", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    let restoreCalls = 0;
+    rt.store = makeFakeStore({ drifted: [], restoreCalled: () => restoreCalls++ });
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind succeeds
+    // CRITICAL #9: S1 performs NO restore (the proceed branch is a comment-seam for S2).
+    expect(firstText(res)).not.toContain("file revert"); // no clause yet (S2 appends "Reverted X file(s)…")
+    expect(firstText(res)).not.toContain("refused");
+    expect(res.details.revertRefused).toBe(false); // guard ran + was clean (explicitly false, not undefined)
+    expect(restoreCalls).toBe(0); // S1 must NOT call store.restore
+  });
+
+  // (h) CHECKPOINT KEY — granularity "checkpoint" resolves via the "ckpt:<name>" key (NOT "checkpoint:<name>").
+  it("resolves checkpoint granularity via the 'ckpt:<name>' key (NOT 'checkpoint:<name>')", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      // checkpointExists needs an active label entry for "anchor" to pass the step-3 existence check
+      entries: [checkpointLabelEntry("anchor")],
+      contextEntries: [msgEntry(user("u"))], // branch messages for resolveCheckpoint
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: [] }); // clean guard → proceeds
+    seedCkptCheckpoint(rt, "anchor"); // seed under "ckpt:anchor" (the CORRECT key)
+    const res = await run(
+      pi,
+      ctx,
+      {
+        note: VALID_NOTE,
+        granularity: "checkpoint",
+        checkpoint: "anchor",
+        revert_file_changes: true,
+      },
+      "call-1",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound checkpoint.");
+    // the checkpoint resolved via "ckpt:anchor" → clean guard → proceeds → NO skip/refuse notice.
+    expect(firstText(res)).not.toContain("no working-tree snapshot");
+    expect(firstText(res)).not.toContain("refused");
+    expect(res.details.revertRefused).toBe(false);
+  });
+
+  // (i) WRONG CHECKPOINT KEY — seeding under "checkpoint:<name>" (the WRONG key) hits the missing-snapshot branch.
+  it("hits the missing-snapshot branch when the checkpoint key is wrong ('checkpoint:<name>' does not resolve)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      entries: [checkpointLabelEntry("anchor")],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: [] });
+    // seed under the WRONG key ("checkpoint:anchor") → the code reads "ckpt:anchor" → misses → skip notice
+    rt.snapshots!.set("checkpoint:anchor", {
+      label: "checkpoint:anchor",
+      backend: "git",
+      beforeRef: "rb",
+      turnIndex: 0,
+      ts: Date.now(),
+    });
+    const res = await run(
+      pi,
+      ctx,
+      {
+        note: VALID_NOTE,
+        granularity: "checkpoint",
+        checkpoint: "anchor",
+        revert_file_changes: true,
+      },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)",
+    );
+  });
+
+  // (j) E13 FAIL-OPEN — a dirtyCheck THROW degrades to the skip notice; the rewind completes (no throw escapes).
+  it("E13 fail-open: a dirtyCheck THROW degrades to 'file revert skipped: an error occurred' (rewind succeeds)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ throwOnCheck: true }); // dirtyCheck THROWS
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert skipped: an error occurred — 0 files reverted)",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind STILL completes
+    expect(firstText(res)).not.toContain("refused");
+    expect(res.details.revertRefused).toBe(false); // NOT the refuse path (the throw degraded to skip)
   });
 });

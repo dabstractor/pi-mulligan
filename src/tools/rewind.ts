@@ -53,7 +53,12 @@ import {
   type SessionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
-import { appendRewindMarker, leaveNote, type RewindMarkerInput } from "../markers.js"; // GOTCHA #13: .js
+import {
+  appendRewindMarker,
+  leaveNote,
+  type RewindMarkerInput,
+  type RevertCheckpoint,
+} from "../markers.js"; // GOTCHA #13: .js
 import { validateNote, renderNote, NOTE_INVALID_REASON, type NoteInput } from "../notes.js";
 import { extractFileLedger, type FileLedger } from "../ledger.js";
 import { getConfig, type Granularity } from "../config.js"; // GOTCHA #14: read ONCE at the top of execute
@@ -151,6 +156,29 @@ const MUTATION_WARNING =
   "⚠ The hidden span modified files/ran side-effecting commands (see note). " +
   "Those effects PERSIST on disk; do not blindly redo them.";
 
+/**
+ * RevertDecision — the outcome of step 6b's working-tree-revert decision tree (spec/05 §1 step 6b;
+ * @14 §6/§7). S1 (this item, P4.M2.T1.S1) computes the decision; S2 (P4.M2.T1.S2) consumes the "proceed"
+ * variant to call `store.restore` + fold the `RestoreResult` into the marker's `revert` field + the
+ * success text. Module-local (NOT exported) — widened to an exported type only when S2 lands. The
+ * "refuse"/"skip" variants are terminal in S1 (a notice is appended to the success text; no restore runs).
+ *
+ * NOTE: in S1 the proceed branch does NOT assign a `RevertDecision` value (it is a comment-seam for S2) —
+ * the type is declared for readability + to pin the S2 contract. TS erases unused type declarations, so
+ * `noUnusedLocals` (which targets VALUES, not type declarations) does NOT flag it. (CRITICAL #10.)
+ */
+type RevertDecision =
+  | {
+      decision: "proceed";
+      checkpoint: RevertCheckpoint;
+      affectedPaths: string[];
+      afterRef: string;
+      revertFileChanges: boolean;
+      deleteCreatedFiles: boolean;
+    }
+  | { decision: "refuse"; driftedPaths: string[] }
+  | { decision: "skip" };
+
 // ── Result builders (always include `details` — CRITICAL GOTCHA #4) ──────────
 
 /** RewindDetails — the structured `details` payload surfaced to logs/audit/UI on every return path. EXPORTED. */
@@ -167,6 +195,11 @@ export interface RewindDetails {
   hideEntryIds?: string[];
   /** The persisted marker's entry id (success path; null/omitted when append returned null). */
   markerId?: string | null;
+  /** True iff step 6b's dirty guard REFUSED the file-revert (drift detected post-turn — @14 §6 step 3, E30).
+   *  Consumed by P4.M2.T2.T1 (the mutation-warning reword) + surfaced in logs/audit. `undefined` on the success
+   *  path when the guard did not refuse (no drift / no snapshot / disabled / no flags). True ONLY on the refuse
+   *  branch. (P4.M2.T1.S1.) */
+  revertRefused?: boolean;
 }
 
 /**
@@ -188,13 +221,24 @@ function refusal(reason: string, granularity: Granularity): AgentToolResult<Rewi
  * (the caller wraps it into the content block + details). K=0 appends "(nothing matched to hide)" so the agent is
  * not misled (GOTCHA #12). The mutation warning is appended VERBATIM (spec/08 E5) when hasWarning is true.
  * Module-local.
+ *
+ * [P4.M2.T1.S1] `revertClause` (default "") threads step 6b's terminal-branch notices (skip/refuse) into the text.
+ * It is appended AFTER "Note left." and BEFORE the mutation warning (the revert result is more rewind-coupled
+ * than the side-effect caveat); the no-flags path passes "" ⇒ byte-identical to the v1.1 output. The "Reverted X
+ * file(s)…" proceed-branch clause is P4.M2.T1.S2's responsibility (S2 sets `revertClause` after `store.restore`).
  */
-function successText(granularity: Granularity, k: number, hasWarning: boolean): { text: string } {
+function successText(
+  granularity: Granularity,
+  k: number,
+  hasWarning: boolean,
+  revertClause = "",
+): { text: string } {
   const kClause =
     k === 0
       ? "0 messages will be hidden from your view starting next turn (nothing matched to hide)"
       : `${k} messages will be hidden from your view starting next turn`;
   let text = `Mulligan: rewound ${granularity}. ${kClause}. Note left.`;
+  if (revertClause) text += " " + revertClause; // [P4.M2.T1.S1] v1.2 revert notice (terminal branches)
   if (hasWarning) text += " " + MUTATION_WARNING; // spec/08 E5 VERBATIM
   return { text };
 }
@@ -706,16 +750,95 @@ async function rewindExecute(
       }
     }
 
+    // (6b) working-tree revert decision tree — v1.2, opt-in (spec/05 §1 step 6b; @14 §6/§7). Runs AFTER marker
+    //      persist (step 7) + checkpoint consumption (step 7b) and BEFORE the mutation warning (step 8). S1 (this
+    //      item, P4.M2.T1.S1) computes the DECISION: gate on config → gate on granularity → resolve the
+    //      RevertCheckpoint from rt.snapshots → run the dirty guard (store.dirtyCheck) against the ledger's
+    //      modified-file set → produce a proceed/refuse/skip decision + the success-text notices for every
+    //      terminal branch. The ACTUAL store.restore + folding the RestoreResult into the marker/success-text is
+    //      P4.M2.T1.S2 (the proceed seam below is a clearly-marked comment for S2 to fill). Best-effort: a 6b
+    //      failure (e.g. a thrown dirtyCheck) degrades to a skip notice; the rewind ALWAYS completes (E13/E27/E30).
+    //      Branch order is LOAD-BEARING (spec/05 §1 step 6b): config → granularity → resolve → guard → proceed.
+    //      The Map keys are "turn" (last_turn) + "ckpt:"+name (checkpoint) — NOT "checkpoint:"+name (the runtime
+    //      docstrings are imprecise; the actual writers are capture.ts + commands.ts).
+    let revertClause = "";
+    let revertRefused = false;
+    const wantRevert = !!(params.revert_file_changes) || !!(params.delete_created_files);
+    if (wantRevert) {
+      try {
+        if (!config.revert.enabled) {
+          // branch (2): disabled in config (layer-1 gate) — append the disabled notice; skip.
+          revertClause = "(file revert requested but disabled in config)";
+        } else if (granularity === "last_tool_call_group") {
+          // branch (3): unsupported granularity — last_tool_call_group hides one tool interaction, not a whole
+          //     turn's file changes; append the granularity-mismatch notice; skip.
+          revertClause =
+            "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn.";
+        } else {
+          // branch (4)+(5)+(6): resolve the checkpoint + run the dirty guard.
+          const store = rt?.store;
+          // CRITICAL #2: the Map keys are "turn" + "ckpt:"+name (NOT "checkpoint:"+name).
+          const key = granularity === "checkpoint" ? `ckpt:${params.checkpoint}` : "turn";
+          const checkpoint = rt?.snapshots?.get(key);
+          if (!store || !checkpoint) {
+            // branch (4): no store (revert disabled at detection) OR no checkpoint for this boundary → skip with
+            //     an honest count (0 reverted); the rewind still proceeds (@14 §6 step 1).
+            revertClause =
+              "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)";
+          } else {
+            // CRITICAL #3: affectedPaths = ledger.modifiedFiles (the only deterministic file list available at
+            //     this point — the SnapshotStore exposes no diff/listChanged method). Best-effort approximation
+            //     of "files restore would touch"; documented limitation in the PRP. Passing [] would make git.ts
+            //     trivially return [] (guard always passes), so modifiedFiles (possibly empty) is strictly better.
+            const affectedPaths = ledger.modifiedFiles;
+            // afterRef ?? beforeRef: turn checkpoints get afterRef (set post agent_end); checkpoint-granularity
+            //     checkpoints have NO afterRef (they capture once) ⇒ fall back to beforeRef (spec-sanctioned
+            //     degrade — @14 §6 step 3 "if afterRef exists").
+            const afterRef = checkpoint.afterRef ?? checkpoint.beforeRef;
+            // CRITICAL #4: dirtyCheck is ASYNC (await it). Returns the subset of `paths` that drifted vs afterRef.
+            const driftedPaths = await store.dirtyCheck(afterRef, affectedPaths);
+            if (driftedPaths.length > 0) {
+              // CRITICAL #5: REFUSE THE WHOLE file-revert on ANY drift (not per-path — @14 §6 step 3). The context
+              //     rewind still proceeds; only the file-revert is refused. revertRefused=true signals P4.M2.T2.T1.
+              revertRefused = true;
+              revertClause = `(file revert refused: ${driftedPaths.length} path(s) changed since the turn ended — not overwritten; re-request if intended)`;
+            } else {
+              // PROCEED — dirty guard clean. [P4.M2.T1.S2] does the actual restore here:
+              //   const result = await store.restore(checkpoint.beforeRef, {
+              //     revertFileChanges: !!params.revert_file_changes,
+              //     deleteCreatedFiles: !!params.delete_created_files,
+              //   });
+              //   + fold result into revertClause ("Reverted <X> file(s), deleted <Y>; <Z> skipped/failed, <W> refused (see log).")
+              //     + the marker's revert field (CRITICAL #6: the marker is already persisted at step 7; S2 must
+              //     either re-order persist AFTER restore or append a follow-up audit entry — out of scope here).
+              // S1 only RESOLVES + DIRTY-CHECKS; restore + folding is S2. (No revert clause yet — S2 sets it.)
+              // `store` / `checkpoint` / `affectedPaths` / `afterRef` are in scope here for S2's insertion. The
+              // proceed RevertDecision variant is NOT assigned (CRITICAL #10: avoid an unused variable).
+            }
+          }
+        }
+      } catch {
+        // CRITICAL #7: E13 fail-open for 6b. A thrown dirtyCheck (network/disk IO) degrades to a SKIP notice
+        //     rather than bubbling to the outer "unexpected error" refusal (which would mislabel a file-revert
+        //     hiccup as a rewind failure). The rewind ALWAYS completes. Only set the notice if no terminal
+        //     branch already produced one (defensive — order-independent).
+        if (!revertClause) revertClause = "(file revert skipped: an error occurred — 0 files reverted)";
+      }
+    }
+
     // (8) mutation warning (step 7 / E5) — VERBATIM (spec/08 E5) iff configured + the ledger shows side effects.
+    //     [P4.M2.T2.T1] when revertRefused OR files were reverted, reword the E5 warning to name only
+    //     non-working-tree effects — out of scope here; hasWarning is left unchanged.
     const hasWarning =
       config.rewind.requireMutationWarning &&
       (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
 
-    // (9) return success (step 8 — K + K=0 honesty via successText).
-    const { text } = successText(granularity, k, hasWarning);
+    // (9) return success (step 8 — K + K=0 honesty via successText). revertClause threads the 6b terminal-branch
+    //     notices; revertRefused surfaces the refuse flag to logs/audit + P4.M2.T2.T1 (CRITICAL #10: used).
+    const { text } = successText(granularity, k, hasWarning, revertClause);
     return {
       content: [{ type: "text", text }],
-      details: { granularity, k, ledger, hideEntryIds, markerId },
+      details: { granularity, k, ledger, hideEntryIds, markerId, revertRefused },
     };
   } catch (e) {
     // Shared tool convention (E13): never throw — return a text result describing the failure.
