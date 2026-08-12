@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Guardrail + agent-side modifications (no new Pi surfaces)",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Pure-core + tool + nudge changes that do not depend on the new registerCommand/setWidget surfaces. Land first because Phase 2's commands reuse the now-finalized rewind behavior + setCheckpoint wrapper. Three milestones: remove to_previous_prompt, agent-attributable drift delta, unregister the checkpoint agent tool.",
       "milestones": [
         {
@@ -162,14 +162,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Remove the mulligan_checkpoint agent tool",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The agent can no longer create checkpoints (E23 resolved — foresight lives with the user). The agent keeps mulligan_rewind(granularity:checkpoint). The setCheckpoint wrapper in markers.ts is retained (the human command in Phase 2 reuses it). checkpointExists + checkpoint-consumption logic stay in rewind.ts.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Unregister the agent tool; retire its tests",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Stop registering makeCheckpointTool in index.ts. Update the factory JSDoc from 5 tools to 4. Update test/index.test.ts and other tests that assert 5 tools or reference checkpoint as an agent tool. Do NOT delete src/tools/checkpoint.ts yet — Phase 2 extracts validCheckpointName/NAME_RE from it.",
               "subtasks": [
                 {
@@ -191,7 +191,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Tests: drop the checkpoint-tool registration assertion + update tool-count references",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -234,7 +234,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S1",
                   "title": "commands.ts: checkpoint set + revoke command factories",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"

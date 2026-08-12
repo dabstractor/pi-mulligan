@@ -63,20 +63,20 @@ function makeStartEvent(reason = "new") {
 // ── tests ─────────────────────────────────────────────────────────────────────────────────
 
 describe("index.ts extension factory", () => {
-  it("registers all 5 tools with the exact names", () => {
+  it("registers all 4 tools with the exact names", () => {
     const { tools, pi } = makePi();
     indexFactory(pi);
 
-    expect(tools).toHaveLength(5);
+    expect(tools).toHaveLength(4);
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["mulligan_audit", "mulligan_cancel", "mulligan_checkpoint", "mulligan_rewind", "mulligan_shrink"].sort(),
+      ["mulligan_audit", "mulligan_cancel", "mulligan_rewind", "mulligan_shrink"].sort(),
     );
   });
 
   it("does not register extra tools", () => {
     const { tools, pi } = makePi();
     indexFactory(pi);
-    expect(tools.length).toBe(5);
+    expect(tools.length).toBe(4);
   });
 
   it("arms the 5 event handlers", () => {
