@@ -2122,10 +2122,16 @@ function makeFakeStore(opts: {
   restoreResult?: RestoreResult;
   restoreCalls?: { beforeRef: string; opts: RestoreOpts }[];
   restoreThrows?: boolean;
+  // [P1.M4.T2.S1] the production step-6b guard now derives the affected set from
+  // store.changedPaths(checkpoint.beforeRef) (BUG-004 fix). Default [] mirrors NoOpStore semantics
+  // ("no paths differ") → dirtyCheck trivially proceeds → restore runs, matching the pre-wiring
+  // behavior these tests assert. Script a non-empty list to exercise the E30 refuse branch (P1.M4.T2.S2).
+  changedPathsResult?: string[];
 }): SnapshotStore {
   return {
     describe: () => ({ backend: "git" }),
     capture: async () => "ref-x",
+    changedPaths: async (_beforeRef: string) => [...(opts.changedPathsResult ?? [])],
     dirtyCheck: async (_afterRef: string, _paths: string[]) => {
       if (opts.throwOnCheck) throw new Error("dirtyCheck boom");
       return [...(opts.drifted ?? [])];

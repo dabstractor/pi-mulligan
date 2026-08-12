@@ -840,13 +840,23 @@ async function rewindExecute(
               "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)";
           } else {
             // branch (5)+(6): resolve the checkpoint + run the (CONDITIONAL) dirty guard + proceed.
-            // CRITICAL #3: affectedPaths = ledger.modifiedFiles (the only deterministic file list available at
-            //     this point — the SnapshotStore exposes no diff/listChanged method). Best-effort approximation
-            //     of "files restore would touch"; documented limitation in the PRP. Passing [] would make git.ts
-            //     trivially return [] (guard always passes), so modifiedFiles (possibly empty) is strictly better.
-            //     [BUG-004 / P1.M4 will later derive this from store.changedPaths(beforeRef) — left as the
-            //     heuristic here, unchanged by BUG-001.]
-            const affectedPaths = ledger.modifiedFiles;
+            // CRITICAL #3 [BUG-004 fix, P1.M4.T2.S1]: affectedPaths = the snapshot diff
+            //     store.changedPaths(checkpoint.beforeRef) — the spec-mandated affected set (spec/14 §6 step 2
+            //     VERBATIM: "paths that differ between beforeRef and the current tree (the files restore would
+            //     touch)"). REPLACES the heuristic ledger.modifiedFiles (BUG-004): modifiedFiles MISSES files
+            //     mutated via python -c / node / perl -i / heredocs / awk -i inplace (those land in
+            //     ledger.bashSideEffects), so the guard used to inspect a SUBSET of what restore() reverts → a
+            //     concurrent human edit to such a file was silently clobbered (E30 — "never silently clobbers
+            //     concurrent edits"). changedPaths returns EVERY workspace path differing between the pre-span
+            //     snapshot and the current tree — exactly what restore() will touch — so the guard now inspects
+            //     the true affected set. It is async + BEST-EFFORT (E27): returns [] on any error → dirtyCheck
+            //     trivially passes → restore proceeds (fail-open, E13 — a snapshot-diff hiccup never blocks the
+            //     rewind; a hypothetical throw is caught by the enclosing step-6b try/catch → skip notice). The
+            //     `ledger` var is STILL used elsewhere (note render, mutation warning, marker persist) — only
+            //     the affectedPaths source changes here. store.dirtyCheck(afterRef, affectedPaths) below is
+            //     UNCHANGED; it now receives the correct affected set. (checkpoint.beforeRef is the PRE-span ref
+            //     restore reverts TO; afterRef is the dirty-guard baseline — different concepts.)
+            const affectedPaths = await store.changedPaths(checkpoint.beforeRef);
 
             // [BUG-001 fix, P1.M1.T1.S1] Restore + RestoreResult folding. FACTORED into a local async closure
             //   so it runs on BOTH proceed paths: (a) afterRef exists AND dirtyCheck is clean, (b) NO afterRef

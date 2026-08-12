@@ -181,7 +181,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Major Fix — Dirty Guard Affected Set from Snapshot Diff (BUG-004)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Derive the dirty-guard affected set from the store, not the heuristic ledger. Add a SnapshotStore.changedPaths(beforeRef) method that returns paths differing between beforeRef and the current tree (git: git diff --name-only; cas: hash-compare). Wire it into rewind.ts step 6b to replace ledger.modifiedFiles. This closes the E30 gap for python/node/perl/heredoc-modified files that are reverted by restore but never guarded by dirtyCheck.",
           "tasks": [
             {
@@ -246,14 +246,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Wire changedPaths into rewind.ts dirty guard + add E30 test for bash/python-modified file",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Replace the heuristic ledger.modifiedFiles with store.changedPaths(checkpoint.beforeRef) in rewind.ts step 6b. This makes the dirty guard inspect ALL files restore would touch, not just the heuristic subset. Also add an E30 integration test for a bash/python-modified file with a post-turn human edit.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Replace ledger.modifiedPaths with store.changedPaths() in rewind.ts step 6b",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1",
@@ -273,7 +273,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "Add E30 dirty-guard integration test for bash/python-modified file with post-turn human edit",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
