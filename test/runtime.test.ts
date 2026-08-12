@@ -8,6 +8,7 @@ import {
   type BloatHit,
   type AgentMessage,
 } from "../src/runtime.js";
+import { type RevertCheckpoint } from "../src/markers.js";
 
 // GOTCHA #7: the runtime Map is module-scoped and is NOT reset between tests. Clear it before AND after each
 // test so a previous test's session state can't leak in (or out).
@@ -33,6 +34,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
+      snapshots: new Map(),
     });
   });
 
@@ -65,6 +67,21 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
     expect(a.rewindRefusedTurnIndex).toBe(7);
     expect(b.rewindRefusedTurnIndex).toBeNull(); // B untouched
     expect(getRuntime("A").rewindRefusedTurnIndex).toBe(7); // live ref reflects the write
+  });
+
+  it("fresh runtime gets its OWN empty snapshots Map; reset clears it (GOTCHA #5; spec/14 §2)", () => {
+    const a = getRuntime("s1");
+    expect(a.snapshots).toBeInstanceOf(Map);
+    expect(a.snapshots!.size).toBe(0);
+    a.snapshots!.set("turn", { label: "turn", backend: "git", beforeRef: "r1", turnIndex: 0, ts: 1 });
+    expect(a.snapshots!.size).toBe(1);
+    // different session → its own Map (no leak)
+    const b = getRuntime("s2");
+    expect(b.snapshots!.size).toBe(0);
+    expect(b.snapshots).not.toBe(a.snapshots);
+    // reset wipes the session's runtime; next getRuntime is fresh
+    resetRuntime("s1");
+    expect(getRuntime("s1").snapshots!.size).toBe(0);
   });
 });
 
@@ -133,6 +150,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
+      snapshots: new Map(),
     });
   });
 
@@ -271,5 +289,10 @@ describe("types", () => {
     expectTypeOf(rt.shrinkMissCounts).toEqualTypeOf<Map<string, number>>();
     expectTypeOf(rt.aboveHighWater).toEqualTypeOf<boolean>();
     expectTypeOf<BloatHit>().toEqualTypeOf<{ toolName: string; approxTokens: number }>();
+  });
+
+  it("SessionRuntime.snapshots is Map<string, RevertCheckpoint> | undefined (spec/14 §2, spec/04 §8)", () => {
+    const rt = {} as SessionRuntime;
+    expectTypeOf(rt.snapshots).toEqualTypeOf<Map<string, RevertCheckpoint> | undefined>();
   });
 });

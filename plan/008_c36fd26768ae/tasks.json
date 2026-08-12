@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Foundation — config block + pure helpers + type additions",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Land the config.revert.* knob, the pure paths.ts safety module, and the marker/runtime type additions. Zero new runtime behavior — everything is inert until config.revert.enabled is true. Unblocks Phase 2 (backends).",
       "milestones": [
         {
@@ -47,7 +47,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Pure helpers & type additions (R2a paths.ts, R2b marker field, R2c runtime field)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Create the pure paths.ts safety module and add the RewindMarker.revert field, RevertCheckpoint type, and SessionRuntime.snapshots field. All additions are inert (optional fields, pure functions).",
           "tasks": [
             {
@@ -77,7 +77,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Add RewindMarker.revert field + RevertCheckpoint type + SessionRuntime.snapshots",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add the optional revert audit block to RewindMarker (markers.ts), the new RevertCheckpoint type, and the snapshots Map field to SessionRuntime (runtime.ts). All optional/additive — old code type-checks unchanged.",
               "subtasks": [
                 {
@@ -99,7 +99,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S2",
                   "title": "Add SessionRuntime.snapshots field to runtime.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"
@@ -142,7 +142,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S1",
                   "title": "SnapshotStore interface + types + AsyncMutex",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"

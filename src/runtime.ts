@@ -6,9 +6,10 @@
  * spec/11-build-order.md §1/§2 Step 1 ("runtime.ts // per-session runtime map").
  *
  * DESIGN (read GOTCHA #1–#8 in the PRP):
- * - Foundation-tier and Pi-FREE. Imports NOTHING — not Pi, not config, not log. This keeps it a pure, fast,
- *   isolated unit-test target and honors the work-item contract ("No prior code dependencies beyond
- *   P1.M1.T1.S1").
+ * - Foundation-tier and Pi-FREE. Imports no RUNTIME modules — not Pi, not config, not log (a single
+ *   type-only import, `import type { RevertCheckpoint }`, is erased by tsc and adds no runtime coupling).
+ *   This keeps it a pure, fast, isolated unit-test target and honors the work-item contract ("No prior
+ *   code dependencies beyond P1.M1.T1.S1").
  * - The real Pi `AgentMessage` union lives in @earendil-works/pi-agent-core, which is NOT a resolvable
  *   dependency of this repo (not hoisted; not re-exported by @earendil-works/pi-coding-agent). So a LOCAL
  *   opaque `AgentMessage` alias is defined here (GOTCHA #1). runtime.ts only STORES/RETURNS message arrays —
@@ -17,6 +18,8 @@
  *   entry on session_start (wired in index.ts, P1.M7.T1); clearAll wipes it on shutdown/reload. NEVER caches a
  *   sessionManager handle (C12) — only primitive values and arrays are stored.
  */
+
+import type { RevertCheckpoint } from "./markers.js";
 
 /**
  * AgentMessage — LOCAL opaque alias for the elements of a Pi message list.
@@ -99,6 +102,24 @@ export interface SessionRuntime {
    *  proceeds). Mirrors aboveHighWater: in-memory, non-persisted; auto-reset to `null` by resetRuntime
    *  (entry deleted on session_start) and clearAll (shutdown). Consumed by filter.ts's drift-nudge guard. */
   rewindRefusedTurnIndex: number | null;
+  /** Active RevertCheckpoints for the v1.2 working-tree-revert feature, keyed by capture label
+   *  (`"turn"` | `"checkpoint:<name>"`). In-memory and non-persisted (spec/04 §8). Each RevertCheckpoint
+   *  (spec/14 §2) pairs a `beforeRef` (snapshot at turn_start / checkpoint-set) with an `afterRef` (snapshot
+   *  at turn_end / next capture) so `rewindExecute` can `store.dirtyCheck(afterRef, paths)` then
+   *  `store.restore(beforeRef, opts)`.
+   *
+   *  WHO WRITES: the turn_start/agent_end capture hooks (P3.M1.T1) and the `/mulligan_checkpoint` step 4b
+   *  command (P3.M2.T1) — only when `config.revert.enabled`. WHO READS: `rewindExecute` (P4.M2.T1 step 6b)
+   *  resolves the before/after refs before calling store.restore().
+   *
+   *  OPTIONAL in the interface (`snapshots?`) so a hand-built `{ } as SessionRuntime` type-checks, but
+   *  freshRuntime ALWAYS initializes it to a fresh empty `Map` — downstream hooks rely on a live Map (read
+   *  via `rt.snapshots?.…`). Per-session isolated: each fresh runtime gets its OWN `new Map()` (GOTCHA #5 —
+   *  never a module-level shared Map, which would leak checkpoints across sessions). Auto-reset:
+   *  resetRuntime deletes the whole runtime entry (session_start) and clearAll wipes all entries (shutdown)
+   *  — the Map is dropped with the object, no explicit clear.
+   *  See `@14-working-tree-revert.md` §2 (definition + per-session caching), §5 (capture lifecycle), §6 (restore). */
+  snapshots?: Map<string, RevertCheckpoint>;
 }
 
 /**
@@ -125,6 +146,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     shrinkMissCounts: new Map(),
     aboveHighWater: false,
     rewindRefusedTurnIndex: null,
+    snapshots: new Map<string, RevertCheckpoint>(),
   };
 }
 
