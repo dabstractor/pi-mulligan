@@ -1,7 +1,12 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { readdir, stat, unlink as fsUnlink } from "node:fs/promises";
+import {
+  readdir,
+  stat,
+  unlink as fsUnlink,
+  rm as fsRm,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -535,6 +540,41 @@ export class GitBackend implements SnapshotStore {
    * (turn/turn + turn/turn-after) but NOT checkpoint/* — that is the exempt boundary. Called by the
    * turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
    */
+  /**
+   * Best-effort full teardown (spec/14 §5: "Both stores are deleted entirely on
+   * session_shutdown — no cross-session buildup"). Deletes the per-repo SHADOW repo subdir
+   * (`join(storageDir, shadowKey(repoRoot))`) — NOT the shared storageDir + NOT other repos'
+   * shadow dirs. The shadow repo is keyed by `repoRoot` (stable per cwd) so deleting it at
+   * shutdown is correct; it is recreated on the next session's first capture (idempotent init).
+   *
+   * Serialized by the mutex (§4.3) — a destroy racing an in-flight capture/restore/gc would
+   * corrupt state, so it acquires the SAME mutex the other ops do. BEST-EFFORT (E27): NEVER
+   * rejects — a locked file / permission / transient IO failure is swallowed (teardown must
+   * never block clearAll/exit). `shadowDir` is `!`-asserted + assigned only inside the memoized
+   * `ensureInit()`, so this guards on `if (this.shadowDir)` + force:true (no-op on a missing
+   * dir) to tolerate a never-init'd backend. Called by index.ts session_shutdown BEFORE
+   * clearAll(). @14 §5 + §4.3.
+   */
+  async destroy(): Promise<void> {
+    const release = await this.mutex.acquire(); // §4.3 — serialize vs in-flight capture/restore/gc
+    try {
+      try {
+        await this.ensureInit(); // resolve shadowDir (idempotent + memoized; may init-then-we-delete — harmless)
+      } catch {
+        /* never initialized / transient failure — shadowDir unset → nothing to reclaim */
+      }
+      if (this.shadowDir) {
+        try {
+          await fsRm(this.shadowDir, { recursive: true, force: true }); // force:true → no-op if absent
+        } catch {
+          /* best-effort — never reject teardown */
+        }
+      }
+    } finally {
+      release(); // AsyncMutex GOTCHA #5 — forgotten release deadlocks all later acquire()s
+    }
+  }
+
   async gc(): Promise<void> {
     const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
     try {

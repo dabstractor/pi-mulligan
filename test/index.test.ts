@@ -6,21 +6,29 @@ import type {
 
 import indexFactory from "../src/index.js";
 import { getRuntime, clearAll } from "../src/runtime.js";
+import type { SnapshotStore } from "../src/snapshot/store.js";
 
 // Deterministic factory test: mock settings.js so loadMulliganConfig's return is controllable
 // (a real ~/.pi or repo .pi settings.json would make this machine-dependent). vi.mock is file-scoped
 // → does not leak to test/settings.test.ts or others. The hand-rolled Pi fakes (makePi/makeCtx) stay.
 vi.mock("../src/settings.js", () => ({ loadMulliganConfig: vi.fn() }));
-vi.mock("../src/log.js", () => ({ setLogFile: vi.fn() }));
+vi.mock("../src/log.js", () => ({ setLogFile: vi.fn(), log: vi.fn() }));
+// [P3.M1.T2.S1] mock detectAndCreate so the session_start store block is observable + controllable
+// (a real store would touch git/fs). detectAndCreate is the ONLY value index.ts imports from
+// store.js, so the module mock needs only that export (the type-only SnapshotStore import is erased).
+vi.mock("../src/snapshot/store.js", () => ({ detectAndCreate: vi.fn() }));
 import { loadMulliganConfig } from "../src/settings.js"; // the mocked binding (assert/program it)
-import { getConfig } from "../src/config.js"; // to assert the return flowed to the cache
-import { setLogFile } from "../src/log.js"; // mocked — assert the session_start re-fire
+import { getConfig, setConfig } from "../src/config.js"; // to assert the return flowed to the cache + set revert
+import { setLogFile, log } from "../src/log.js"; // mocked — assert the session_start re-fire
+import { detectAndCreate } from "../src/snapshot/store.js"; // mocked — assert/program the store block
 
 // ── module-level state reset (GOTCHA #12: runtime map is module-scoped) ───────────────────
 beforeEach(() => {
   clearAll();
   vi.mocked(loadMulliganConfig).mockReset(); // default vi.fn() → returns undefined → DEFAULT_CONFIG
   vi.mocked(setLogFile).mockReset(); // default vi.fn() → no-op; cleared so factory step-2 calls don't leak
+  vi.mocked(log).mockReset(); // [P3.M1.T2.S1] cleared so session_start store-block log calls don't leak
+  vi.mocked(detectAndCreate).mockReset(); // [P3.M1.T2.S1] default vi.fn() → returns undefined; reset per test
 });
 
 // ── fakes (hand-rolled, no vi.fn for Pi objects — mirror nudges.test.ts / filter.test.ts) ──
@@ -289,5 +297,238 @@ describe("index.ts session_start config re-read (T2.S2)", () => {
     handlers["session_start"]!(makeStartEvent("new"), makeCtx(sid));
 
     expect(getRuntime(sid).seq).toBe(0);
+  });
+});
+
+// ── [P3.M1.T2.S1] session_start store lifecycle (create + cache + GC + fail-open) ──────────
+// The handler now creates a snapshot store via detectAndCreate when config.revert.enabled, caches
+// it on getRuntime(sid).store, and runs gcTurnSnapshots(rt) to clear stale turn/* refs from a
+// reloaded instance (E32). detectAndCreate is MOCKED (vi.mock at the top) so a RecordingStore fake
+// (gc + destroy spies) observes the wiring WITHOUT touching git/fs.
+describe("index.ts session_start store lifecycle (T2.S1)", () => {
+  /** A recording fake SnapshotStore — gc + destroy are spies the tests assert on. describe/capture
+   *  etc. are stubs (the store block only calls gc, via gcTurnSnapshots). */
+  function makeFakeStore(): SnapshotStore & {
+    gc: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
+  } {
+    return {
+      describe: vi.fn(() => ({ backend: "git" as const })),
+      capture: vi.fn(async () => null),
+      dirtyCheck: vi.fn(async () => []),
+      restore: vi.fn(async () => ({
+        reverted: [],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      })),
+      has: vi.fn(async () => false),
+      retire: vi.fn(async () => undefined),
+      gc: vi.fn(async () => undefined),
+      destroy: vi.fn(async () => undefined),
+    } as unknown as SnapshotStore & {
+      gc: ReturnType<typeof vi.fn>;
+      destroy: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  it("does NOT call detectAndCreate when revert.enabled is false (gate is first; DEFAULT_CONFIG)", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    // DEFAULT_CONFIG: revert.enabled === false → the store block early-returns BEFORE detectAndCreate.
+    vi.mocked(loadMulliganConfig).mockReturnValue(undefined); // → DEFAULT_CONFIG
+
+    await handlers["session_start"]!(
+      makeStartEvent("new"),
+      makeCtx("s1", "/proj"),
+    );
+
+    expect(detectAndCreate).not.toHaveBeenCalled();
+    expect(getRuntime("s1").store).toBeUndefined(); // gate first → no store assigned
+  });
+
+  it("creates the store via detectAndCreate + caches it on getRuntime(sid).store when revert.enabled is true", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    // Enable revert via the settings mock (flows through setConfig → getConfig).revert.enabled === true.
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      revert: { enabled: true, storageDir: "/tmp/store" },
+    });
+    const fakeStore = makeFakeStore();
+    vi.mocked(detectAndCreate).mockResolvedValue(fakeStore);
+
+    await handlers["session_start"]!(
+      makeStartEvent("reload"),
+      makeCtx("s1", "/proj"),
+    );
+
+    expect(getRuntime("s1").store).toBe(fakeStore); // cached on rt.store
+  });
+
+  it("passes (ctx.cwd, getConfig().revert) to detectAndCreate (2-arg call — no sessionDir)", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      revert: { enabled: true, storageDir: "/tmp/store" },
+    });
+    vi.mocked(detectAndCreate).mockResolvedValue(makeFakeStore());
+
+    await handlers["session_start"]!(
+      makeStartEvent("new"),
+      makeCtx("s1", "/proj"),
+    );
+
+    expect(detectAndCreate).toHaveBeenCalledTimes(1);
+    expect(detectAndCreate).toHaveBeenCalledWith("/proj", getConfig().revert);
+    expect(detectAndCreate).toHaveBeenCalledWith(
+      "/proj",
+      expect.objectContaining({ enabled: true, storageDir: "/tmp/store" }),
+    );
+  });
+
+  it("runs the prompt-boundary GC (store.gc called once via gcTurnSnapshots) after store creation", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      revert: { enabled: true, storageDir: "/tmp/store" },
+    });
+    const fakeStore = makeFakeStore();
+    vi.mocked(detectAndCreate).mockResolvedValue(fakeStore);
+
+    await handlers["session_start"]!(
+      makeStartEvent("new"),
+      makeCtx("s1", "/proj"),
+    );
+
+    expect(fakeStore.gc).toHaveBeenCalledTimes(1); // gcTurnSnapshots(rt) called store.gc once
+  });
+
+  it("NEVER rejects when detectAndCreate rejects — logs 'session_start.store' + the runtime is still fresh", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      revert: { enabled: true, storageDir: "/tmp/store" },
+    });
+    // detectAndCreate rejects (belt-and-suspenders — in production it never does, but the try/catch
+    // must still hold the CRITICAL session_start path safe).
+    vi.mocked(detectAndCreate).mockRejectedValue(new Error("boom"));
+
+    await expect(
+      handlers["session_start"]!(makeStartEvent("new"), makeCtx("s1", "/proj")),
+    ).resolves.toBeUndefined(); // NEVER rejects
+
+    expect(log).toHaveBeenCalledWith(
+      "error",
+      "session_start.store",
+      "s1",
+      expect.objectContaining({ error: expect.stringContaining("boom") }),
+    );
+    // resetRuntime still ran (BEFORE the store block) → the runtime is fresh.
+    expect(getRuntime("s1").seq).toBe(0);
+    // store was never assigned (detectAndCreate rejected before the assignment line resolved).
+    expect(getRuntime("s1").store).toBeUndefined();
+  });
+
+  it("resetRuntime still ran (seq===0) when the store block throws — config reload + banner unaffected", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    vi.mocked(loadMulliganConfig).mockReturnValue({
+      revert: { enabled: true, storageDir: "/tmp/store" },
+    });
+    vi.mocked(detectAndCreate).mockRejectedValue(new Error("any failure"));
+
+    // Seed a stale runtime so we can prove resetRuntime ran (the fresh one has seq 0).
+    getRuntime("s1").seq = 42;
+
+    await handlers["session_start"]!(
+      makeStartEvent("new"),
+      makeCtx("s1", "/proj"),
+    );
+
+    expect(getRuntime("s1").seq).toBe(0); // resetRuntime ran (entry deleted → fresh runtime)
+    expect(getConfig().revert.enabled).toBe(true); // config reload also ran (unaffected by the throw)
+  });
+});
+
+// ── [P3.M1.T2.S1] session_shutdown teardown (destroy every store before clearAll) ─────────
+// The handler now destroys every active store best-effort (a failure is swallowed — never blocks)
+// BEFORE clearAll() wipes the runtime map. Uses getActiveStores() (runtime.ts helper) to enumerate.
+describe("index.ts session_shutdown teardown (T2.S1)", () => {
+  /** Seed a fake store onto a session's runtime so getActiveStores() sees it. */
+  function seedStore(
+    sid: string,
+    destroyImpl: () => Promise<void> = async () => undefined,
+  ): SnapshotStore & { destroy: ReturnType<typeof vi.fn> } {
+    const store = {
+      describe: () => ({ backend: "git" as const }),
+      capture: async () => null,
+      dirtyCheck: async () => [],
+      restore: async () => ({
+        reverted: [],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      }),
+      has: async () => false,
+      retire: async () => undefined,
+      gc: async () => undefined,
+      destroy: vi.fn(destroyImpl),
+    } as unknown as SnapshotStore & { destroy: ReturnType<typeof vi.fn> };
+    getRuntime(sid).store = store;
+    return store;
+  }
+
+  it("calls destroy() on EVERY active store before clearAll() (2 seeded stores → 2 destroy calls)", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    const fake1 = seedStore("s1");
+    const fake2 = seedStore("s2");
+
+    await handlers["session_shutdown"]!();
+
+    expect(fake1.destroy).toHaveBeenCalledTimes(1);
+    expect(fake2.destroy).toHaveBeenCalledTimes(1);
+    // clearAll ran → next getRuntime is fresh (store undefined).
+    expect(getRuntime("s1").store).toBeUndefined();
+  });
+
+  it("a destroy() rejection on one store does NOT skip the other stores OR clearAll()", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    const failing = seedStore("s1", async () => {
+      throw new Error("locked file");
+    });
+    const other = seedStore("s2");
+
+    await expect(handlers["session_shutdown"]!()).resolves.toBeUndefined(); // no throw
+
+    expect(failing.destroy).toHaveBeenCalledTimes(1);
+    expect(other.destroy).toHaveBeenCalledTimes(1); // the rejection did NOT skip the rest
+    // clearAll still ran (the rejection did not skip it).
+    expect(getRuntime("s1").store).toBeUndefined();
+    expect(getRuntime("s2").store).toBeUndefined();
+  });
+
+  it("is a no-op (no destroy calls, no throw) when no session created a store", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    // No stores seeded → getActiveStores() returns [] → the loop body never runs.
+
+    await expect(handlers["session_shutdown"]!()).resolves.toBeUndefined();
+  });
+
+  it("clearAll ran after destroy (next getRuntime(sid) is fresh; no stores leaked)", async () => {
+    const { handlers, pi } = makePi();
+    indexFactory(pi);
+    seedStore("s1");
+
+    await handlers["session_shutdown"]!();
+
+    // getActiveStores() reads the (now-cleared) map → empty (clearAll wiped it).
+    // Re-seed nothing; a fresh getRuntime("s1") has no store.
+    expect(getRuntime("s1").store).toBeUndefined();
+    expect(getRuntime("s1").seq).toBe(0); // fresh runtime (clearAll → freshRuntime on next access)
   });
 });

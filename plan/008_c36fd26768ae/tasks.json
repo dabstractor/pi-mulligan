@@ -303,14 +303,14 @@
       "type": "Phase",
       "id": "P3",
       "title": "Capture lifecycle — event hooks + checkpoint integration + store wiring + teardown",
-      "status": "Planned",
+      "status": "Ready",
       "description": "Wire the SnapshotStore into Pi events: turn_start (prompt-boundary GC + before-capture), agent_end (after-capture for drift detection), /mulligan_checkpoint step 4b (checkpoint capture), session_shutdown (teardown). Depends on P2 (backends) + P1.M2.T2.S2 (runtime field).",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P3.M1",
           "title": "Event hooks + store wiring in index.ts",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Register turn_start and agent_end handlers, thread the store through SessionRuntime, and add session_shutdown teardown. The store is created in session_start and destroyed in session_shutdown.",
           "tasks": [
             {
@@ -359,14 +359,14 @@
               "type": "Task",
               "id": "P3.M1.T2",
               "title": "Thread store through index.ts factory + session_shutdown teardown",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a store handle to SessionRuntime, create it in session_start, register the capture hooks in the factory, and add teardown to session_shutdown.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T2.S1",
                   "title": "Wire store into index.ts + session_start GC + session_shutdown teardown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S1",
@@ -387,21 +387,21 @@
           "type": "Milestone",
           "id": "P3.M2",
           "title": "Checkpoint revert integration (/mulligan_checkpoint step 4b)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Add step 4b to the existing /mulligan_checkpoint command: when config.revert.enabled, capture a ckpt:<name> snapshot so a later checkpoint-granularity rewind can restore to it.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M2.T1",
               "title": "Add step 4b to makeCheckpointCommand (capture ckpt:<name>)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "After setCheckpoint succeeds and before reconcileBanner, when config.revert.enabled, capture a ckpt:<name> snapshot. Persist the ref in a mulligan:revert-checkpoint control entry so it survives reload (E32). Best-effort — capture failure is logged and never blocks checkpoint creation.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M2.T1.S1",
                   "title": "/mulligan_checkpoint step 4b (checkpoint snapshot capture)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T2.S1"

@@ -1,14 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setConfig, getConfig } from "./config.js";
 import { loadMulliganConfig } from "./settings.js";
-import { setLogFile } from "./log.js";
-import { resetRuntime, clearAll } from "./runtime.js";
+import { setLogFile, log } from "./log.js";
+import {
+  resetRuntime,
+  clearAll,
+  getRuntime,
+  getActiveStores,
+} from "./runtime.js";
 import { registerFilterHandler } from "./filter.js";
 import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
 import {
   registerTurnStartCapture,
   registerAgentEndCapture,
+  gcTurnSnapshots,
 } from "./capture.js";
+import { detectAndCreate } from "./snapshot/store.js";
 import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
@@ -95,18 +102,50 @@ export default function (pi: ExtensionAPI): void {
   //    reasons re-read identically). resetRuntime is the tail and reads sessionId FRESH (C12; never
   //    cache a sessionManager handle). A resumed/reloaded session starts from clean in-memory control
   //    state; persisted markers are untouched and remain the source of truth.
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     setConfig(loadMulliganConfig(ctx.cwd));
     setLogFile(getConfig().log.file);
-    resetRuntime(ctx.sessionManager.getSessionId());
+    const sid = ctx.sessionManager.getSessionId(); // FRESH (C12); read once, reuse below
+    resetRuntime(sid);
     reconcileBanner(ctx); // [P2.M3.T1.S3 / spec/13 §5] restore the banner on every session start
     // (startup|reload|new|resume|fork) — so /resume never silently drops the reminder.
     // Bare call (no wrapper): reconcileBanner NEVER throws (S2), matching the handler's
     // fail-open convention (its other callees are also fail-open).
+
+    // [P3.M1.T2.S1 / spec/14 §5] v1.2 working-tree revert: create the per-session store (cached
+    // on rt.store) + run the prompt-boundary GC pass (reuses turn_start's gcTurnSnapshots) to clear
+    // stale turn/* refs left on disk by a RELOADED instance (E32 — "session_start runs the same
+    // pass"). detectAndCreate NEVER rejects (→ NoOpStore on any error, E28); gcTurnSnapshots NEVER
+    // throws. The try/catch is belt-and-suspenders for this CRITICAL path — a store failure must
+    // NEVER block config reload / runtime reset / banner reconcile.
+    if (!getConfig().revert.enabled) return; // layer-1 gate (default false → zero capture, zero storage)
+    try {
+      const rt = getRuntime(sid); // the FRESH runtime resetRuntime just (re)created (store undefined, empty snapshots)
+      rt.store = await detectAndCreate(ctx.cwd, getConfig().revert); // create + cache (NEVER rejects → NoOpStore)
+      await gcTurnSnapshots(rt); // REUSE capture.ts's pass — gc() drops all turn/* refs on disk + clears in-memory
+    } catch (e) {
+      try {
+        log("error", "session_start.store", sid, { error: String(e) });
+      } catch {
+        /* log() never throws, but be safe */
+      }
+    }
   });
 
   // 7. session_shutdown → wipe ALL per-session runtimes (full process teardown). Never throws.
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
+    // [P3.M1.T2.S1 / spec/14 §5] v1.2 working-tree revert: best-effort destroy every session's
+    // snapshot store (git shadow repo / CAS dir) BEFORE clearAll() wipes the runtime map — "Both
+    // stores are deleted entirely on session_shutdown (no cross-session buildup)." A destroy
+    // failure is swallowed — teardown never blocks clearAll/exit. (getActiveStores() is read BEFORE
+    // clearAll() — it enumerates the now-still-present runtimes.)
+    for (const store of getActiveStores()) {
+      try {
+        await store.destroy(); // backend-agnostic: git → rm shadowDir; cas → rm storageDir; none → no-op
+      } catch {
+        /* best-effort — a store.destroy failure never blocks teardown / clearAll */
+      }
+    }
     clearAll();
   });
 }

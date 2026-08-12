@@ -125,6 +125,16 @@ export interface SnapshotStore {
    * turn. Called by the turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1).
    */
   gc(): Promise<void>;
+
+  /**
+   * Best-effort full teardown (spec/14 §5: "Both stores are deleted entirely on
+   * session_shutdown — no cross-session buildup"). Wipes the backend's on-disk storage: GitBackend
+   * deletes its shadow repo dir; CasBackend deletes its CAS dir; NoOpStore is a no-op. Serialized
+   * by the mutex (like gc()). NEVER rejects — a failure is swallowed (teardown must never block).
+   * Called by index.ts session_shutdown BEFORE clearAll(). IMPLEMENTED BY:
+   * GitBackend/CasBackend/NoOpStore. @14 §5.
+   */
+  destroy(): Promise<void>;
 }
 
 /**
@@ -354,6 +364,10 @@ export class NoOpStore implements SnapshotStore {
   }
 
   async gc(): Promise<void> {
+    /* no-op — nothing to reclaim in a no-op store */
+  }
+
+  async destroy(): Promise<void> {
     /* no-op — nothing to reclaim in a no-op store */
   }
 }

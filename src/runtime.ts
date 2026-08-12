@@ -211,3 +211,19 @@ export function resetRuntime(sessionId: string): void {
 export function clearAll(): void {
   runtimes.clear();
 }
+
+/**
+ * Enumerate the snapshot STORE of every active runtime (for session_shutdown teardown — index.ts
+ * destroys each before clearAll()). Returns only runtimes whose `store` was assigned (i.e.
+ * session_start ran with config.revert.enabled). Empty array when no session created a store.
+ * Never throws. The `runtimes` Map stays module-private — only this helper exposes a (read-only,
+ * array-of-stores) view of it; consumers that need ONE session's store read `getRuntime(sid).store`
+ * directly. @14 §5 ("Both stores are deleted entirely on session_shutdown").
+ */
+export function getActiveStores(): SnapshotStore[] {
+  const stores: SnapshotStore[] = [];
+  for (const rt of runtimes.values()) {
+    if (rt.store) stores.push(rt.store);
+  }
+  return stores;
+}

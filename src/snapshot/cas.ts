@@ -7,6 +7,7 @@ import {
   stat as fsStat,
   readdir as fsReaddir,
   unlink as fsUnlink,
+  rm as fsRm,
 } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import {
@@ -905,6 +906,31 @@ export class CasBackend implements SnapshotStore {
    * or blobs dir ⇒ early void (nothing to GC). Called by the turn_start capture hook (P3.M1.T1.S1)
    * + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
    */
+  /**
+   * Best-effort full teardown (spec/14 §5: "Both stores are deleted entirely on
+   * session_shutdown — no cross-session buildup"). Deletes the WHOLE CAS dir (`storageDir` —
+   * blobs/ + manifests/ + all shards) so there is no cross-session disk buildup.
+   *
+   * Serialized by the mutex (§4.3) — a destroy racing an in-flight capture/restore/gc would
+   * corrupt state, so it acquires the SAME mutex the other ops do. BEST-EFFORT (E27): NEVER
+   * rejects — a locked file / permission / transient IO failure is swallowed (teardown must
+   * never block clearAll/exit). `storageDir` is resolved in the ctor (always set, no init gate
+   * needed) + force:true makes rm a no-op on a missing dir. Called by index.ts
+   * session_shutdown BEFORE clearAll(). @14 §5 + §4.3.
+   */
+  async destroy(): Promise<void> {
+    const release = await this.mutex.acquire(); // §4.3 — serialize vs in-flight capture/restore/gc
+    try {
+      try {
+        await fsRm(this.storageDir, { recursive: true, force: true }); // the whole CAS dir (spec §5)
+      } catch {
+        /* best-effort — never reject teardown */
+      }
+    } finally {
+      release(); // AsyncMutex GOTCHA #5 — forgotten release deadlocks all later acquire()s
+    }
+  }
+
   async gc(): Promise<void> {
     const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
     try {
