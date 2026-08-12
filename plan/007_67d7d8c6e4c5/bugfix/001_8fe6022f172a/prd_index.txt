@@ -1,0 +1,13 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: driftThresholdTokens default is 4000 but PRD specifies 6000
+  h3.1 Issue 2: High-water nudge text prescribes mulligan_rewind/mulligan_shrink, contradicting PRD 'pure awareness, not rewind/shrink'
+ h2.3 Minor Issues (Nice to Fix)
+  h3.2 Issue 1: Audit report 'Active markers' line omits '(user-set)' annotation for checkpoints
+  h3.3 Issue 2: Rewind depth guard counts CANCELLED markers, contradicting spec 'count active' (E21 cancel workflow blocked at 5 cumulative rewinds)
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:17 list:6
