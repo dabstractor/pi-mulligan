@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "PRD Divergence Remediation — pi-mulligan v1.1 Nudge/Audit/Guard Layer",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Remediate the 4 PRD divergences found in the pi-mulligan v1.1 validation pass. All 4 are in the nudge/audit/guard layer — none affect core soft-delete correctness or cause data loss. The core rewind/shrink/cancel/checkpoint/banner mechanisms are verified correct (1042 tests pass). Fixes: BUG-001 (driftThresholdTokens reconciliation), BUG-002 (high-water nudge awareness-only text), BUG-003 (audit report checkpoint annotation), BUG-004 (rewind depth guard cancel-exclusion). Research findings stored in plan/007_67d7d8c6e4c5/bugfix/001_8fe6022f172a/architecture/.",
       "milestones": [
         {
@@ -129,21 +129,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset-level Documentation Sync",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Final sweep of changeset-level documentation (README.md feature sections, resolved-bugs list) that spans the whole changeset. Per SOW §5 Mode B, this runs LAST and depends on all implementing subtasks. It ensures the README's high-water nudge description, feature overview, and resolved-bugs section are consistent with the 4 fixes.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation — README feature blurbs + resolved-bugs section",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Sweep README.md and any overview docs that summarize the changeset delta. This catches cross-cutting documentation that only makes sense once all 4 fixes are in place: the high-water nudge feature description (README line 233, if not already updated by P1.M1.T2.S1), the resolved-bugs section (README 'Resolved bugs' around line 263), and any feature-overview references to the behaviors changed by BUG-001 through BUG-004.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md high-water description + add new resolved-bugs entries for BUG-001–004",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

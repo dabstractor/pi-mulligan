@@ -264,6 +264,15 @@ A post-v1.0 validation pass found and fixed five edge-case bugs (1 Major, 4 Mino
 - **BUG-004 (Minor)** — `mulligan_shrink` `by_content_includes` with an empty substring now matches nothing (returns null).
 - **BUG-005 (Minor)** — `mulligan_audit` now refuses when `enabled: false` (stays read-only).
 
+### Resolved bugs — v1.1 validation pass (BUG-001–BUG-004)
+
+A second validation pass (v1.1) found and fixed four more edge-case bugs (2 Major, 2 Minor; 0 Critical, 0 data-loss) in the nudge / audit / guard layers. These are **resolved** corrections to shipped behavior, listed separately from the prior round above (the bug numbers below are THIS round's numbering and are distinct from the "BUG-001–BUG-005" round). All four have regression tests; see VERIFICATION.md "Bug-fix remediation pass — round 2" for the full engineering record.
+
+- **BUG-001 (Major)** — `driftThresholdTokens` default (4000) and the `shouldNudge` comparison (`>=`, not `>`) are reconciled with spec/07 §5.1 acceptance criterion (b): three ~4k turns in a row now fire the drift nudge (previously the strict-`>` + 6000 default failed to fire).
+- **BUG-002 (Major)** — the §5.2 high-water nudge is now **awareness-only** (`Context is at ~<pct>% of the window; review recent output for reclaimable space.`) and no longer prescribes `mulligan_rewind`/`mulligan_shrink`, since the signal fires on user-attributable content the agent cannot legitimately shed (D10).
+- **BUG-003 (Minor)** — the `mulligan_audit` "Active markers" checkpoint clause now appends ` (user-set)` and singularizes the count (spec/13 §4 step 3), so the human sees exactly what they have armed.
+- **BUG-004 (Minor)** — the rewind depth guard (`rewind.maxDepth`) now counts only **active** markers, excluding those retired by `mulligan_cancel` (spec/05 §1 step 4 "count active"), so the cancel-then-retry workflow is no longer blocked at 5 cumulative rewinds.
+
 ---
 
 ## 8. License
