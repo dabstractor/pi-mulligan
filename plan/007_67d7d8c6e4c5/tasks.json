@@ -220,14 +220,14 @@
           "type": "Milestone",
           "id": "P2.M1",
           "title": "/mulligan_checkpoint + /mulligan_checkpoint_revoke",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The user sets/revokes checkpoints. Setting one arms the banner and emits a fair-warning notify. The agent rewinds to them via the existing granularity:checkpoint path.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "New src/commands.ts with the two checkpoint commands",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create a new module with makeCheckpointCommand(pi) and makeCheckpointRevokeCommand(pi) factories, each returning { description, handler }. Extract validCheckpointName/NAME_RE from checkpoint.ts. The set command calls setCheckpoint + reconcileBanner + fair-warning notify. The revoke command scans entries, clears labels, reconciles banner.",
               "subtasks": [
                 {
@@ -270,7 +270,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S3",
                   "title": "Tests for the checkpoint commands",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M1.T1.S1",
@@ -305,7 +305,7 @@
                   "type": "Subtask",
                   "id": "P2.M2.T1.S1",
                   "title": "commands.ts: makeAuditCommand(pi)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"
