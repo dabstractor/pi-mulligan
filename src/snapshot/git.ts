@@ -376,6 +376,36 @@ export class GitBackend implements SnapshotStore {
       );
       this.lastCommit = commitSha;
       this.capturesThisTurn++;
+      // BUG-005: persist the oversize paths (the files this snapshot EXCLUDED via :! pathspec
+      // negation above) as a git NOTE on the commit under refs/mulligan/oversize, so restore() can
+      // best-effort read it back + surface it in RestoreResult.skipped (the agent then sees the
+      // file-revert was incomplete). The note is keyed by commitSha === restore()'s beforeRef.
+      // BEST-EFFORT with its OWN try/catch: a note-add failure (notes machinery unavailable, disk
+      // error, etc.) MUST NOT fail capture — capture has already succeeded (commitSha is pinned by
+      // update-ref); the worst case is restore sees no note ⇒ no skipped signal for this capture,
+      // which is the acceptable best-effort E29 contract. Via the SAME this.exec/shadowEnv() seam
+      // as every other write (no new imports; fully unit-testable). Notes are wiped by destroy()'s
+      // fsRm(shadowDir) at session shutdown. ONLY written when oversizePaths is non-empty (a clean
+      // capture writes no note → restore's `notes show` returns non-zero → swallowed → []).
+      if (oversizePaths.length > 0) {
+        try {
+          await this.exec(
+            "git",
+            [
+              "notes",
+              "--ref=refs/mulligan/oversize",
+              "add",
+              "-f",
+              "-m",
+              JSON.stringify(oversizePaths),
+              commitSha,
+            ],
+            this.shadowEnv(),
+          );
+        } catch {
+          // best-effort — capture already succeeded; skip silently.
+        }
+      }
       return commitSha;
     } catch (err) {
       // E27 best-effort: ANY git error → null (capture never rejects). Guarantees capture is non-fatal.
@@ -717,6 +747,31 @@ export class GitBackend implements SnapshotStore {
       // (a) Load beforeRef into the SHADOW index (NEVER the source index — shadowEnv, guarantee #2).
       //     Best-effort: a bad beforeRef rejects here → the outer catch returns the (all-empty) result.
       await this.exec("git", ["read-tree", beforeRef], this.shadowEnv());
+
+      // (a.5) BUG-005: best-effort read the oversize-paths note capture() wrote on beforeRef under
+      //       refs/mulligan/oversize, + parse it into result.skipped so the rewind success text
+      //       reports "N skipped/failed" > 0 + the marker's `revert.skipped` boolean flips to true.
+      //       OWN try/catch: the COMMON case is NO note (non-zero exit) — swallowed so the
+      //       read-tree/diff/checkout pipeline below STILL runs. Unparseable JSON also swallowed.
+      //       Via the SAME this.exec/shadowEnv() seam (no new imports; fully unit-testable). Notes
+      //       are keyed by commitSha === beforeRef, so this directly addressable.
+      try {
+        const noteOut = (
+          await this.exec(
+            "git",
+            ["notes", "--ref=refs/mulligan/oversize", "show", beforeRef],
+            this.shadowEnv(),
+          )
+        ).stdout.trim();
+        if (noteOut) {
+          const oversize = JSON.parse(noteOut);
+          if (Array.isArray(oversize))
+            for (const p of oversize) result.skipped.push(String(p));
+        }
+      } catch {
+        // best-effort: no note (non-zero exit) OR unparseable JSON ⇒ no skipped signal for this ref.
+        // Swallow; result.skipped stays as-is. Never let this throw out of restore.
+      }
 
       // (b) REVERT modified + deleted-from-worktree files vs beforeRef (index===beforeRef after read-tree).
       if (opts.revertFileChanges) {

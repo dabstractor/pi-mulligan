@@ -704,3 +704,147 @@ describe("GitBackend.describe()", () => {
 
 // AsyncMutex is exercised indirectly via the mutex-serialization test above (GitBackend constructs
 // its own); no direct import needed here.
+
+// ── oversize-skipped tracking via git notes (BUG-005 / E29) ─────────────────────────────────
+// capture() writes JSON.stringify(oversizePaths) as a git NOTE on the commit under
+// refs/mulligan/oversize (only when oversizePaths is non-empty); restore() best-effort reads it
+// + parses it into result.skipped. rewind.ts already consumes result.skipped (L889/899/907) so the
+// signal propagates to the success text + marker with ZERO upstream change. spec/14 §4.3 (caps),
+// §6 (restore). Git capture is ATOMIC on maxTotalBytes overrun (returns null → no snapshot →
+// restore never runs), so ONLY the oversize files (excluded via :! while the snapshot still
+// succeeds) are git's meaningful skipped set.
+describe("GitBackend — oversize-skipped tracking via git notes (BUG-005 / E29)", () => {
+  it("capture: writes JSON.stringify(oversizePaths) as a note under refs/mulligan/oversize on the commit", async () => {
+    const calls: Call[] = [];
+    const oversizeScan = async (): Promise<CapScan> => ({
+      oversizePaths: ["big.bin", "huge.dat"],
+      totalBytes: 100,
+    });
+    const gb = makeBackend(calls, BASE_CFG, oversizeScan);
+    const sha = await gb.capture("turn");
+    expect(sha).toBe("COMMIT456");
+    const note = findCmd(calls, "notes")!;
+    expect(note).toBeDefined();
+    expect(note.args).toEqual([
+      "notes",
+      "--ref=refs/mulligan/oversize",
+      "add",
+      "-f",
+      "-m",
+      JSON.stringify(["big.bin", "huge.dat"]),
+      "COMMIT456", // the commit-tree SHA (=== the value restore receives as beforeRef)
+    ]);
+    // BEST-EFFORT + SAME shadow-env seam as update-ref (no new imports; guarantee #1/#2).
+    expect(note.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+    expect(note.opts?.env?.GIT_DIR).not.toBe("/fake/repo/.git");
+  });
+
+  it("capture: writes NO note when oversizePaths is empty (a clean capture)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan); // emptyScan ⇒ no oversize
+    const sha = await gb.capture("turn");
+    expect(sha).toBe("COMMIT456");
+    expect(findCmd(calls, "notes")).toBeUndefined();
+  });
+
+  it("capture: a note-add FAILURE does NOT fail capture (best-effort; commitSha already pinned)", async () => {
+    const calls: Call[] = [];
+    const oversizeScan = async (): Promise<CapScan> => ({ oversizePaths: ["big.bin"], totalBytes: 0 });
+    // sabotage: make `notes add` throw (e.g. notes machinery unavailable).
+    const gb = makeBackend(calls, BASE_CFG, oversizeScan, { throwOn: { cmd: "notes", call: 1 } });
+    const sha = await gb.capture("turn");
+    expect(sha).toBe("COMMIT456"); // capture STILL succeeded — the note failure was swallowed
+    expect(findCmd(calls, "notes")).toBeDefined();
+  });
+
+  it("restore: reads the note + parses it into result.skipped", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { notes: JSON.stringify(["big.bin", "huge.dat"]) },
+    });
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual(["big.bin", "huge.dat"]);
+    const note = findCmd(calls, "notes")!;
+    expect(note.args).toEqual([
+      "notes",
+      "--ref=refs/mulligan/oversize",
+      "show",
+      "COMMIT456", // keyed by beforeRef === commitSha
+    ]);
+    expect(note.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+  });
+
+  it("restore: NO note (non-zero exit) ⇒ result.skipped is [] + restore still completes (own try/catch)", async () => {
+    const calls: Call[] = [];
+    // throwOn:notes ⇒ `git notes show` exits non-zero (the common no-note case). restore MUST swallow it.
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { throwOn: { cmd: "notes", call: 1 } });
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]); // no note ⇒ no skipped signal
+    // read-tree still ran (the note failure did NOT abort the restore pipeline).
+    expect(findCmd(calls, "read-tree")).toBeDefined();
+    expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: [] });
+  });
+
+  it("restore: empty note stdout (no canned) ⇒ result.skipped is []", async () => {
+    const calls: Call[] = [];
+    // No canned notes stdout → makeExec returns "" for the `notes show` call → noteOut is empty → no parse.
+    const gb = makeBackend(calls, BASE_CFG, emptyScan);
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]);
+    expect(findCmd(calls, "notes")).toBeDefined(); // the read still issued (best-effort)
+  });
+
+  it("restore: unparseable note JSON ⇒ swallowed, result.skipped stays [] (restore still runs)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { notes: "this is not json" },
+    });
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]); // unparseable → swallowed, no skipped signal
+    expect(findCmd(calls, "read-tree")).toBeDefined(); // restore pipeline unaffected
+  });
+
+  it("restore: a non-array note JSON payload is ignored (skipped stays [])", async () => {
+    const calls: Call[] = [];
+    // a malformed payload (valid JSON but not an array) must NOT push garbage into skipped.
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { notes: JSON.stringify({ not: "an array" }) },
+    });
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]);
+  });
+
+  it("restore: neither flag set ⇒ the note is NOT read (the early-return guard fires before it)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { notes: JSON.stringify(["big.bin"]) },
+    });
+    const res = await gb.restore("COMMIT456", { revertFileChanges: false, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]);
+    expect(findCmd(calls, "notes")).toBeUndefined(); // the note-read is past the guard
+    expect(findCmd(calls, "read-tree")).toBeUndefined();
+  });
+
+  it("round-trip: capture(oversize) → restore reads the SAME paths back into result.skipped", async () => {
+    const calls: Call[] = [];
+    const oversizeScan = async (): Promise<CapScan> => ({
+      oversizePaths: ["big.bin", "huge.dat"],
+      totalBytes: 100,
+    });
+    // makeExec: commit-tree returns COMMIT456 (the SHA restore will pass as beforeRef); the note-show
+    // round-trips the note-write payload. We pre-seed `notes` stdout with what capture would write.
+    const gb = makeBackend(calls, BASE_CFG, oversizeScan, {
+      stdoutByCmd: { notes: JSON.stringify(["big.bin", "huge.dat"]) },
+    });
+    const sha = await gb.capture("turn");
+    expect(sha).toBe("COMMIT456");
+    // the note add was recorded during capture...
+    const noteAdd = calls.find(
+      (c) => c.args[0] === "notes" && c.args.includes("add"),
+    )!;
+    expect(noteAdd.args).toContain("COMMIT456");
+    // ...and restore reads it back for the SAME ref (sha === "COMMIT456" per makeExec).
+    const res = await gb.restore("COMMIT456", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual(["big.bin", "huge.dat"]);
+  });
+});

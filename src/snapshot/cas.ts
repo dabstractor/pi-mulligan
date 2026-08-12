@@ -126,6 +126,18 @@ export interface CasManifest {
   ts: number;
   /** path → per-file record (keys = workspace-relative POSIX paths — see class JSDoc). */
   files: Record<string, CasManifestEntry>;
+  /**
+   * Workspace-relative POSIX paths that were PRESENT at capture but NOT captured because a cap
+   * (maxFileBytes / maxTotalBytes) was hit (E29 — BUG-005). {@link restore} copies these into
+   * `RestoreResult.skipped` so the agent sees the file-revert was incomplete (the rewind success
+   * text reports "N skipped/failed" > 0 + the marker's `revert.skipped` boolean flips to true).
+   *
+   * OPTIONAL: absent on manifests written before BUG-005. {@link parseManifest} only checks
+   * `version === 1`, so a pre-fix manifest parses unchanged; restore() treats `undefined` as `[]`
+   * via `(manifest.skipped ?? [])`. The same `rel`/`path` already used in the warn strings + as
+   * `files` keys — NOT abs paths.
+   */
+  skipped?: string[];
 }
 
 /**
@@ -459,6 +471,7 @@ export class CasBackend implements SnapshotStore {
     explicitPaths?: string[],
   ): Promise<string | null> {
     const files: Record<string, CasManifestEntry> = {};
+    const skipped: string[] = [];
     const seen = new Set<string>();
     let totalBytes = 0;
     let partial = false;
@@ -477,7 +490,9 @@ export class CasBackend implements SnapshotStore {
         continue;
       }
       if (st.size > this.cfg.maxFileBytes) {
-        // fail-closed (§4.3) — never silently claim restorable
+        // fail-closed (§4.3) — never silently claim restorable. Record the rel so restore() can
+        // surface it in RestoreResult.skipped (BUG-005: the agent must see the revert was incomplete).
+        skipped.push(rel);
         console.warn(
           `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
         );
@@ -485,8 +500,9 @@ export class CasBackend implements SnapshotStore {
       }
       if (totalBytes + st.size > this.cfg.maxTotalBytes) {
         // partial — stop accepting new data (E29). NOT abort (CAS is file-by-file; git.ts aborts
-        // because git is atomic — this is the deliberate divergence, §4.3).
+        // because git is atomic — this is the deliberate divergence, §4.3). Record the rel (BUG-005).
         partial = true;
+        skipped.push(rel);
         console.warn(
           `[mulligan] snapshot.capture: maxTotalBytes (${this.cfg.maxTotalBytes}) reached — partial snapshot, skipping: ${rel}`,
         );
@@ -504,6 +520,7 @@ export class CasBackend implements SnapshotStore {
       turnIndex: 0,
       ts: Date.now(),
       files,
+      skipped,
     };
     await this.fs.mkdir(join(this.storageDir, "manifests"), {
       recursive: true,
@@ -568,6 +585,7 @@ export class CasBackend implements SnapshotStore {
       }
       const prev = await this.loadPrevEntries(label); // short-circuit source; empty on miss/corrupt
       const files: Record<string, CasManifestEntry> = {};
+      const skipped: string[] = [];
       let totalBytes = 0;
       let partial = false;
       const excludeSet = new Set(
@@ -575,8 +593,11 @@ export class CasBackend implements SnapshotStore {
       );
 
       await this.walkTree(this.cwd, excludeSet, async (rel, abs, st) => {
-        // oversize → fail-closed skip+warn (never silently claim restorable)
+        // oversize → fail-closed skip+warn (never silently claim restorable). Record the rel so
+        // restore() surfaces it in RestoreResult.skipped (BUG-005: the agent must see the revert was
+        // incomplete).
         if (st.size > this.cfg.maxFileBytes) {
+          skipped.push(rel);
           console.warn(
             `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
           );
@@ -595,8 +616,10 @@ export class CasBackend implements SnapshotStore {
         }
         // byte budget → stop accepting NEW data, mark PARTIAL (E29). NOT abort (CAS is file-by-file;
         // git.ts aborts here because git is atomic — this is the deliberate divergence, §4.3).
+        // Record the rel (BUG-005).
         if (totalBytes + st.size > this.cfg.maxTotalBytes) {
           partial = true;
+          skipped.push(rel);
           console.warn(
             `[mulligan] snapshot.capture: maxTotalBytes (${this.cfg.maxTotalBytes}) reached — partial snapshot, skipping: ${rel}`,
           );
@@ -615,6 +638,7 @@ export class CasBackend implements SnapshotStore {
         turnIndex: 0,
         ts: Date.now(),
         files,
+        skipped,
       };
       await this.fs.mkdir(join(this.storageDir, "manifests"), {
         recursive: true,
@@ -716,9 +740,19 @@ export class CasBackend implements SnapshotStore {
       }
       if (existed) {
         if (st!.size > this.cfg.maxFileBytes) {
-          // fail-closed (§4.3) — skip+warn, NO entry (never silently claim restorable)
+          // fail-closed (§4.3) — skip+warn, NO entry (never silently claim restorable). BUG-005:
+          // record the oversize rel into manifest.skipped (merge onto any prior skips) + REWRITE the
+          // manifest so restore() surfaces it in RestoreResult.skipped — instead of silently
+          // returning + losing the path. (The idempotency guard above still holds: a path already
+          // in `files` is never re-skipped.)
           console.warn(
             `[mulligan] snapshot.appendExplicitPath: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${path}`,
+          );
+          manifest.skipped = [...(manifest.skipped ?? []), path];
+          await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
+          await this.fs.writeFile(
+            this.manifestPath(label),
+            Buffer.from(serializeManifest(manifest), "utf8"),
           );
           return;
         }
@@ -992,6 +1026,13 @@ export class CasBackend implements SnapshotStore {
         );
         return result;
       }
+
+      // (a) BUG-005: surface the caps-skipped paths recorded at capture (E29) into
+      //     RestoreResult.skipped so the rewind success text reports "N skipped/failed" > 0 + the
+      //     marker's `revert.skipped` boolean flips to true. The bucket was DECLARED (store.ts) +
+      //     consumed (rewind.ts) all along; this is the missing POPULATE. `(manifest.skipped ?? [])`
+      //     keeps pre-fix manifests (no `skipped` field) restoring as `[]` (backward-compat).
+      result.skipped.push(...(manifest.skipped ?? []));
 
       // (b) REVERT pre-existing files + DELETE span-created files from the manifest (mode-agnostic).
       for (const [rel, entry] of Object.entries(manifest.files)) {

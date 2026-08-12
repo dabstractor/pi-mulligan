@@ -1822,7 +1822,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
     });
   });
 
-  it("skips an OVERSIZE file: NO manifest written, NO blob (fail-closed)", async () => {
+  it("skips an OVERSIZE file: NO blob, NO files entry (fail-closed); BUG-005 records it in manifest.skipped", async () => {
     const cwd = "/ws";
     const storage = "/store";
     const big = Buffer.from("x".repeat(100));
@@ -1832,8 +1832,12 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     await cb.appendExplicitPath("turn", "big.ts");
     warnSpy.mockRestore();
-    // fail-closed skip returns BEFORE writing the manifest → NO manifest file was created
-    await expect(fakeFs.readFile(join(storage, "manifests/turn.json"))).rejects.toThrow();
+    // fail-closed skip: NO blob + NO files entry (never silently claim restorable)...
+    const m = await readManifest(fakeFs, storage, "turn");
+    expect(Object.keys(m.files)).toEqual([]);
+    // ...but BUG-005: the rel IS recorded in manifest.skipped + the manifest IS written (no silent loss)
+    // so restore() can surface it in RestoreResult.skipped.
+    expect(m.skipped).toContain("big.ts");
   });
 
   it("skips a DANGEROUS path (.git/config): NO entry, no throw, no fs read of the real path", async () => {
@@ -1918,5 +1922,174 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
     // if appendExplicitPath forgot release(), this capture() would hang → test timeout (not a clean fail)
     const ref = await cb.capture("turn-after");
     expect(ref).toBe("turn-after");
+  });
+});
+
+// ── caps-skipped tracking (BUG-005 / E29) ──────────────────────────────────────────────────
+// The CasManifest.skipped bucket + the restore() → RestoreResult.skipped surface. When capture
+// skips a file due to maxFileBytes/maxTotalBytes, the rel MUST land in manifest.skipped so restore()
+// copies it into result.skipped — then rewind.ts (already wired at L889/899/907) reports "N
+// skipped/failed" > 0 + flips marker.revert.skipped to true (the agent sees the incomplete revert).
+// Before BUG-005 the bucket existed but was never populated. spec/14 §4.3 (caps), §6 (restore).
+describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)", () => {
+  /** Read + parse a label's manifest from the fake fs (local helper — mirrors the one in the
+   *  appendExplicitPath suite, scoped module-private here). */
+  async function readManifest(fakeFs: CasFs, storageDir: string, label: string): Promise<CasManifest> {
+    const buf = await fakeFs.readFile(join(storageDir, "manifests", `${label}.json`));
+    return parseManifest(buf.toString("utf8"));
+  }
+
+  it("whole-tree: oversize file (size > maxFileBytes) is recorded in manifest.skipped", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
+      "big.bin": { content: Buffer.alloc(300), mtimeMs: 1 },
+    }, { maxFileBytes: 100 });
+    await cb.capture("turn");
+    const mBuf = await fakeFs.readFile(join(storage, "manifests/turn.json"));
+    const m = parseManifest(mBuf.toString("utf8"));
+    expect(m.skipped).toContain("big.bin");
+    expect(Object.keys(m.files)).not.toContain("big.bin"); // uncaptured
+    expect(Object.keys(m.files)).toContain("small.ts"); // the small file IS captured
+  });
+
+  it("whole-tree: maxTotalBytes exceeded ⇒ the over-budget rel is in manifest.skipped (PARTIAL)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "small.ts": { content: Buffer.from("small"), mtimeMs: 1 }, // 5 bytes
+      "large.ts": { content: Buffer.from("x".repeat(100)), mtimeMs: 2 }, // 100 bytes → exceeds budget
+    }, { maxTotalBytes: 50 });
+    const ref = await cb.capture("turn");
+    expect(ref).toBe("turn"); // PARTIAL — not null
+    const mBuf = await fakeFs.readFile(join(storage, "manifests/turn.json"));
+    const m = parseManifest(mBuf.toString("utf8"));
+    expect(m.skipped).toContain("large.ts");
+    expect(Object.keys(m.files)).toContain("small.ts");
+    expect(Object.keys(m.files)).not.toContain("large.ts");
+    expect(warnSpy.mock.calls.some((c) => /partial/.test(String(c[0])))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("explicit-paths: oversize file (> maxFileBytes) is recorded in manifest.skipped", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const state = makeStateFs("/ws", "/store", {
+      "small.ts": Buffer.from("ok"),
+      "big.ts": Buffer.alloc(300),
+    });
+    const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxFileBytes: 100 });
+    await cb.capture("turn", ["small.ts", "big.ts"]);
+    const m = state.manifestOf("turn")!;
+    expect(m.skipped).toContain("big.ts");
+    expect(Object.keys(m.files)).toEqual(["small.ts"]); // big.ts uncaptured
+    warnSpy.mockRestore();
+  });
+
+  it("explicit-paths: maxTotalBytes exceeded ⇒ over-budget rel in manifest.skipped (PARTIAL)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const state = makeStateFs("/ws", "/store", {
+      "a.ts": Buffer.alloc(60),
+      "b.ts": Buffer.alloc(60), // 60+60=120 > 100
+    });
+    const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxTotalBytes: 100 });
+    await cb.capture("turn", ["a.ts", "b.ts"]);
+    const m = state.manifestOf("turn")!;
+    expect(m.skipped).toContain("b.ts");
+    expect(Object.keys(m.files)).toEqual(["a.ts"]); // b.ts skipped on budget overrun
+    warnSpy.mockRestore();
+  });
+
+  it("appendExplicitPath: oversize file is recorded in manifest.skipped (NOT silently lost)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "big.ts": { content: Buffer.from("x".repeat(100)), mtimeMs: 1 },
+    }, { maxFileBytes: 10 });
+    await cb.appendExplicitPath("turn", "big.ts");
+    warnSpy.mockRestore();
+    // BUG-005: the manifest IS rewritten (no silent loss) + big.ts lands in skipped.
+    const m = await readManifest(fakeFs, storage, "turn");
+    expect(m.skipped).toContain("big.ts");
+    expect(Object.keys(m.files)).toEqual([]); // oversize ⇒ no files entry
+  });
+
+  it("appendExplicitPath: oversize MERGES onto an existing manifest's skipped (no overwrite)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cwd = "/ws";
+    const storage = "/store";
+    // start from an empty manifest; first append captures a normal file, second append is oversize.
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
+      "big1.ts": { content: Buffer.from("x".repeat(100)), mtimeMs: 1 },
+      "big2.ts": { content: Buffer.from("y".repeat(100)), mtimeMs: 1 },
+    }, { maxFileBytes: 10 });
+    await cb.appendExplicitPath("turn", "small.ts");
+    await cb.appendExplicitPath("turn", "big1.ts");
+    await cb.appendExplicitPath("turn", "big2.ts");
+    warnSpy.mockRestore();
+    const m = await readManifest(fakeFs, storage, "turn");
+    expect(m.skipped?.sort()).toEqual(["big1.ts", "big2.ts"]); // both oversize rels accumulated
+    expect(Object.keys(m.files)).toEqual(["small.ts"]); // only the small file captured
+  });
+
+  it("restore: surfaces manifest.skipped into result.skipped (whole-tree capture)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
+      "big.bin": { content: Buffer.alloc(300), mtimeMs: 1 },
+    }, { maxFileBytes: 100 });
+    await cb.capture("turn");
+    // the manifest on disk records big.bin in skipped
+    const mBefore = parseManifest((await fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    expect(mBefore.skipped).toContain("big.bin");
+    const res = await cb.restore("turn", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toContain("big.bin");
+  });
+
+  it("restore: surfaces manifest.skipped into result.skipped (explicit-paths capture)", async () => {
+    const state = makeStateFs("/ws", "/store", {
+      "a.ts": Buffer.alloc(60),
+      "b.ts": Buffer.alloc(60),
+    });
+    const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxTotalBytes: 100 });
+    await cb.capture("turn", ["a.ts", "b.ts"]); // b.ts skipped on budget overrun
+    const res = await cb.restore("turn", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toContain("b.ts");
+  });
+
+  it("restore: BACKWARD-COMPAT — a manifest WITHOUT `skipped` (pre-fix) restores as skipped:[]", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "a.ts": { content: Buffer.from("aaa"), mtimeMs: 1 },
+    });
+    await cb.capture("turn");
+    // Simulate a pre-fix manifest: rewrite it WITHOUT the `skipped` field (as if written before BUG-005).
+    const raw = parseManifest((await fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    const { skipped: _drop, ...prefFix } = raw; // strip the field entirely
+    void _drop;
+    await fakeFs.writeFile(join(storage, "manifests/turn.json"), Buffer.from(JSON.stringify(prefFix), "utf8"));
+    const res = await cb.restore("turn", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]); // no skipped signal — identical to today's behavior
+  });
+
+  it("restore: neither flag set ⇒ result.skipped is [] (the early-return guard short-circuits before the skipped copy)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "big.bin": { content: Buffer.alloc(300), mtimeMs: 1 },
+    }, { maxFileBytes: 100 });
+    await cb.capture("turn");
+    // the manifest DOES record big.bin in skipped, but restore's early-return guard (neither flag)
+    // fires before the skipped copy ⇒ skipped stays [] (no restore ran). Matches git.ts restore.
+    const res = await cb.restore("turn", { revertFileChanges: false, deleteCreatedFiles: false });
+    expect(res.skipped).toEqual([]);
+    // sanity: the manifest on disk still has the skipped entry (the guard is about restore, not capture)
+    const m = parseManifest((await fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    expect(m.skipped).toContain("big.bin");
   });
 });
