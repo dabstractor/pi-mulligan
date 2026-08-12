@@ -42,6 +42,7 @@ import { log } from "./log.js";
 import { resultBytes, approxTokens, estimateAgentTokens } from "./tokens.js";
 import type { ResultContentBlock } from "./tokens.js";
 import { renderBloatReminder, renderDriftNudge } from "./notes.js";
+import type { DriftNudgeInput } from "./notes.js";
 import {
   appendTurnMetric,
   type TurnMetricInput,
@@ -340,18 +341,58 @@ export function shouldNudge(recentMetrics: TurnMetric[], config: MulliganConfig)
  * from the latest metric each fire and REPLACES (never stacks with) the previous (nothing persists to stack).
  *
  * WHY MessageLike[] not AgentMessage[] (GOTCHA #3): the filter.ts call site is
- * `messages = injectNudge(messages, markers.metric)` where `messages` is MessageLike[] (filterPipeline's return;
- * the cast to Pi's AgentMessage[] happens at contextHandler's RETURN boundary). AgentMessage[] would not type-check
- * at the assignment. MessageLike (transforms.ts) has an index signature → the nudge object literal assigns in with
- * NO cast (GOTCHA #4). renderDriftNudge takes the TurnMetric with NO cast (a real TurnMetric is structurally
- * assignable to DriftNudgeInput — GOTCHA #5).
+ * `messages = injectNudge(messages, markers.metric, markers.recentMetrics, config)` where `messages` is MessageLike[]
+ * (filterPipeline's return; the cast to Pi's AgentMessage[] happens at contextHandler's RETURN boundary).
+ * AgentMessage[] would not type-check at the assignment. MessageLike (transforms.ts) has an index signature → the
+ * nudge object literal assigns in with NO cast (GOTCHA #4). renderDriftNudge takes the TurnMetric with NO cast (a
+ * real TurnMetric is structurally assignable to DriftNudgeInput — GOTCHA #5).
  *
- * @param messages the filtered message copy (MessageLike[] — the in-flight view the model will see).
- * @param metric   the latest turn-metric (shouldNudge(metric) is already true when this is called).
+ * SUSTAINED-GROWTH CLARIFICATION (Minor #3 / advisory UX): the drift nudge fires on the WINDOWED moving-average
+ * delta (shouldNudge), but renderDriftNudge's lead text reports the LATEST single-turn delta. When the latest
+ * delta is below the nominal single-turn threshold yet the windowed average tripped, the bare lead is misleading
+ * (e.g. "~0.8k tokens" while the nudge fired). injectNudge therefore derives a `sustainedOverTurns` hint from the
+ * windowed metrics + threshold and threads it into the DriftNudgeInput so renderDriftNudge can append a
+ * "(sustained over the last N turns)" clause. It is computed PURELY here (no Pi calls): if the windowed average of
+ * the latest `driftWindowTurns` finite deltas is >= driftThresholdTokens AND the latest single-turn delta is below
+ * that same threshold (the case the wart describes), set sustainedOverTurns = the number of window deltas averaged;
+ * otherwise leave it unset (renderDriftNudge omits the clause). recentMetrics/config are OPTIONAL so existing
+ * single-metric callers keep working (they simply get no clarification).
+ *
+ * @param messages       the filtered message copy (MessageLike[] — the in-flight view the model will see).
+ * @param metric         the latest turn-metric (shouldNudge(metric) is already true when this is called).
+ * @param recentMetrics  OPTIONAL ALL turn-metrics, newest-first (MarkersBundle.recentMetrics) — when supplied,
+ *                       injectNudge computes the sustained-growth clarification (Minor #3).
+ * @param config         OPTIONAL MulliganConfig — required alongside recentMetrics to read the window + threshold.
  * @returns a NEW array: [...messages, nudge]. The input is NOT mutated.
  */
-export function injectNudge(messages: MessageLike[], metric: TurnMetric): MessageLike[] {
-  const line = renderDriftNudge(metric); // TurnMetric → DriftNudgeInput, no cast (GOTCHA #5)
+export function injectNudge(
+  messages: MessageLike[],
+  metric: TurnMetric,
+  recentMetrics?: ReadonlyArray<TurnMetric>,
+  config?: MulliganConfig,
+): MessageLike[] {
+  let input: DriftNudgeInput = metric; // structural (TurnMetric → DriftNudgeInput); copy-on-write below only if needed
+  // Sustained-growth clarification (Minor #3): derive sustainedOverTurns when the windowed average tripped but
+  // the latest single-turn delta alone is below the nominal single-turn threshold. PURE; recentMetrics/config are
+  // optional — when absent, no clarification (renderDriftNudge omits the clause).
+  if (recentMetrics && config) {
+    const window = recentMetrics.slice(0, config.nudges.driftWindowTurns);
+    const deltas = window
+      .map((m) => m.deltaTokens)
+      .filter((d): d is number => typeof d === "number" && Number.isFinite(d));
+    const latest = typeof metric.deltaTokens === "number" && Number.isFinite(metric.deltaTokens) ? metric.deltaTokens : null;
+    if (
+      deltas.length > 0 &&
+      latest !== null &&
+      latest < config.nudges.driftThresholdTokens &&
+      deltas.reduce((a, b) => a + b, 0) / deltas.length >= config.nudges.driftThresholdTokens
+    ) {
+      // Windowed average tripped but the latest single-turn delta is below threshold → clarify it is sustained.
+      // Copy-on-write: only allocate a new input object when we actually add the field (the common case is no-op).
+      input = { ...metric, sustainedOverTurns: deltas.length };
+    }
+  }
+  const line = renderDriftNudge(input); // TurnMetric → DriftNudgeInput, no cast (GOTCHA #5)
   const nudge: MessageLike = {
     role: "custom",
     customType: "mulligan:nudge",

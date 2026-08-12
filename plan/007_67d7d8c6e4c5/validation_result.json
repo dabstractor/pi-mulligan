@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 4,
+  "summary": "No Critical/Major issues. Production-quality: typecheck passes, 1033 unit tests pass, 14/14 E2E smoke scenarios pass, zero-config load works. 4 Minor findings: (1) driftThresholdTokens spec/code drift (spec says 6000, code ships 4000 — documented BUG-003 fix, spec not updated); (2) stray empty '=' file tracked in git; (3) drift-nudge text reports latest single-turn delta but fires on windowed average (spec-consistent UX wart); (4) 19 src/*.ts files lack a trailing newline (.editorconfig violation)."
+}

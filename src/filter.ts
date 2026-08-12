@@ -322,7 +322,7 @@ export function contextHandler(
       !suppressCheck(markers.metric, markers.recentMetrics, markers) &&
       rt.rewindRefusedTurnIndex !== markers.metric.turnIndex   // [P4.M1.T2.S3] mute on a refused rewind this turn
     ) {
-      messages = injectNudge(messages, markers.metric);
+      messages = injectNudge(messages, markers.metric, markers.recentMetrics, config);
     }
 
     // Edge-triggered high-water signal (spec/07 §5.2, REQUIRED). Fires ONCE when the total FILTERED context

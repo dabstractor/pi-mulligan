@@ -42,7 +42,7 @@
       "bloatThresholdBytesByTool": {  // OPTIONAL per-tool overrides (keyed by toolName); fall back to bloatThresholdBytes
         "read": 24576                 // 24 KB — large source-file reads are routine and legitimate
       },                              // (bash is intentionally omitted: it uses the 16 KB global to stay sensitive)
-      "driftThresholdTokens": 6000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
+      "driftThresholdTokens": 4000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
       "driftWindowTurns": 3,          // rolling window for §5.1 windowed drift signaling
       "highWaterFraction": 0.7        // §5.2 edge-triggered high-water signal (fraction of context window)
     },
@@ -81,7 +81,7 @@
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
 | `nudges.bloatThresholdBytesByTool` | `{ "read": 24576 }` | `bash` is the primary bloat surface, so it is intentionally NOT listed — it falls back to the 16 KB global to stay maximally sensitive. `read` of a large source file is normal, so it gets a higher 24 KB bar. Resolution: look up `event.toolName` in the map; on miss (including `bash`), use `bloatThresholdBytes`. |
-| `nudges.driftThresholdTokens` | `6000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
+| `nudges.driftThresholdTokens` | `4000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Lowered from 6000 with the comparison changed from `>` to `>=` (BUG-003 fix): at 6000 with strict `>`, §5.1 criterion (b) — three ~4k turns in a row fire — never held (`avg([4k,4k,4k])=4k` > 6000 is false). At 4000 with `>=`, all three §5.1 acceptance criteria hold: (a) a single 8k turn amid small turns averages <4000 → no fire; (b) three ~4k turns average ~4000 >= 4000 → fire; (c) a single large result with ~0 net growth averages ~0 → no fire. |
 | `nudges.driftWindowTurns` | `3` | Rolling window over which the drift delta is smoothed before thresholding (`@07` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered). Catches slow steady accumulation the delta nudge misses. |
 | `audit.estimateConfidence` | `"medium"` | Honest default; token estimates are approximate. |

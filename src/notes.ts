@@ -240,6 +240,16 @@ export interface DriftNudgeInput {
   deltaTokens: number | null;
   /** Bloated tool results recorded this turn (empty array if none). */
   bloatHits: ReadonlyArray<{ toolName: string; approxTokens: number }>;
+  /**
+   * True when the nudge fired on SUSTAINED windowed growth (the moving-average delta over driftWindowTurns
+   * crossed driftThresholdTokens) RATHER than the latest single-turn delta alone. Advisory UX flag (spec/07 §2
+   * renderDriftNudge only references deltaTokens, so this is OPTIONAL polish): when true AND the latest single-
+   * turn delta is itself below threshold, renderDriftNudge appends a "(sustained over the last N turns)" clause
+   * so the rendered single-turn figure is not misleading. Undefined/null/false → the clause is omitted (the
+   * common case: the latest turn alone tripped the delta, no clarification needed). Count is derived by the
+   * caller from driftWindowTurns (the number of turns the sustained average was computed over).
+   */
+  sustainedOverTurns?: number | null;
 }
 
 /**
@@ -305,9 +315,20 @@ export function renderBloatReminder(toolName: string, bytes: number): string {
 export function renderDriftNudge(metric: DriftNudgeInput): string {
   const delta = readDelta(metric);
   const hits = readBloatHits(metric);
+  const sustainedN = readSustainedTurns(metric); // advisory UX (Minor #3): windowed-fire clarification
   let lead: string;
   if (delta != null) {
     lead = `Previous turn added ~${kTokens(delta)} tokens to your context`;
+    // Advisory UX clause (spec/07 §2 edge cases, rendered-layer polish): the nudge fires on the WINDOWED
+    // moving average, but the lead reports the LATEST single-turn delta. When the latest delta is itself below
+    // the drift threshold yet the windowed average tripped (sustained growth), a bare "~0.8k tokens" lead is
+    // misleading (0.8k alone would not fire). Append " (sustained over the last N turns)" so the agent
+    // understands sustained growth — not this one turn — is the trigger. Omitted when sustainedN is absent/
+    // non-positive, or when the latest delta alone would explain the fire (delta >= a nominal threshold, here
+    // approximated as "delta is non-trivially large" — we only clarify the small-delta case the wart describes).
+    if (sustainedN > 0 && delta < LARGE_SINGLE_TURN_DELTA) {
+      lead += ` (sustained over the last ${sustainedN} turns)`;
+    }
   } else if (hits.length > 0) {
     lead = `Previous turn produced ${hits.length} bloated ${resultWord(hits.length)}`;
   } else {
@@ -315,6 +336,15 @@ export function renderDriftNudge(metric: DriftNudgeInput): string {
   }
   return `${lead}. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result.`;
 }
+
+/**
+ * LARGE_SINGLE_TURN_DELTA — the rough nominal threshold above which a single-turn delta alone "explains" the
+ * drift nudge fire (so no sustained-growth clarification is appended). Below this, a fired nudge must be due to
+ * sustained windowed growth, and the rendered single-turn figure would otherwise be misleading (Minor #3).
+ * Set conservatively to 4000 (the default driftThresholdTokens): a single turn adding >= ~4k tokens is a
+ * self-evidently large turn that does not need the clarification; below it the clause is appended. Module-private.
+ */
+const LARGE_SINGLE_TURN_DELTA = 4000;
 
 // ── S3 module-private helpers (mirror S2's readLedgerList; reuse S1's isRecord/readOwn) ─────────────
 
@@ -351,6 +381,16 @@ function resultWord(n: number): string {
 function readDelta(metric: unknown): number | null {
   const v = readOwn(metric, "deltaTokens");
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * readSustainedTurns — read metric.sustainedOverTurns as a positive integer (the window size the sustained drift
+ * average was computed over), else 0 (0 = no sustained-growth clarification). Defensive, never throws. Module-private;
+ * reuses S1's readOwn. Used by renderDriftNudge's advisory UX clause (Minor #3).
+ */
+function readSustainedTurns(metric: unknown): number {
+  const v = readOwn(metric, "sustainedOverTurns");
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v > 0 ? v : 0;
 }
 
 /**

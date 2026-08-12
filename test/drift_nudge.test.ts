@@ -13,6 +13,11 @@ import type { SessionRuntime } from "../src/runtime.js";
 import type { MulliganConfig } from "../src/config.js";
 import { estimateAgentTokens, type MessageLike as TokenMessageLike } from "../src/tokens.js";
 
+// cfg helper (top-level) for injectNudge's windowed sustained-growth clarification tests (Minor #3).
+function cfgFor(windowTurns = 3, threshold = 4000): MulliganConfig {
+  return { nudges: { driftWindowTurns: windowTurns, driftThresholdTokens: threshold } } as MulliganConfig;
+}
+
 // ── pure-function unit tests for Nudge B Phase 2 (spec/07 §2). NO Pi fakes, NO clearAll, NO setConfig. ──
 // shouldNudge / injectNudge / suppressCheck are pure helpers (spec/07 §3); these tests exercise them directly
 // with hand-built minimal literals. The metric/markers are built as partial literals cast to the marker type
@@ -206,6 +211,53 @@ describe("injectNudge — pure append, ephemeral (spec/07 §2)", () => {
     const twice = injectNudge(original, metric()); // called on `original`, NOT on `once`
     expect(once).toHaveLength(2);
     expect(twice).toHaveLength(2); // NOT 3 — the nudge never accumulates when injected into a fresh copy
+  });
+});
+
+// ── injectNudge — sustained-growth clarification (Minor #3 / spec/07 §2 advisory UX) ──────────
+// The nudge fires on the WINDOWED moving average; the lead reports the LATEST single-turn delta. When the latest
+// delta is below the nominal single-turn threshold yet the windowed average tripped, injectNudge threads a
+// sustainedOverTurns hint so renderDriftNudge appends " (sustained over the last N turns)".
+describe("injectNudge — sustained-growth clarification (Minor #3)", () => {
+  it("appends the sustained clause when the windowed average trips but the latest single-turn delta is below threshold", () => {
+    // Window [7k,7k,800] (newest-first): MA = (7000+7000+800)/3 = 4933 >= 4000 → fire; latest delta 800 < 4000.
+    const config = cfgFor(3, 4000);
+    const latest = metric({ deltaTokens: 800, seq: 3, turnIndex: 3 });
+    const recent = [
+      latest,
+      metric({ deltaTokens: 7000, seq: 2, turnIndex: 2 }),
+      metric({ deltaTokens: 7000, seq: 1, turnIndex: 1 }),
+    ];
+    const result = injectNudge([], latest, recent, config);
+    const content = (result[0] as Record<string, unknown>).content as string;
+    expect(content).toContain("added ~0.8k tokens to your context (sustained over the last 3 turns)");
+  });
+
+  it("does NOT append the clause when the latest single-turn delta alone explains the fire (>= threshold)", () => {
+    // Latest delta 5000 >= 4000 → the single-turn figure is self-evidently large; no clarification needed.
+    const config = cfgFor(3, 4000);
+    const latest = metric({ deltaTokens: 5000, seq: 3, turnIndex: 3 });
+    const recent = [latest, metric({ deltaTokens: 5000, seq: 2, turnIndex: 2 }), metric({ deltaTokens: 5000, seq: 1, turnIndex: 1 })];
+    const result = injectNudge([], latest, recent, config);
+    const content = (result[0] as Record<string, unknown>).content as string;
+    expect(content).toBe("Previous turn added ~5k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.");
+  });
+
+  it("does NOT append the clause when recentMetrics/config are omitted (back-compat with single-metric callers)", () => {
+    const latest = metric({ deltaTokens: 800 });
+    const result = injectNudge([], latest);
+    const content = (result[0] as Record<string, unknown>).content as string;
+    expect(content).toBe("Previous turn added ~0.8k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.");
+  });
+
+  it("does NOT append the clause when delta is null (bloat-only lead)", () => {
+    const config = cfgFor(3, 4000);
+    const latest = metric({ deltaTokens: null, bloatHits: [{ toolName: "read", approxTokens: 2048 }], bloatHit: true, seq: 3 });
+    const recent = [latest, metric({ deltaTokens: 7000, seq: 2 }), metric({ deltaTokens: 7000, seq: 1 })];
+    const result = injectNudge([], latest, recent, config);
+    const content = (result[0] as Record<string, unknown>).content as string;
+    expect(content).toContain("Previous turn produced 1 bloated result.");
+    expect(content).not.toContain("sustained");
   });
 });
 

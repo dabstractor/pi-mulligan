@@ -556,6 +556,47 @@ describe("renderDriftNudge — rounding & pluralization", () => {
   });
 });
 
+describe("renderDriftNudge — sustained-growth clarification (Minor #3 / spec/07 §2 advisory UX)", () => {
+  // The drift nudge fires on the WINDOWED moving average, but the lead reports the LATEST single-turn delta.
+  // When the latest delta is below the nominal single-turn threshold yet the windowed average tripped,
+  // renderDriftNudge appends " (sustained over the last N turns)" so the small single-turn figure is not misleading.
+  it("appends the sustained clause when sustainedOverTurns is set and the single-turn delta is below ~4k", () => {
+    const out = renderDriftNudge({ deltaTokens: 800, bloatHits: [], sustainedOverTurns: 3 });
+    expect(out).toBe(
+      "Previous turn added ~0.8k tokens to your context (sustained over the last 3 turns)" + DRIFT_TAIL,
+    );
+  });
+
+  it("does NOT append the clause when the single-turn delta is large enough to explain the fire (>= 4k)", () => {
+    const out = renderDriftNudge({ deltaTokens: 5000, bloatHits: [], sustainedOverTurns: 3 });
+    expect(out).toBe("Previous turn added ~5k tokens to your context" + DRIFT_TAIL);
+    expect(out).not.toContain("sustained");
+  });
+
+  it("does NOT append the clause when sustainedOverTurns is absent (the common case)", () => {
+    const out = renderDriftNudge({ deltaTokens: 800, bloatHits: [] });
+    expect(out).toBe("Previous turn added ~0.8k tokens to your context" + DRIFT_TAIL);
+    expect(out).not.toContain("sustained");
+  });
+
+  it("does NOT append the clause on the bloat-only lead (delta === null)", () => {
+    const out = renderDriftNudge({
+      deltaTokens: null,
+      bloatHits: [{ toolName: "read", approxTokens: 2048 }],
+      sustainedOverTurns: 3,
+    });
+    expect(out).toBe("Previous turn produced 1 bloated result" + DRIFT_TAIL);
+    expect(out).not.toContain("sustained");
+  });
+
+  it("ignores a malformed sustainedOverTurns (non-integer / non-positive / non-number) → no clause, never throws", () => {
+    for (const bad of [0, -1, 2.5, NaN, Infinity, "3", null] as unknown[]) {
+      const out = renderDriftNudge({ deltaTokens: 800, bloatHits: [], sustainedOverTurns: bad as never });
+      expect(out).toBe("Previous turn added ~0.8k tokens to your context" + DRIFT_TAIL);
+    }
+  });
+});
+
 describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
   it("a null metric passed as DriftNudgeInput → neutral fallback, not a throw", () => {
     expect(() => renderDriftNudge(null as unknown as DriftNudgeInput)).not.toThrow();
@@ -630,10 +671,11 @@ describe("renderers — types", () => {
     expectTypeOf(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toEqualTypeOf<string>();
   });
 
-  it("DriftNudgeInput is the 2-field metric projection (spec/04 §5)", () => {
+  it("DriftNudgeInput is the metric projection (spec/04 §5): deltaTokens + bloatHits + optional sustainedOverTurns", () => {
     expectTypeOf<DriftNudgeInput>().toEqualTypeOf<{
       deltaTokens: number | null;
       bloatHits: ReadonlyArray<{ toolName: string; approxTokens: number }>;
+      sustainedOverTurns?: number | null;
     }>();
   });
 });
