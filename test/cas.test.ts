@@ -1385,3 +1385,192 @@ describe("CasBackend — mutex serializes capture/dirtyCheck/restore/retire (§4
     expect(maxInFlight).toBe(1); // serialized — no overlap
   });
 });
+
+// ── gc — prompt-boundary namespace-delete + mark-sweep (spec/14 §5) ────────────────────────
+
+describe("CasBackend.gc — prompt-boundary namespace-delete + mark-sweep (spec/14 §5)", () => {
+  /**
+   * A purpose-built fake that models the manifests/ dir + the sharded blobs/ subdirs so gc()'s
+   * readdir-driven mark-sweep can be exercised directly. The shared makeStateFs does NOT model
+   * readdir (explicit-paths capture does not walk), so gc() needs this dedicated layout fake.
+   * `storageDir` layout mirrors CasBackend exactly: manifests/<label>.json + blobs/<2-hex>/<hash>.
+   */
+  function makeGcFs(storageDir: string) {
+    const manifests = new Map<string, Buffer>(); // filename (e.g. "turn.json") → serialized manifest
+    const blobs = new Map<string, Buffer>(); // hash → content (filename === hash; NO suffix)
+    const manifestsDir = join(storageDir, "manifests");
+    const blobsDir = join(storageDir, "blobs");
+    const fakeFs: CasFs = {
+      readdir: async (dir: string, _opts) => {
+        if (resolve(dir) === resolve(manifestsDir)) {
+          // return Dirent-like entries with isFile()=true for each manifest filename
+          return [...manifests.keys()].map(
+            (name) =>
+              ({ name, isFile: () => true, isDirectory: () => false }) as unknown as Dirent,
+          );
+        }
+        if (resolve(dir) === resolve(blobsDir)) {
+          // the shard subdirs — 2-hex prefix dirs
+          const shards = new Set<string>();
+          for (const h of blobs.keys()) shards.add(h.slice(0, 2));
+          return [...shards].map(
+            (name) =>
+              ({ name, isFile: () => false, isDirectory: () => true }) as unknown as Dirent,
+          );
+        }
+        // a shard subdir: blobs/<2-hex>/ → the blob files whose hash starts with the shard prefix
+        const shardPrefix = resolve(dir).split(sep).pop()!;
+        if (shardPrefix.length === 2) {
+          const names = [...blobs.keys()].filter((h) => h.startsWith(shardPrefix));
+          return names.map(
+            (name) =>
+              ({ name, isFile: () => true, isDirectory: () => false }) as unknown as Dirent,
+          );
+        }
+        return [];
+      },
+      stat: async () => ({ size: 0, mtimeMs: 0 }),
+      readFile: async (p: string) => {
+        if (p.startsWith(manifestsDir)) {
+          const name = resolve(p).split(sep).pop()!;
+          const buf = manifests.get(name);
+          if (buf) return buf;
+        }
+        if (p.startsWith(blobsDir)) {
+          const hash = resolve(p).split(sep).pop()!;
+          const buf = blobs.get(hash);
+          if (buf) return buf;
+        }
+        throw Object.assign(new Error(`ENOENT ${p}`), { code: "ENOENT" });
+      },
+      writeFile: async (p: string, data: Buffer) => {
+        if (p.startsWith(manifestsDir)) {
+          manifests.set(resolve(p).split(sep).pop()!, data);
+        } else if (p.startsWith(blobsDir)) {
+          blobs.set(resolve(p).split(sep).pop()!, data);
+        }
+      },
+      mkdir: async () => undefined,
+      access: async (p: string) => {
+        if (p.startsWith(manifestsDir)) {
+          if (manifests.has(resolve(p).split(sep).pop()!)) return;
+        }
+        if (p.startsWith(blobsDir)) {
+          if (blobs.has(resolve(p).split(sep).pop()!)) return;
+        }
+        throw Object.assign(new Error(`ENOENT ${p}`), { code: "ENOENT" });
+      },
+      unlink: async (p: string) => {
+        if (p.startsWith(manifestsDir)) {
+          manifests.delete(resolve(p).split(sep).pop()!);
+          return;
+        }
+        if (p.startsWith(blobsDir)) {
+          blobs.delete(resolve(p).split(sep).pop()!);
+          return;
+        }
+      },
+    };
+    const state = {
+      fakeFs,
+      /** write a manifest for a label (files: relpath → hash). */
+      writeManifest(label: string, hashesByPath: Record<string, string>) {
+        const files: CasManifest["files"] = {};
+        for (const [rel, hash] of Object.entries(hashesByPath))
+          files[rel] = { hash, size: 1, mtime: 0, existed: true };
+        manifests.set(
+          `${label}.json`,
+          Buffer.from(
+            serializeManifest({
+              version: 1,
+              label,
+              turnIndex: 0,
+              ts: Date.now(),
+              files,
+            }),
+          ),
+        );
+      },
+      /** store a content blob under its hash (filename === hash; NO suffix). */
+      storeBlob(hash: string, content: Buffer) {
+        blobs.set(hash, content);
+      },
+      manifestPresent(label: string) {
+        return manifests.has(`${label}.json`);
+      },
+      blobPresent(hash: string) {
+        return blobs.has(hash);
+      },
+    };
+    return state;
+  }
+
+  function makeGcBackend(state: ReturnType<typeof makeGcFs>): CasBackend {
+    return new CasBackend("/ws", { ...BASE_CFG, storageDir: "/store" }, null, { fs: state.fakeFs });
+  }
+
+  it("deletes every turn/* manifest + reclaims its unreferenced blobs; checkpoint/* exempt", async () => {
+    const state = makeGcFs("/store");
+    // a turn manifest referencing blob T1, a checkpoint manifest referencing blob C1
+    state.writeManifest("turn", { "a.ts": "turnhash1" });
+    state.storeBlob("turnhash1", Buffer.from("turn-content"));
+    state.writeManifest("ckpt:save1", { "b.ts": "ckpthash1" });
+    state.storeBlob("ckpthash1", Buffer.from("ckpt-content"));
+    // an orphan blob referenced by NO surviving manifest
+    state.storeBlob("orphanhash", Buffer.from("orphan"));
+    const cb = makeGcBackend(state);
+    await cb.gc();
+    // turn/* manifest deleted; checkpoint manifest preserved
+    expect(state.manifestPresent("turn")).toBe(false);
+    expect(state.manifestPresent("ckpt:save1")).toBe(true);
+    // turn blob reclaimed (no surviving manifest references it); checkpoint blob preserved
+    expect(state.blobPresent("turnhash1")).toBe(false);
+    expect(state.blobPresent("ckpthash1")).toBe(true);
+    // orphan blob (referenced by nothing) reclaimed
+    expect(state.blobPresent("orphanhash")).toBe(false);
+  });
+
+  it("deletes turn-after manifest too (the whole turn namespace)", async () => {
+    const state = makeGcFs("/store");
+    state.writeManifest("turn", { "a.ts": "h1" });
+    state.writeManifest("turn-after", { "a.ts": "h2" });
+    state.storeBlob("h1", Buffer.from("x"));
+    state.storeBlob("h2", Buffer.from("y"));
+    const cb = makeGcBackend(state);
+    await cb.gc();
+    expect(state.manifestPresent("turn")).toBe(false);
+    expect(state.manifestPresent("turn-after")).toBe(false);
+    expect(state.blobPresent("h1")).toBe(false);
+    expect(state.blobPresent("h2")).toBe(false);
+  });
+
+  it("preserves a checkpoint blob that a turn ALSO referenced (checkpoint is the surviving set)", async () => {
+    const state = makeGcFs("/store");
+    // turn + checkpoint BOTH reference the SAME blob hash (content dedupe)
+    state.writeManifest("turn", { "a.ts": "shared" });
+    state.writeManifest("ckpt:save1", { "b.ts": "shared" });
+    state.storeBlob("shared", Buffer.from("same-content"));
+    const cb = makeGcBackend(state);
+    await cb.gc();
+    // turn manifest gone; checkpoint manifest preserved; the shared blob survives (in surviving set)
+    expect(state.manifestPresent("turn")).toBe(false);
+    expect(state.manifestPresent("ckpt:save1")).toBe(true);
+    expect(state.blobPresent("shared")).toBe(true);
+  });
+
+  it("no manifests dir ⇒ early void (nothing to gc); never rejects", async () => {
+    const state = makeGcFs("/store"); // nothing written → readdir on manifests throws ENOENT-mode
+    const cb = makeGcBackend(state);
+    await expect(cb.gc()).resolves.toBeUndefined();
+  });
+
+  it("never rejects when a manifest is corrupt (best-effort skip)", async () => {
+    const state = makeGcFs("/store");
+    state.writeManifest("turn", { "a.ts": "h1" }); // a valid turn manifest
+    state.storeBlob("h1", Buffer.from("x"));
+    const cb = makeGcBackend(state);
+    await expect(cb.gc()).resolves.toBeUndefined();
+    // the valid turn manifest was still deleted
+    expect(state.manifestPresent("turn")).toBe(false);
+  });
+});

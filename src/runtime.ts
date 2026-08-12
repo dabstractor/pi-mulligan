@@ -20,6 +20,7 @@
  */
 
 import type { RevertCheckpoint } from "./markers.js";
+import type { SnapshotStore } from "./snapshot/store.js";
 
 /**
  * AgentMessage — LOCAL opaque alias for the elements of a Pi message list.
@@ -120,6 +121,15 @@ export interface SessionRuntime {
    *  — the Map is dropped with the object, no explicit clear.
    *  See `@14-working-tree-revert.md` §2 (definition + per-session caching), §5 (capture lifecycle), §6 (restore). */
   snapshots?: Map<string, RevertCheckpoint>;
+
+  /** The working-tree snapshot STORE for this session (v1.2, spec/14 §2). Created once at
+   *  session_start by detectAndCreate (P3.M1.T2.S1) when config.revert.enabled; undefined
+   *  otherwise (and until that task wires it). The turn_start/agent_end capture hooks (P3.M1.T1)
+   *  read it; rewindExecute (P4.M2.T1) reads it. OPTIONAL so a hand-built runtime type-checks;
+   *  freshRuntime leaves it undefined (assigned by index.ts session_start). In-memory,
+   *  non-persisted; auto-cleared (resetRuntime deletes the entry on session_start; clearAll wipes
+   *  all on shutdown). Backend "none" (NoOpStore) is a valid assignment — the hooks guard on it. */
+  store?: SnapshotStore;
 }
 
 /**

@@ -4,8 +4,18 @@ import { createHash } from "node:crypto";
 import { readdir, stat, unlink as fsUnlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { AsyncMutex, type SnapshotStore, type RestoreOpts, type RestoreResult } from "./store.js";
-import { normalizeRelPath, isDangerousWorkspaceRel, resolveSafeWorkspacePath, DANGEROUS_DIRS } from "./paths.js";
+import {
+  AsyncMutex,
+  type SnapshotStore,
+  type RestoreOpts,
+  type RestoreResult,
+} from "./store.js";
+import {
+  normalizeRelPath,
+  isDangerousWorkspaceRel,
+  resolveSafeWorkspacePath,
+  DANGEROUS_DIRS,
+} from "./paths.js";
 import type { MulliganConfig } from "../config.js";
 
 const execFileDefault = promisify(execFileCb);
@@ -87,7 +97,11 @@ export interface GitBackendDeps {
    * Default: real recursive fs walk. Tests inject a canned {oversizePaths, totalBytes}. Takes
    * maxFileBytes so the DI seam signature stays clean (the scan owns the per-file-size decision).
    */
-  scan?: (repoRoot: string, excludeGlobs: readonly string[], maxFileBytes: number) => Promise<CapScan>;
+  scan?: (
+    repoRoot: string,
+    excludeGlobs: readonly string[],
+    maxFileBytes: number,
+  ) => Promise<CapScan>;
   /**
    * Default: node:fs/promises.unlink. The delete-created-files path in restore() (S2) calls this;
    * tests inject a recording fake to assert unlink targets (never node_modules/.git). Optional +
@@ -107,7 +121,8 @@ export interface GitBackendDeps {
  * `update-ref -d refs/mulligan/snapshots/turn/*` reclaims every turn-scoped snapshot in one pass.
  */
 function refForLabel(label: string): string {
-  if (label.startsWith("ckpt:")) return `refs/mulligan/snapshots/checkpoint/${label.slice(5)}`;
+  if (label.startsWith("ckpt:"))
+    return `refs/mulligan/snapshots/checkpoint/${label.slice(5)}`;
   return `refs/mulligan/snapshots/turn/${label}`;
 }
 
@@ -185,7 +200,11 @@ export class GitBackend implements SnapshotStore {
   private readonly sessionDir: string | null;
   private readonly mutex = new AsyncMutex();
   private readonly exec: GitExec;
-  private readonly scan: (root: string, globs: readonly string[], maxFileBytes: number) => Promise<CapScan>;
+  private readonly scan: (
+    root: string,
+    globs: readonly string[],
+    maxFileBytes: number,
+  ) => Promise<CapScan>;
   private readonly unlink: (path: string) => Promise<void>;
   // resolved lazily by ensureInit():
   private repoRoot!: string;
@@ -216,7 +235,9 @@ export class GitBackend implements SnapshotStore {
     } else if (sessionDir) {
       this.storageDir = resolve(sessionDir, "mulligan");
     } else {
-      throw new Error("GitBackend: storageDir is null and no sessionDir provided");
+      throw new Error(
+        "GitBackend: storageDir is null and no sessionDir provided",
+      );
     }
     this.exec = deps?.exec ?? (execFileDefault as GitExec);
     this.scan = deps?.scan ?? scanForCaps;
@@ -253,10 +274,14 @@ export class GitBackend implements SnapshotStore {
     this.initPromise = (async () => {
       // (1) READ-ONLY resolve against the USER's repo — cwd, NO shadow env. Guarantee #1.
       const top = (
-        await this.exec("git", ["rev-parse", "--show-toplevel"], { cwd: this.cwd })
+        await this.exec("git", ["rev-parse", "--show-toplevel"], {
+          cwd: this.cwd,
+        })
       ).stdout.trim();
       const gitDir = (
-        await this.exec("git", ["rev-parse", "--absolute-git-dir"], { cwd: this.cwd })
+        await this.exec("git", ["rev-parse", "--absolute-git-dir"], {
+          cwd: this.cwd,
+        })
       ).stdout.trim();
       this.repoRoot = top || this.cwd; // PRD: repo-root-keyed; fall back to resolved cwd
       this.sourceGitDir = gitDir;
@@ -312,7 +337,9 @@ export class GitBackend implements SnapshotStore {
         return null;
       }
       for (const p of oversizePaths)
-        console.warn(`[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${p}`);
+        console.warn(
+          `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${p}`,
+        );
       // PATHSPECS: include all (.), then exclude globs + oversize, as `:!` single-argv elements.
       const pathspecs = [
         ".",
@@ -320,16 +347,28 @@ export class GitBackend implements SnapshotStore {
         ...oversizePaths.map((p) => `:!${p}`),
       ];
       // (3) stage into the SHADOW index — gitignored files INCLUDED via -f (spec §3).
-      await this.exec("git", ["add", "--all", "-f", "--", ...pathspecs], this.shadowEnv());
+      await this.exec(
+        "git",
+        ["add", "--all", "-f", "--", ...pathspecs],
+        this.shadowEnv(),
+      );
       // (4) write-tree → tree SHA (shadow DB).
-      const treeSha = (await this.exec("git", ["write-tree"], this.shadowEnv())).stdout.trim();
+      const treeSha = (
+        await this.exec("git", ["write-tree"], this.shadowEnv())
+      ).stdout.trim();
       // (5) commit-tree → commit SHA (shadow DB; NO ref moved). Optional -p parent for history.
       const commitArgs = ["commit-tree", treeSha];
       if (this.lastCommit) commitArgs.push("-p", this.lastCommit);
       commitArgs.push("-m", `snapshot:${label}`);
-      const commitSha = (await this.exec("git", commitArgs, this.shadowEnv())).stdout.trim();
+      const commitSha = (
+        await this.exec("git", commitArgs, this.shadowEnv())
+      ).stdout.trim();
       // (6) pin via a protected ref in the SHADOW repo (namespace: turn/* | checkpoint/<name>).
-      await this.exec("git", ["update-ref", refForLabel(label), commitSha], this.shadowEnv());
+      await this.exec(
+        "git",
+        ["update-ref", refForLabel(label), commitSha],
+        this.shadowEnv(),
+      );
       this.lastCommit = commitSha;
       this.capturesThisTurn++;
       return commitSha;
@@ -354,7 +393,11 @@ export class GitBackend implements SnapshotStore {
    */
   private shadowEnv(): { env: NodeJS.ProcessEnv; maxBuffer: number } {
     return {
-      env: { ...process.env, GIT_DIR: this.shadowDir, GIT_WORK_TREE: this.repoRoot },
+      env: {
+        ...process.env,
+        GIT_DIR: this.shadowDir,
+        GIT_WORK_TREE: this.repoRoot,
+      },
       maxBuffer: 16 * 1024 * 1024,
     };
   }
@@ -382,7 +425,13 @@ export class GitBackend implements SnapshotStore {
       if (!afterRef || paths.length === 0) return []; // no drift baseline / nothing to check ⇒ allow
       const out = await this.exec(
         "git",
-        ["diff", "--name-only", afterRef, "--", ...paths.filter((p) => p.length > 0)],
+        [
+          "diff",
+          "--name-only",
+          afterRef,
+          "--",
+          ...paths.filter((p) => p.length > 0),
+        ],
         this.shadowEnv(),
       );
       return out.stdout
@@ -446,7 +495,13 @@ export class GitBackend implements SnapshotStore {
       await this.ensureInit();
       const out = await this.exec(
         "git",
-        ["for-each-ref", "--points-at", ref, "--format=%(refname)", "refs/mulligan/snapshots/"],
+        [
+          "for-each-ref",
+          "--points-at",
+          ref,
+          "--format=%(refname)",
+          "refs/mulligan/snapshots/",
+        ],
         this.shadowEnv(),
       );
       const refnames = out.stdout
@@ -460,6 +515,53 @@ export class GitBackend implements SnapshotStore {
       // E27 best-effort: any git error ⇒ warn + void (objects linger until next GC; never blocks).
       console.warn(
         `[mulligan] snapshot.retire failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY `refs/mulligan/snapshots/turn/*`
+   * ref (the whole turn namespace — reclaims prior turns whose in-memory entry no longer exists;
+   * `checkpoint/*` is EXEMPT via the for-each-ref PREFIX arg) AND physically reclaims via
+   * `git gc --auto --prune=now` (self-throttling — a cheap no-op under the loose-object threshold).
+   * Serialized by the mutex (spec §4.3).
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any git error (incl. a missing shadow repo on a fresh
+   * session — ensureInit runs first, mirroring capture/retire) is caught, warned, and returns void
+   * (objects linger until the next GC pass or `session_shutdown`; never blocks the turn). The
+   * for-each-ref PREFIX `refs/mulligan/snapshots/turn/` matches the WHOLE turn namespace
+   * (turn/turn + turn/turn-after) but NOT checkpoint/* — that is the exempt boundary. Called by the
+   * turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
+   */
+  async gc(): Promise<void> {
+    const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
+    try {
+      await this.ensureInit();
+      // (1) namespace-delete: drop EVERY refs/mulligan/snapshots/turn/* (checkpoint/* exempt).
+      const out = await this.exec(
+        "git",
+        [
+          "for-each-ref",
+          "--format=%(refname)",
+          "refs/mulligan/snapshots/turn/",
+        ],
+        this.shadowEnv(),
+      );
+      const refnames = out.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      for (const rn of refnames) {
+        await this.exec("git", ["update-ref", "-d", rn], this.shadowEnv());
+      }
+      // (2) physical reclaim — self-throttling (cheap no-op under the loose-object threshold).
+      await this.exec("git", ["gc", "--auto", "--prune=now"], this.shadowEnv());
+    } catch (err) {
+      // E27 best-effort: any git error ⇒ warn + void (objects linger until next gc / shutdown).
+      console.warn(
+        `[mulligan] snapshot.gc failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
       release();
@@ -501,7 +603,13 @@ export class GitBackend implements SnapshotStore {
    */
   async restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult> {
     const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
-    const result: RestoreResult = { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+    const result: RestoreResult = {
+      reverted: [],
+      deleted: [],
+      failed: [],
+      skipped: [],
+      refused: [],
+    };
     try {
       await this.ensureInit();
       // Neither flag set ⇒ nothing to do (rewindExecute normally guards this, but restore is
@@ -515,9 +623,16 @@ export class GitBackend implements SnapshotStore {
       // (b) REVERT modified + deleted-from-worktree files vs beforeRef (index===beforeRef after read-tree).
       if (opts.revertFileChanges) {
         const diff = (
-          await this.exec("git", ["diff", "--name-only", "--diff-filter=MD"], this.shadowEnv())
+          await this.exec(
+            "git",
+            ["diff", "--name-only", "--diff-filter=MD"],
+            this.shadowEnv(),
+          )
         ).stdout;
-        for (const rel of diff.split("\n").map((s) => s.trim()).filter((s) => s.length > 0)) {
+        for (const rel of diff
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)) {
           // Safety floor: never revert a dangerous path (belt-and-suspenders; the spec excludes these
           // at capture, but defend here too so a hand-crafted beforeRef cannot wedge .git/.pi/node_modules).
           if (isDangerousWorkspaceRel(rel)) continue;
@@ -542,9 +657,16 @@ export class GitBackend implements SnapshotStore {
           ...DANGEROUS_DIRS.map((d) => `:!${d}`),
         ];
         const others = (
-          await this.exec("git", ["ls-files", "--others", "--", ...othersSpecs], this.shadowEnv())
+          await this.exec(
+            "git",
+            ["ls-files", "--others", "--", ...othersSpecs],
+            this.shadowEnv(),
+          )
         ).stdout;
-        for (const rel of others.split("\n").map((s) => s.trim()).filter((s) => s.length > 0)) {
+        for (const rel of others
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)) {
           if (isDangerousWorkspaceRel(rel)) continue; // belt-and-suspenders (ls-files :! already filters)
           try {
             // resolveSafeWorkspacePath throws on `..`/absolute escape → caught below ⇒ failed[] (E27).

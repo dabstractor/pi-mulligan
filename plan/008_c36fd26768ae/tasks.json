@@ -317,14 +317,14 @@
               "type": "Task",
               "id": "P3.M1.T1",
               "title": "turn_start + agent_end capture hooks",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Register two new event handlers (only active when config.revert.enabled). turn_start runs prompt-boundary GC then captures the before-snapshot. agent_end captures the after-snapshot for dirty-check drift detection.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T1.S1",
                   "title": "turn_start hook (prompt-boundary GC + capture 'turn')",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M1.T1.S2",
@@ -341,7 +341,7 @@
                   "type": "Subtask",
                   "id": "P3.M1.T1.S2",
                   "title": "agent_end hook (capture 'turn-after' for dirtyCheck)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S1"

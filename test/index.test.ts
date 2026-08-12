@@ -91,11 +91,11 @@ describe("index.ts extension factory", () => {
     );
   });
 
-  it("arms the 5 event handlers", () => {
+  it("arms the 6 event handlers", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
 
-    const expected = ["context", "tool_result", "turn_end", "session_start", "session_shutdown"];
+    const expected = ["context", "tool_result", "turn_end", "turn_start", "session_start", "session_shutdown"];
     for (const event of expected) {
       expect(handlers[event], `expected handler armed for "${event}"`).toBeTypeOf("function");
     }
@@ -105,7 +105,7 @@ describe("index.ts extension factory", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
     expect(Object.keys(handlers).sort()).toEqual(
-      ["context", "session_shutdown", "session_start", "tool_result", "turn_end"].sort(),
+      ["context", "session_shutdown", "session_start", "tool_result", "turn_end", "turn_start"].sort(),
     );
   });
 

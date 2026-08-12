@@ -438,6 +438,80 @@ describe("GitBackend.retire — SHA→refname resolution", () => {
   });
 });
 
+describe("GitBackend.gc — prompt-boundary namespace-delete + reclaim (spec/14 §5)", () => {
+  it("issues for-each-ref --format <prefix> (turn/) then update-ref -d <each turn refname> then gc --auto --prune=now", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: {
+        "for-each-ref": "refs/mulligan/snapshots/turn/turn\nrefs/mulligan/snapshots/turn/turn-after\n",
+      },
+    });
+    await gb.gc();
+    const fer = findCmd(calls, "for-each-ref")!;
+    // the PREFIX arg targets the WHOLE turn namespace (turn/turn + turn/turn-after) — NOT checkpoint/*
+    expect(fer.args).toEqual(["for-each-ref", "--format=%(refname)", "refs/mulligan/snapshots/turn/"]);
+    expect(fer.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+    const updates = calls.filter((c) => c.args[0] === "update-ref" && c.args[1] === "-d");
+    expect(updates).toHaveLength(2);
+    expect(updates[0]!.args).toEqual(["update-ref", "-d", "refs/mulligan/snapshots/turn/turn"]);
+    expect(updates[1]!.args).toEqual(["update-ref", "-d", "refs/mulligan/snapshots/turn/turn-after"]);
+    for (const u of updates) expect(u.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+    // physical reclaim: git gc --auto --prune=now (self-throttling)
+    const gcCmd = findCmd(calls, "gc")!;
+    expect(gcCmd.args).toEqual(["gc", "--auto", "--prune=now"]);
+    expect(gcCmd.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+  });
+
+  it("the for-each-ref PREFIX never matches checkpoint/* (checkpoint namespace exempt)", async () => {
+    // Even if checkpoint refs exist on disk, the turn/ prefix arg excludes them from the enumeration,
+    // so no update-ref -d is ever issued for a checkpoint refname here.
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { "for-each-ref": "refs/mulligan/snapshots/turn/turn\n" }, // only turn/ returned
+    });
+    await gb.gc();
+    const updates = calls.filter((c) => c.args[0] === "update-ref" && c.args[1] === "-d");
+    expect(updates.every((u) => !u.args[2]!.includes("checkpoint"))).toBe(true);
+  });
+
+  it("empty for-each-ref result ⇒ still runs git gc (reclaim is unconditional); no update-ref", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { stdoutByCmd: { "for-each-ref": "" } });
+    await gb.gc();
+    expect(calls.some((c) => c.args[0] === "update-ref" && c.args[1] === "-d")).toBe(false);
+    // gc --auto --prune=now runs regardless (physical reclaim is part of the pass)
+    expect(findCmd(calls, "gc")).toBeDefined();
+  });
+
+  it("never rejects (for-each-ref failure ⇒ warn + void)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { throwOn: { cmd: "for-each-ref", call: 1 } });
+    await expect(gb.gc()).resolves.toBeUndefined(); // NOT a rejection
+  });
+
+  it("never rejects (git gc failure ⇒ warn + void)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { "for-each-ref": "refs/mulligan/snapshots/turn/turn\n" },
+      throwOn: { cmd: "gc", call: 1 },
+    });
+    await expect(gb.gc()).resolves.toBeUndefined(); // NOT a rejection
+  });
+
+  it("acquires the mutex (serialized with capture/restore/retire — §4.3)", async () => {
+    // The mutex is real; this is a smoke that gc reaches + releases it (no deadlock). A capture
+    // running concurrently would serialize; here we just confirm gc does not hang.
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, {
+      stdoutByCmd: { "for-each-ref": "refs/mulligan/snapshots/turn/turn\n" },
+    });
+    await Promise.all([gb.gc(), gb.gc()]); // two concurrent gc's must both complete (mutex serializes)
+    // both ran a for-each-ref (each acquired the mutex in turn)
+    const fers = calls.filter((c) => c.args[0] === "for-each-ref");
+    expect(fers.length).toBe(2);
+  });
+});
+
 describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
   it("issues read-tree <beforeRef> then per-path checkout -- <path>, BOTH with env.GIT_DIR===shadow", async () => {
     const calls: Call[] = [];

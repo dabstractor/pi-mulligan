@@ -115,6 +115,16 @@ export interface SnapshotStore {
    * (spec §5) retires turn/* refs en masse. spec/14 §2, §5. IMPLEMENTED BY: git/cas.
    */
   retire(ref: string): Promise<void>;
+
+  /**
+   * The prompt-boundary reclamation pass (spec/14 §5). Drops ALL `turn/*` snapshot refs/manifests
+   * (the whole namespace — reclaims prior turns whose in-memory entry no longer exists) AND
+   * physically reclaims (`git gc --auto --prune=now` for git / blob mark-sweep for cas).
+   * `checkpoint/*` is EXEMPT (separate namespace). Serialized by the mutex (§4.3). BEST-EFFORT
+   * (E27): NEVER rejects — failure logs + degrades only to slower reclamation; never blocks the
+   * turn. Called by the turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1).
+   */
+  gc(): Promise<void>;
 }
 
 /**
@@ -222,7 +232,11 @@ export class AsyncMutex {
  * only proves the workspace is a git repo, it does NOT locate the repo root.
  */
 interface GitBackendCtor {
-  new (cwd: string, revertConfig: MulliganConfig["revert"], sessionDir?: string | null): SnapshotStore;
+  new (
+    cwd: string,
+    revertConfig: MulliganConfig["revert"],
+    sessionDir?: string | null,
+  ): SnapshotStore;
 }
 
 /**
@@ -232,7 +246,11 @@ interface GitBackendCtor {
  * safe, compatible narrowing of this cast — see detectAndCreate's "Integration contract note".)
  */
 interface CasBackendCtor {
-  new (cwd: string, revertConfig: MulliganConfig["revert"], sessionDir?: string | null): SnapshotStore;
+  new (
+    cwd: string,
+    revertConfig: MulliganConfig["revert"],
+    sessionDir?: string | null,
+  ): SnapshotStore;
 }
 
 /**
@@ -320,7 +338,10 @@ export class NoOpStore implements SnapshotStore {
     return []; // no drift info available from a no-op store
   }
 
-  async restore(_beforeRef: string, _opts: RestoreOpts): Promise<RestoreResult> {
+  async restore(
+    _beforeRef: string,
+    _opts: RestoreOpts,
+  ): Promise<RestoreResult> {
     return { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
   }
 
@@ -330,6 +351,10 @@ export class NoOpStore implements SnapshotStore {
 
   async retire(_ref: string): Promise<void> {
     /* no-op — nothing to retire */
+  }
+
+  async gc(): Promise<void> {
+    /* no-op — nothing to reclaim in a no-op store */
   }
 }
 
@@ -389,7 +414,11 @@ export async function detectAndCreate(
 
     // (2) resolve storage dir + writability check. DISTINCT-reason variant: a NARROW catch around
     //     just mkdir+access yields the crisp "not writable" reason (vs a generic fail-open message).
-    const storageDir = resolveStorageDir(revertConfig.storageDir, sessionDir, cwd);
+    const storageDir = resolveStorageDir(
+      revertConfig.storageDir,
+      sessionDir,
+      cwd,
+    );
     try {
       await mkdir(storageDir, { recursive: true }); // mkdir -p (idempotent — recursive:true)
       await access(storageDir, constants.W_OK); // rejects if not writable

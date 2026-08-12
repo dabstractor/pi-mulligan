@@ -5,11 +5,16 @@ import { setLogFile } from "./log.js";
 import { resetRuntime, clearAll } from "./runtime.js";
 import { registerFilterHandler } from "./filter.js";
 import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
+import { registerTurnStartCapture } from "./capture.js";
 import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
 import { makeCancelTool } from "./tools/cancel.js"; // 4th agent-callable tool (P3.M1.T3.S1)
-import { makeCheckpointCommand, makeCheckpointRevokeCommand, makeAuditCommand } from "./commands.js"; // 3 human slash commands (P2.M1.T1.S1 + P2.M2.T1.S1)
+import {
+  makeCheckpointCommand,
+  makeCheckpointRevokeCommand,
+  makeAuditCommand,
+} from "./commands.js"; // 3 human slash commands (P2.M1.T1.S1 + P2.M2.T1.S1)
 import { reconcileBanner } from "./banner.js"; // [P2.M3.T1.S3 / spec/13 §5] restore/refresh the active-checkpoint banner at the refresh points
 
 /**
@@ -60,14 +65,19 @@ export default function (pi: ExtensionAPI): void {
   //    tool factories above). makeAuditCommand's `pi` is captured for registration-uniformity but
   //    UNUSED — its reads go through ctx/pure helpers (spec/13 §4; P2.M2.T1.S1). No try/catch — fail-fast.
   pi.registerCommand("mulligan_checkpoint", makeCheckpointCommand(pi));
-  pi.registerCommand("mulligan_checkpoint_revoke", makeCheckpointRevokeCommand(pi));
+  pi.registerCommand(
+    "mulligan_checkpoint_revoke",
+    makeCheckpointRevokeCommand(pi),
+  );
   pi.registerCommand("mulligan_audit", makeAuditCommand(pi)); // human-facing audit (spec/13 §4) — SAME report
   //   as the agent's mulligan_audit tool, surfaced to the human via ctx.ui.notify (never event.messages).
 
-  // 5. Arm the 3 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
+  // 5. Arm the 4 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart
   registerBloatReminder(pi); // pi.on("tool_result", bloatReminderHandler) — Nudge A
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
+  registerTurnStartCapture(pi); // pi.on("turn_start", …) — v1.2 working-tree revert prompt-boundary
+  // GC + capture("turn"). Self-guards on revert.enabled (fail-open).
 
   // 6. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
   //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory
@@ -85,9 +95,9 @@ export default function (pi: ExtensionAPI): void {
     setLogFile(getConfig().log.file);
     resetRuntime(ctx.sessionManager.getSessionId());
     reconcileBanner(ctx); // [P2.M3.T1.S3 / spec/13 §5] restore the banner on every session start
-                           // (startup|reload|new|resume|fork) — so /resume never silently drops the reminder.
-                           // Bare call (no wrapper): reconcileBanner NEVER throws (S2), matching the handler's
-                           // fail-open convention (its other callees are also fail-open).
+    // (startup|reload|new|resume|fork) — so /resume never silently drops the reminder.
+    // Bare call (no wrapper): reconcileBanner NEVER throws (S2), matching the handler's
+    // fail-open convention (its other callees are also fail-open).
   });
 
   // 7. session_shutdown → wipe ALL per-session runtimes (full process teardown). Never throws.

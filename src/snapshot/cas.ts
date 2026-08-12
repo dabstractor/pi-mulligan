@@ -9,8 +9,17 @@ import {
   unlink as fsUnlink,
 } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
-import { AsyncMutex, type SnapshotStore, type RestoreOpts, type RestoreResult } from "./store.js";
-import { normalizeRelPath, isDangerousWorkspaceRel, resolveSafeWorkspacePath } from "./paths.js";
+import {
+  AsyncMutex,
+  type SnapshotStore,
+  type RestoreOpts,
+  type RestoreResult,
+} from "./store.js";
+import {
+  normalizeRelPath,
+  isDangerousWorkspaceRel,
+  resolveSafeWorkspacePath,
+} from "./paths.js";
 import type { MulliganConfig } from "../config.js";
 
 /**
@@ -140,7 +149,8 @@ export function serializeManifest(m: CasManifest): string {
  */
 export function parseManifest(json: string): CasManifest {
   const m = JSON.parse(json) as CasManifest;
-  if (m.version !== 1) throw new Error(`unsupported CAS manifest version: ${m.version}`);
+  if (m.version !== 1)
+    throw new Error(`unsupported CAS manifest version: ${m.version}`);
   return m;
 }
 
@@ -165,7 +175,10 @@ export interface CasFs {
   /** stat() — S2's capture reads size/mtimeMs (S1's storeBlob does NOT stat). */
   stat(path: string): Promise<{ size: number; mtimeMs: number }>;
   /** readdir({withFileTypes:true}) — S2's capture walks the cwd tree. */
-  readdir(path: string, opts: { withFileTypes: true }): Promise<import("node:fs").Dirent[]>;
+  readdir(
+    path: string,
+    opts: { withFileTypes: true },
+  ): Promise<import("node:fs").Dirent[]>;
   /** unlink — S3's restore deleteCreatedFiles removes span-created worktree files (external_deps §2). */
   unlink(path: string): Promise<void>;
 }
@@ -245,7 +258,9 @@ export class CasBackend implements SnapshotStore {
     } else if (sessionDir) {
       this.storageDir = resolve(sessionDir, "mulligan");
     } else {
-      throw new Error("CasBackend: storageDir is null and no sessionDir provided");
+      throw new Error(
+        "CasBackend: storageDir is null and no sessionDir provided",
+      );
     }
     this.fs = deps?.fs ?? realFs;
   }
@@ -334,7 +349,10 @@ export class CasBackend implements SnapshotStore {
   private async loadPrevEntries(
     label: string,
   ): Promise<Map<string, { hash: string; size: number; mtime: number }>> {
-    const map = new Map<string, { hash: string; size: number; mtime: number }>();
+    const map = new Map<
+      string,
+      { hash: string; size: number; mtime: number }
+    >();
     try {
       const p = this.manifestPath(label);
       await this.fs.access(p); // rejects if absent → empty map (first capture for this label)
@@ -362,7 +380,11 @@ export class CasBackend implements SnapshotStore {
   private async walkTree(
     absDir: string,
     excludeSet: Set<string>,
-    visit: (rel: string, abs: string, st: { size: number; mtimeMs: number }) => Promise<void>,
+    visit: (
+      rel: string,
+      abs: string,
+      st: { size: number; mtimeMs: number },
+    ) => Promise<void>,
   ): Promise<void> {
     let entries: import("node:fs").Dirent[];
     try {
@@ -475,12 +497,25 @@ export class CasBackend implements SnapshotStore {
       files[rel] = { hash, size: st.size, mtime: st.mtimeMs, existed: true };
       totalBytes += st.size;
     }
-    const manifest: CasManifest = { version: 1, label, turnIndex: 0, ts: Date.now(), files };
-    await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
-    await this.fs.writeFile(this.manifestPath(label), Buffer.from(serializeManifest(manifest), "utf8"));
+    const manifest: CasManifest = {
+      version: 1,
+      label,
+      turnIndex: 0,
+      ts: Date.now(),
+      files,
+    };
+    await this.fs.mkdir(join(this.storageDir, "manifests"), {
+      recursive: true,
+    });
+    await this.fs.writeFile(
+      this.manifestPath(label),
+      Buffer.from(serializeManifest(manifest), "utf8"),
+    );
     this.capturesThisTurn++;
     if (partial) {
-      console.warn(`[mulligan] snapshot.capture: wrote PARTIAL manifest for ${label} (maxTotalBytes cap)`);
+      console.warn(
+        `[mulligan] snapshot.capture: wrote PARTIAL manifest for ${label} (maxTotalBytes cap)`,
+      );
     }
     return label; // ref === label
   }
@@ -512,7 +547,10 @@ export class CasBackend implements SnapshotStore {
    * @returns the manifest label (ref === label; `<storageDir>/manifests/<label>.json` is resolvable
    *          by S3's has/retire/dirtyCheck/restore). `null` only on count-cap abort OR a thrown error.
    */
-  async capture(label: string, explicitPaths?: string[]): Promise<string | null> {
+  async capture(
+    label: string,
+    explicitPaths?: string[],
+  ): Promise<string | null> {
     const release = await this.mutex.acquire(); // spec §4.3 — whole body serialized
     try {
       // Cap 1 — per-turn snapshot count (parity with GitBackend; reset by lifecycle P3).
@@ -531,7 +569,9 @@ export class CasBackend implements SnapshotStore {
       const files: Record<string, CasManifestEntry> = {};
       let totalBytes = 0;
       let partial = false;
-      const excludeSet = new Set(this.cfg.excludeGlobs.map((g) => g.toLowerCase()));
+      const excludeSet = new Set(
+        this.cfg.excludeGlobs.map((g) => g.toLowerCase()),
+      );
 
       await this.walkTree(this.cwd, excludeSet, async (rel, abs, st) => {
         // oversize → fail-closed skip+warn (never silently claim restorable)
@@ -544,7 +584,12 @@ export class CasBackend implements SnapshotStore {
         // mtime/size short-circuit — reuse stored hash, NO read/re-hash/store
         const pe = prev.get(rel);
         if (pe && pe.size === st.size && pe.mtime === st.mtimeMs) {
-          files[rel] = { hash: pe.hash, size: st.size, mtime: st.mtimeMs, existed: true };
+          files[rel] = {
+            hash: pe.hash,
+            size: st.size,
+            mtime: st.mtimeMs,
+            existed: true,
+          };
           return;
         }
         // byte budget → stop accepting NEW data, mark PARTIAL (E29). NOT abort (CAS is file-by-file;
@@ -563,12 +608,25 @@ export class CasBackend implements SnapshotStore {
         totalBytes += st.size;
       });
 
-      const manifest: CasManifest = { version: 1, label, turnIndex: 0, ts: Date.now(), files };
-      await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
-      await this.fs.writeFile(this.manifestPath(label), Buffer.from(serializeManifest(manifest), "utf8"));
+      const manifest: CasManifest = {
+        version: 1,
+        label,
+        turnIndex: 0,
+        ts: Date.now(),
+        files,
+      };
+      await this.fs.mkdir(join(this.storageDir, "manifests"), {
+        recursive: true,
+      });
+      await this.fs.writeFile(
+        this.manifestPath(label),
+        Buffer.from(serializeManifest(manifest), "utf8"),
+      );
       this.capturesThisTurn++;
       if (partial) {
-        console.warn(`[mulligan] snapshot.capture: wrote PARTIAL manifest for ${label} (maxTotalBytes cap)`);
+        console.warn(
+          `[mulligan] snapshot.capture: wrote PARTIAL manifest for ${label} (maxTotalBytes cap)`,
+        );
       }
       return label; // ref === label
     } catch (err) {
@@ -683,7 +741,13 @@ export class CasBackend implements SnapshotStore {
    */
   async restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult> {
     const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
-    const result: RestoreResult = { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+    const result: RestoreResult = {
+      reverted: [],
+      deleted: [],
+      failed: [],
+      skipped: [],
+      refused: [],
+    };
     try {
       // Neither flag set ⇒ nothing to do (rewindExecute normally guards this, but restore is
       // best-effort + defensive — return the 5 empty buckets without touching the fs).
@@ -719,7 +783,11 @@ export class CasBackend implements SnapshotStore {
           } catch {
             result.failed.push(rel); // per-path best-effort (E27) — restore still resolves
           }
-        } else if (!entry.existed && opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles) {
+        } else if (
+          !entry.existed &&
+          opts.deleteCreatedFiles &&
+          this.cfg.allowDeleteCreatedFiles
+        ) {
           // TWO-FLAG AND: existed:false = created during span (captured by the P3 hook just before
           // the creating write). Delete to recreate the pre-span absence. explicit-paths path (no walk).
           try {
@@ -737,8 +805,14 @@ export class CasBackend implements SnapshotStore {
       //     explicit-paths does NOT walk (its created files are the existed:false entries above; bash-
       //     created files are deliberately NOT promised restorable — §4.2). Mirrors git.ts ls-files
       //     --others. Belt-and-suspenders: walkTree already prunes dangerous dirs + excludeGlobs.
-      if (opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles && this.cfg.nonGitMode === "cas") {
-        const excludeSet = new Set(this.cfg.excludeGlobs.map((g) => g.toLowerCase()));
+      if (
+        opts.deleteCreatedFiles &&
+        this.cfg.allowDeleteCreatedFiles &&
+        this.cfg.nonGitMode === "cas"
+      ) {
+        const excludeSet = new Set(
+          this.cfg.excludeGlobs.map((g) => g.toLowerCase()),
+        );
         await this.walkTree(this.cwd, excludeSet, async (rel, abs) => {
           if (manifest.files[rel]) return; // in beforeRef ⇒ not created during span
           if (isDangerousWorkspaceRel(rel)) return; // belt-and-suspenders (walkTree already prunes)
@@ -809,6 +883,98 @@ export class CasBackend implements SnapshotStore {
           `[mulligan] snapshot.retire failed: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY turn/* manifest (the whole turn
+   * namespace — reclaims prior turns whose in-memory entry no longer exists) AND mark-sweeps
+   * unreferenced content blobs. `checkpoint/*` manifests (filenames starting with `ckpt`) are
+   * EXEMPT: kept, and their referenced blob hashes are collected into the surviving set so the
+   * mark-sweep preserves their blobs. Serialized by the mutex (spec §4.3).
+   *
+   * CAS has no native reachability GC (spec §5 "CAS backend reclamation — the non-git analog"), so
+   * this implements the mark-sweep explicitly: turn manifests are deleted FIRST, then the surviving
+   * set is the union of checkpoint-manifest blob hashes (exactly PRD §5 "the surviving set is the
+   * active snapshots' union"), then any blob NOT in the surviving set is reclaimed.
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any fs error is caught, warned, and returns void (objects
+   * linger until the next GC pass / `session_shutdown`; never blocks the turn). A missing manifests
+   * or blobs dir ⇒ early void (nothing to GC). Called by the turn_start capture hook (P3.M1.T1.S1)
+   * + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
+   */
+  async gc(): Promise<void> {
+    const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
+    try {
+      const mdir = join(this.storageDir, "manifests");
+      let names: string[] = [];
+      try {
+        names = await this.fs
+          .readdir(mdir, { withFileTypes: true })
+          .then((ents) => ents.filter((e) => e.isFile()).map((e) => e.name));
+      } catch {
+        return; // no manifests dir ⇒ nothing to gc
+      }
+      // surviving = blob hashes still referenced by a surviving (checkpoint) manifest. Turn manifests
+      // are deleted BEFORE the sweep so only checkpoint blobs survive (the PRD §5 surviving set).
+      const surviving = new Set<string>();
+      for (const f of names) {
+        if (f.startsWith("ckpt")) {
+          // checkpoint manifest — EXEMPT: keep it, collect its blobs into the surviving set.
+          try {
+            const m = parseManifest(
+              (await this.fs.readFile(join(mdir, f))).toString("utf8"),
+            );
+            for (const e of Object.values(m.files))
+              if (e.hash) surviving.add(e.hash);
+          } catch {
+            /* corrupt checkpoint manifest — best-effort skip */
+          }
+          continue;
+        }
+        // turn/* manifest — DELETE (the reclamation). ref === label === manifest filename stem.
+        try {
+          await this.fs.unlink(join(mdir, f));
+        } catch {
+          /* already gone */
+        }
+      }
+      // mark-sweep: reclaim any blob referenced by NO surviving (checkpoint) manifest. Blobs are
+      // sharded across <2-hex-prefix>/<hash> subdirs (blobPath), so walk the blobs root recursively.
+      const bdir = join(this.storageDir, "blobs");
+      let shards: import("node:fs").Dirent[];
+      try {
+        shards = await this.fs.readdir(bdir, { withFileTypes: true });
+      } catch {
+        return; // no blobs dir ⇒ nothing to sweep
+      }
+      for (const shard of shards) {
+        if (!shard.isDirectory()) continue;
+        const shardDir = join(bdir, shard.name);
+        let blobFiles: import("node:fs").Dirent[];
+        try {
+          blobFiles = await this.fs.readdir(shardDir, { withFileTypes: true });
+        } catch {
+          continue; // unreadable shard ⇒ skip (best-effort)
+        }
+        for (const bf of blobFiles) {
+          if (!bf.isFile()) continue;
+          // blob filename = the hash (NO suffix — blobPath uses join(...,hash) directly).
+          if (!surviving.has(bf.name)) {
+            try {
+              await this.fs.unlink(join(shardDir, bf.name));
+            } catch {
+              /* already gone */
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[mulligan] snapshot.gc failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       release();
     }
