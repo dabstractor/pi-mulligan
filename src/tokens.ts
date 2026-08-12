@@ -125,6 +125,30 @@ export function estimateTokens(
 }
 
 /**
+ * estimateAgentTokens — the AGENT-ATTRIBUTABLE token count of a message list: the sum of estimateTokens
+ * over every message whose `role !== "user"` (D10 — spec/07 §2, spec/04 §5). User prompts are intentional
+ * ground-truth input, never bloat to shed, and the drift nudge prescribes rewind/shrink (which can only
+ * legitimately target agent output) — so a large user-supplied paste must NOT inflate the drift delta.
+ * Consumed by turnEndMetricHandler (P1.M2.T1.S2) as the agent-attributable `now` for the drift delta.
+ *
+ * Semantics: sums estimateTokens([msg]).tokens per non-user message (each message is ceiling-rounded
+ * independently — see estimateTokens' GOTCHA #5). A message with no `role` (or a non-record) is NOT "user" →
+ * counted (when in doubt, attribute to the agent). Pure, Pi-free, 0-import (reuses module-private readOwn).
+ * NEVER throws (estimateTokens + readOwn are both defensive — mirrors messageCharLength's discipline).
+ *
+ * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → 0
+ * @returns the agent-attributable token estimate (non-negative integer); empty/non-array → 0
+ */
+export function estimateAgentTokens(messages: MessageLike[] | null | undefined): number {
+  if (!Array.isArray(messages)) return 0;
+  let total = 0;
+  for (const msg of messages) {
+    if (readOwn(msg, "role") !== "user") total += estimateTokens([msg]).tokens;
+  }
+  return total;
+}
+
+/**
  * messageCharLength — the character length of one message's stringified content. Pure + defensive: a message with
  * no content / non-array blocks / a throwing accessor contributes ≥0 and never throws (GOTCHA #3). Module-local
  * (not exported); callers use estimateTokens([msg]) for per-message estimates (GOTCHA #5: divide once, at the top).
