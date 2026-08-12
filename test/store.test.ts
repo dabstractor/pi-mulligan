@@ -1,5 +1,32 @@
-import { describe, it, expect, expectTypeOf } from "vitest";
-import { AsyncMutex, type SnapshotStore, type RestoreOpts, type RestoreResult } from "../src/snapshot/store.js";
+import { describe, it, expect, expectTypeOf, afterEach } from "vitest";
+import {
+  AsyncMutex,
+  NoOpStore,
+  detectAndCreate,
+  type SnapshotStore,
+  type RestoreOpts,
+  type RestoreResult,
+} from "../src/snapshot/store.js";
+import type { MulliganConfig } from "../src/config.js";
+import { mkdtemp, mkdir, rm, chmod, access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCb);
+
+// A canonical valid revert config used across detectAndCreate tests (mirrors DEFAULT_CONFIG.revert).
+const REVERT_CFG: MulliganConfig["revert"] = {
+  enabled: true,
+  allowDeleteCreatedFiles: false,
+  nonGitMode: "cas",
+  storageDir: null,
+  maxFileBytes: 262144,
+  maxTotalBytes: 33554432,
+  maxSnapshotsPerTurn: 64,
+  excludeGlobs: [".git", "node_modules"],
+};
 
 // spec/14 §2 (the SnapshotStore interface + RestoreOpts + RestoreResult — verbatim), §4.3 (the
 // AsyncMutex serialization contract), spec/10 Tier 1 (pure-helper unit-test tier: vitest, .js
@@ -170,5 +197,195 @@ describe("SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex — type shap
   it("(type) AsyncMutex.acquire() returns Promise<() => void>", () => {
     expectTypeOf<AsyncMutex["acquire"]>().parameters.toEqualTypeOf<[]>();
     expectTypeOf<AsyncMutex["acquire"]>().returns.toEqualTypeOf<Promise<() => void>>();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P2.M1.T1.S2 — NoOpStore + detectAndCreate() factory tests.
+// spec/14 §2 ("Detection"), spec/14 E28 (fail-open), spec/14 §8 (storageDir resolution).
+//
+// TODAY-vs-AFTER behavior (document so future maintainers know the "backend none today" assertions
+// are INTENTIONAL, not bugs):
+//   - The git branch's dynamic `import("./git.js")` REJECTS today (git.ts ships in P2.M2.T1) →
+//     detectAndCreate fail-opens to NoOpStore (backend "none"). After P2.M2.T1 this flips to "git".
+//   - The cas branch's dynamic `import("./cas.js")` REJECTS today (cas.ts ships in P2.M3.T1) →
+//     detectAndCreate fail-opens to NoOpStore (backend "none"). After P2.M3.T1 this flips to "cas".
+// These tests pin CURRENT behavior so the suite stays green now AND act as regression sentinels later.
+//
+// House idiom: REAL temp dirs (os.mkdtemp) + a REAL `git init` — NOT mocks — so the genuine fail-open
+// path (including the real import-reject of an absent module) is exercised. afterEach restores
+// chmod 0o755 before rm() (read-only dirs block rm on some platforms). No module-scoped mutable
+// state in the SUT, so no beforeEach needed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("NoOpStore — fail-open terminal store (spec/14 §2, E28)", () => {
+  it("(a) describe() reports backend 'none' + the constructor reason", () => {
+    const store = new NoOpStore("no git repo and storage dir not writable");
+    expect(store.describe()).toEqual({
+      backend: "none",
+      reason: "no git repo and storage dir not writable",
+    });
+  });
+
+  it("(b) capture() returns null (SYNCHRONOUS — GOTCHA #1; revert unavailable)", () => {
+    const store = new NoOpStore("x");
+    expect(store.capture("turn")).toBeNull(); // null, NOT Promise<null>
+  });
+
+  it("(c) dirtyCheck() returns [] (no drift info available)", () => {
+    const store = new NoOpStore("x");
+    expect(store.dirtyCheck("after-ref", ["a.ts", "b.ts"])).toEqual([]);
+  });
+
+  it("(d) restore() returns the 5 EMPTY buckets (nothing was done — sync)", () => {
+    const store = new NoOpStore("x");
+    expect(store.restore("before-ref", { revertFileChanges: true, deleteCreatedFiles: true })).toEqual({
+      reverted: [],
+      deleted: [],
+      failed: [],
+      skipped: [],
+      refused: [],
+    });
+  });
+
+  it("(e) has() returns false (NoOpStore holds no refs)", () => {
+    const store = new NoOpStore("x");
+    expect(store.has("any-ref")).toBe(false);
+  });
+
+  it("(f) retire() is a no-op void (never throws)", () => {
+    const store = new NoOpStore("x");
+    expect(() => store.retire("any-ref")).not.toThrow();
+    expect(store.retire("any-ref")).toBeUndefined();
+  });
+
+  it("(g) satisfies the full SnapshotStore interface (all 6 methods present)", () => {
+    const store: SnapshotStore = new NoOpStore("reason"); // assignability proves interface conformance
+    expect(typeof store.describe).toBe("function");
+    expect(typeof store.capture).toBe("function");
+    expect(typeof store.dirtyCheck).toBe("function");
+    expect(typeof store.restore).toBe("function");
+    expect(typeof store.has).toBe("function");
+    expect(typeof store.retire).toBe("function");
+  });
+});
+
+describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () => {
+  // Tracks temp dirs to chmod-restore + rm in afterEach (read-only dirs block rm on some platforms).
+  const dirs: string[] = [];
+
+  afterEach(async () => {
+    for (const d of dirs) {
+      try {
+        await chmod(d, 0o755); // restore writability so rm() can clean up
+      } catch {
+        /* dir may already be gone */
+      }
+      try {
+        await rm(d, { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+    dirs.length = 0;
+  });
+
+  it("(a) NEVER throws — a non-existent cwd returns NoOpStore (E28)", async () => {
+    const badCwd = join(tmpdir(), `nonexistent-det-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // badCwd does NOT exist on disk → execFile rejects (ENOENT on cwd) → fail-open.
+    const store = await detectAndCreate(badCwd, REVERT_CFG, await mkdtemp(join(tmpdir(), "sess-")));
+    expect(store).toBeInstanceOf(NoOpStore);
+    expect(store.describe().backend).toBe("none");
+  });
+
+  it("(b) non-git dir + UNWRITABLE storage → NoOpStore, reason mentions 'writable'", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "nongit-"));
+    dirs.push(cwd);
+    const storageDir = await mkdtemp(join(tmpdir(), "ro-store-"));
+    dirs.push(storageDir);
+    await chmod(storageDir, 0o555); // read-only (no write/exec for owner) → access(W_OK) rejects
+    const cfg = { ...REVERT_CFG, storageDir };
+    const store = await detectAndCreate(cwd, cfg, null);
+    expect(store).toBeInstanceOf(NoOpStore);
+    const desc = store.describe();
+    expect(desc.backend).toBe("none");
+    expect((desc.reason ?? "").toLowerCase()).toContain("writable");
+  });
+
+  it("(c) non-git dir + WRITABLE storage → reaches cas branch → NoOpStore TODAY (./cas.js absent)",
+    async () => {
+      // TODAY: the dynamic import("./cas.js") rejects (cas.ts ships in P2.M3.T1) → fail-open to NoOpStore.
+      // AFTER P2.M3.T1: this returns a CasBackend and describe().backend === "cas".
+      const cwd = await mkdtemp(join(tmpdir(), "nongit-w-"));
+      dirs.push(cwd);
+      const storageDir = await mkdtemp(join(tmpdir(), "rw-store-"));
+      dirs.push(storageDir);
+      const cfg = { ...REVERT_CFG, storageDir };
+      const store = await detectAndCreate(cwd, cfg, null);
+      expect(store).toBeInstanceOf(NoOpStore);
+      expect(store.describe().backend).toBe("none");
+    });
+
+  it("(d) real `git init` dir → reaches git branch → NoOpStore TODAY (./git.js absent)", async () => {
+    // Guard: skip if `git` is not on PATH (rare in CI; real `git init` requires the binary).
+    let gitOk = true;
+    try {
+      await execFile("git", ["--version"]);
+    } catch {
+      gitOk = false;
+    }
+    if (!gitOk) {
+      console.warn("[store.test] git not on PATH — skipping real-`git init` detection test");
+      return; // vitest treats a returned-pending test as passed (no assertion); acceptable skip.
+    }
+
+    const gitDir = await mkdtemp(join(tmpdir(), "gitinit-"));
+    dirs.push(gitDir);
+    await execFile("git", ["init"], { cwd: gitDir });
+    const storageDir = await mkdtemp(join(tmpdir(), "git-store-"));
+    dirs.push(storageDir);
+    const cfg = { ...REVERT_CFG, storageDir };
+    // TODAY: detection reaches the git branch (rev-parse exit 0), but import("./git.js") rejects
+    // (git.ts ships in P2.M2.T1) → fail-open to NoOpStore. AFTER P2.M2.T1: backend === "git".
+    const store = await detectAndCreate(gitDir, cfg, null);
+    expect(store).toBeInstanceOf(NoOpStore);
+    expect(store.describe().backend).toBe("none");
+  });
+
+  it("(e) storageDir===null + sessionDir → default <sessionDir>/mulligan/ resolved (no throw)", async () => {
+    // cwd non-git; sessionDir writable → resolveStorageDir yields <sessionDir>/mulligan/, mkdir+access
+    // succeed → reaches cas branch → NoOpStore TODAY (./cas.js absent). AFTER P2.M3.T1: backend "cas".
+    const cwd = await mkdtemp(join(tmpdir(), "nongit-sess-"));
+    dirs.push(cwd);
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-"));
+    dirs.push(sessionDir);
+    const cfg = { ...REVERT_CFG, storageDir: null }; // null ⇒ default <sessionDir>/mulligan/
+    const store = await detectAndCreate(cwd, cfg, sessionDir);
+    // No throw; reaches the cas branch (fail-open NoOpStore today because ./cas.js is absent).
+    expect(store).toBeInstanceOf(NoOpStore);
+    expect(store.describe().backend).toBe("none");
+    // Side-check: the default <sessionDir>/mulligan/ was actually created (mkdir recursive ran).
+    const mulliganDir = join(sessionDir, "mulligan");
+    let created = false;
+    try {
+      await access(mulliganDir); // exists ⇒ resolveStorageDir + mkdir ran the default path
+      created = true;
+    } catch {
+      created = false;
+    }
+    expect(created).toBe(true);
+  });
+
+  it("(f) storageDir resolving INSIDE cwd → fail-open NoOpStore (belt-and-suspenders containment)", async () => {
+    // config.ts rejects inside-cwd storageDir at validation time, but resolveStorageDir re-checks
+    // (covers the sessionDir-default path). A storageDir inside cwd must fail-open, not pollute.
+    const cwd = await mkdtemp(join(tmpdir(), "inside-cwd-"));
+    dirs.push(cwd);
+    const insideDir = join(cwd, "nested-store");
+    await mkdir(insideDir, { recursive: true });
+    const cfg = { ...REVERT_CFG, storageDir: insideDir };
+    const store = await detectAndCreate(cwd, cfg, null);
+    expect(store).toBeInstanceOf(NoOpStore);
+    expect(store.describe().backend).toBe("none");
   });
 });

@@ -1,3 +1,11 @@
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
+import { access, mkdir, constants } from "node:fs/promises";
+import { resolve, relative, isAbsolute } from "node:path";
+import type { MulliganConfig } from "../config.js";
+
+const execFile = promisify(execFileCb);
+
 /**
  * The backend-pluggable working-tree snapshot STORE contract + the serialization primitive for the
  * v1.2 snapshot subsystem. spec/14-working-tree-revert.md §2 (placement: "src/snapshot/store.ts //
@@ -195,5 +203,207 @@ export class AsyncMutex {
       release = resolve; // THIS caller's release fn = resolve its own tail promise
     });
     return prev.then(() => release); // await the prev holder, then hand back our release fn
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 (P2.M1.T1.S2) — detectAndCreate() factory + NoOpStore + module-private helpers.
+// APPENDED below the S1 exports (SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex), which are
+// UNCHANGED. This is the ONLY git I/O in detection (a read-only `git rev-parse --git-dir`); all writes
+// live in the SHADOW repo inside GitBackend (P2.M2.T1). spec/14 §2 ("Detection"), spec/14 §8.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Constructor shape GitBackend (src/snapshot/git.ts, P2.M2.T1) MUST satisfy. LOCAL + UN-EXPORTED —
+ * exists ONLY to type the forward-compat dynamic-import cast below (not a public contract; P2.M2 may
+ * widen `implements` details freely as long as the ctor takes `(cwd, revertConfig)`). Repo-root
+ * resolution happens INSIDE GitBackend (its own `rev-parse --show-toplevel`); detectAndCreate only
+ * proves the workspace is a git repo, it does NOT locate the repo root.
+ */
+interface GitBackendCtor {
+  new (cwd: string, revertConfig: MulliganConfig["revert"]): SnapshotStore;
+}
+
+/**
+ * Constructor shape CasBackend (src/snapshot/cas.ts, P2.M3.T1) MUST satisfy. LOCAL + UN-EXPORTED.
+ * `sessionDir` is threaded so the CAS can resolve its blob-store path when `storageDir` is null.
+ * (If P2.M3 prefers to resolve storage internally from sessionDir alone, dropping the 3rd arg is a
+ * safe, compatible narrowing of this cast — see detectAndCreate's "Integration contract note".)
+ */
+interface CasBackendCtor {
+  new (cwd: string, revertConfig: MulliganConfig["revert"], sessionDir?: string | null): SnapshotStore;
+}
+
+/**
+ * Resolve the snapshot storage dir from config + the optional session dir. spec/14 §8
+ * (storageDir: null ⇒ default `<sessionDir>/mulligan/`). PURE-ish (only path math) EXCEPT the final
+ * containment throw — no fs touched here; mkdir/access run in detectAndCreate. MODULE-PRIVATE.
+ *
+ * Belt-and-suspenders containment guard: config.ts already rejects a storageDir resolving inside cwd
+ * (coerceStorageDir), but that check does NOT cover the sessionDir-default path. This re-validates the
+ * resolved dir against cwd (mirroring coerceStorageDir's exact relative()/isAbsolute() containment test)
+ * so a sessionDir resolved under the workspace still fails-open to NoOpStore rather than polluting the
+ * working tree. (paths.ts lexical helpers cover the walk-level per-file containment inside the backends;
+ * this is the single storage-dir gate.)
+ *
+ * @throws {Error} when no storage dir can be resolved, or the resolved dir is inside cwd.
+ */
+function resolveStorageDir(
+  storageDir: string | null,
+  sessionDir: string | null | undefined,
+  cwd: string,
+): string {
+  let candidate: string;
+  if (storageDir !== null) {
+    candidate = resolve(storageDir);
+  } else if (sessionDir) {
+    candidate = resolve(sessionDir, "mulligan"); // default <sessionDir>/mulligan/
+  } else {
+    throw new Error("no storage dir configured and no session dir provided");
+  }
+  // Containment check: resolved storage must NOT be at-or-inside cwd (would pollute the workspace).
+  // Mirrors coerceStorageDir's exact relative()/isAbsolute() test (config.ts) for consistency; covers
+  // the sessionDir-default path that config.ts cannot see. insideCwd → throw → detectAndCreate fail-open.
+  const root = resolve(cwd);
+  const rel = relative(root, candidate); // '' at-root | '../..' escaped | absolute cross-drive
+  const insideCwd = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  if (insideCwd) {
+    throw new Error("resolved storage dir is inside the workspace cwd");
+  }
+  return candidate;
+}
+
+/**
+ * Crush an error message into a short, newline-free one-liner for NoOpStore.describe().reason (which
+ * feeds the rewind notice/log line, not a stack dump). Trims to ~120 chars. MODULE-PRIVATE.
+ */
+function summarize(msg: string): string {
+  const oneLine = msg.replace(/[\r\n]+/g, " ").trim();
+  const MAX = 120;
+  return oneLine.length > MAX ? oneLine.slice(0, MAX) : oneLine;
+}
+
+/**
+ * The fail-open TERMINAL store: backend "none", every op a no-op. The ONLY store whose describe()
+ * reports `backend: "none"`. Constructed by `detectAndCreate` when (a) the workspace is non-git AND
+ * the storage dir is unwritable, OR (b) ANY detection/initialization error was caught (E28 fail-open:
+ * "the session MUST still work — context rewind proceeds without file revert"). Never participates in
+ * RevertCheckpoint (src/markers.ts: RevertCheckpoint.backend is "git"|"cas" only — checkpoints exist
+ * solely for real backends). spec/14 §2 ("Detection"), §6 (rewind proceeds without file revert),
+ * spec/14 E28 (fail-open), spec/14 §1 layer 1 (revert is opt-in — its absence is always non-fatal).
+ *
+ * The 6 methods mirror SnapshotStore but are SYNCHRONOUS no-ops (GOTCHA #1 — the interface is sync;
+ * capture returns `null`, NOT `Promise<null>`). `capture` is null (revert unavailable), `dirtyCheck`
+ * is empty (no drift info to give), `restore` returns the 5 empty buckets (nothing was done), `has` is
+ * false, `retire` is void. detectAndCreate is ASYNC (it awaits execFile + import + mkdir), but the
+ * store it returns exposes the sync interface.
+ *
+ * EXPORTED so the rewind tool (rewindExecute, P4.M2.T1.S2) can read `store.describe().backend` and
+ * skip the file-revert branch when it is "none", and so tests + index.ts (P3.M1.T2) can observe the
+ * fail-open state directly.
+ */
+export class NoOpStore implements SnapshotStore {
+  /** Human-readable one-liner set by detectAndCreate ("no git repo and storage dir not writable",
+   * "detection unavailable: <short msg>"). Surfaces via describe().reason into the rewind notice/log. */
+  constructor(private readonly reason: string) {}
+
+  describe(): { backend: "none"; reason: string } {
+    return { backend: "none", reason: this.reason };
+  }
+
+  capture(_label: string): null {
+    return null; // revert unavailable — capture never succeeds
+  }
+
+  dirtyCheck(_afterRef: string, _paths: string[]): string[] {
+    return []; // no drift info available from a no-op store
+  }
+
+  restore(_beforeRef: string, _opts: RestoreOpts): RestoreResult {
+    return { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+  }
+
+  has(_ref: string): boolean {
+    return false; // NoOpStore holds no refs
+  }
+
+  retire(_ref: string): void {
+    /* no-op — nothing to retire */
+  }
+}
+
+/**
+ * Detect the correct `SnapshotStore` backend for `cwd` and construct it, OR fail-open to `NoOpStore`.
+ * THE FRONT DOOR to the v1.2 working-tree-revert feature: index.ts (P3.M1.T2.S1) calls this ONCE at
+ * session_start and caches the result on SessionRuntime (PRD h2.142 "Detection, cached per session").
+ * The rewind tool (rewindExecute, P4.M2.T1) then operates on whatever store it is handed — mode-agnostic.
+ *
+ * DECISION TREE (spec/14 §2 "Detection" + work-item contract step 3):
+ *   1. `git rev-parse --git-dir` (read-only — the ONLY git command run against the user's repo here;
+ *      NEVER a write) exit 0 ⇒ `GitBackend` (P2.M2.T1). git missing / non-zero ⇒ not git, fall through.
+ *   2. resolve storageDir (revertConfig.storageDir ?? `<sessionDir>/mulligan/`), `mkdir -p`, check
+ *      `W_OK`. Writable ⇒ `CasBackend` (P2.M3.T1). Unwritable ⇒ `NoOpStore`.
+ *   3. ANY thrown error (bad cwd, missing git binary, dynamic-import failure, backend ctor throw)
+ *      ⇒ `NoOpStore`. **detectAndCreate NEVER rejects** (E28 fail-open is the contract).
+ *
+ * FORWARD-COMPATIBILITY (the crux): git.ts (P2.M2.T1) and cas.ts (P2.M3.T1) DO NOT EXIST yet. A
+ * static `import { GitBackend } from "./git.js"` makes `tsc --noEmit` FAIL today and rollup/vitest
+ * fail at transform time. So the backends are loaded via a DYNAMIC import with a NON-LITERAL
+ * specifier (`const spec = "./git.js"; await import(spec)`) — TypeScript only statically resolves
+ * STRING-LITERAL import() args, and rollup/vitest skip static analysis of non-literal specifiers.
+ * Today the import rejects (module absent) ⇒ caught ⇒ NoOpStore (fail-open). After P2.M2/P2.M3 land
+ * it resolves to the real backend with ZERO edits to this file. Do NOT add `// @ts-expect-error` on
+ * a literal dynamic import (fragile — breaks if the error shape changes) — use the non-literal form.
+ *
+ * Integration contract note: the CasBackend ctor is called as `(cwd, revertConfig, sessionDir)`.
+ * If P2.M3.T1 settles on a different arity (e.g. resolving storage from sessionDir alone), only the
+ * `CasBackendCtor` cast + the `new mod.CasBackend(...)` line need tweak — a localized, trivial change.
+ *
+ * spec/14 §2 (Detection), spec/14 E28 (fail-open), spec/14 §8 (storageDir resolution), spec/14 §1
+ * layer 1 (revert is opt-in — detection failure is non-fatal). EXPORTED so index.ts (P3.M1.T2) is
+ * the single caller at session_start.
+ *
+ * @param cwd           the workspace root to detect + snapshot against.
+ * @param revertConfig  `MulliganConfig["revert"]` (the 8-field block; storageDir/null drives default).
+ * @param sessionDir    optional — used ONLY when storageDir is null, to resolve `<sessionDir>/mulligan/`.
+ * @returns a `SnapshotStore`; NEVER rejects (always resolves, failing open to NoOpStore on any error).
+ */
+export async function detectAndCreate(
+  cwd: string,
+  revertConfig: MulliganConfig["revert"],
+  sessionDir?: string | null,
+): Promise<SnapshotStore> {
+  try {
+    // (1) git detection — NARROW try/catch so its catch unambiguously means ONLY "not git"
+    //     (non-zero exit OR `git` binary absent → execFile rejects). Read-only rev-parse: no writes.
+    try {
+      await execFile("git", ["rev-parse", "--git-dir"], { cwd });
+      // exit 0 ⇒ is a git repo ⇒ construct the GitBackend (P2.M2.T1).
+      const spec = "./git.js"; // NON-LITERAL specifier → not statically resolved by tsc/rollup
+      const mod = (await import(spec)) as { GitBackend: GitBackendCtor };
+      return new mod.GitBackend(cwd, revertConfig);
+    } catch {
+      // not git — fall through to the CAS branch.
+    }
+
+    // (2) resolve storage dir + writability check. DISTINCT-reason variant: a NARROW catch around
+    //     just mkdir+access yields the crisp "not writable" reason (vs a generic fail-open message).
+    const storageDir = resolveStorageDir(revertConfig.storageDir, sessionDir, cwd);
+    try {
+      await mkdir(storageDir, { recursive: true }); // mkdir -p (idempotent — recursive:true)
+      await access(storageDir, constants.W_OK); // rejects if not writable
+    } catch {
+      // non-git AND storage not writable ⇒ NoOpStore with the distinct reason.
+      return new NoOpStore("no git repo and storage dir not writable");
+    }
+    // writable ⇒ construct the CasBackend (P2.M3.T1).
+    const spec = "./cas.js"; // NON-LITERAL specifier → not statically resolved by tsc/rollup
+    const mod = (await import(spec)) as { CasBackend: CasBackendCtor };
+    return new mod.CasBackend(cwd, revertConfig, sessionDir);
+  } catch (err) {
+    // (3) E28 fail-open — ANY error (unwritable storage already handled above; this catches import
+    //     failure, backend ctor throw, bad cwd, etc.). detectAndCreate NEVER rethrows.
+    const msg = err instanceof Error ? err.message : String(err);
+    return new NoOpStore(summarize(msg));
   }
 }
