@@ -83,11 +83,11 @@ describe("index.ts extension factory", () => {
     expect(tools.length).toBe(4);
   });
 
-  it("registers the 2 human checkpoint slash commands with the exact names", () => {
+  it("registers the 3 human slash commands with the exact names", () => {
     const { commands, pi } = makePi();
     indexFactory(pi);
     expect(commands.map((c) => c.name).sort()).toEqual(
-      ["mulligan_checkpoint", "mulligan_checkpoint_revoke"].sort(),
+      ["mulligan_checkpoint", "mulligan_checkpoint_revoke", "mulligan_audit"].sort(),
     );
   });
 

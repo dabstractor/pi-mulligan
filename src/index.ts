@@ -9,16 +9,17 @@ import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
 import { makeCancelTool } from "./tools/cancel.js"; // 4th agent-callable tool (P3.M1.T3.S1)
-import { makeCheckpointCommand, makeCheckpointRevokeCommand } from "./commands.js"; // 2 human slash commands (P2.M1.T1.S1)
+import { makeCheckpointCommand, makeCheckpointRevokeCommand, makeAuditCommand } from "./commands.js"; // 3 human slash commands (P2.M1.T1.S1 + P2.M2.T1.S1)
 
 /**
  * Mulligan — Pi extension factory (spec/01 §1, spec/03 §4, spec/11 §8 Step 8).
  *
  * The single entry point (package.json `main` + `pi.extensions`). Wires all 4 agent-callable tools,
- * the 3 event-driven handlers (context filter + 2 nudges), the 2 human slash commands
+ * the 3 event-driven handlers (context filter + 2 nudges), the 3 human slash commands
  * (/mulligan_checkpoint, /mulligan_checkpoint_revoke — spec/13 §2–§3; v1.1 replaces the v1
- * mulligan_checkpoint agent tool, E23 RESOLVED), and the session lifecycle (runtime reset /
- * full cleanup). /mulligan_audit is added by P2.M2.T1.S2. Config loads from merged Pi settings
+ * mulligan_checkpoint agent tool, E23 RESOLVED; and /mulligan_audit — spec/13 §4, the human's direct
+ * path to the same context-bloat diagnostic the agent's mulligan_audit tool produces), and the
+ * session lifecycle (runtime reset / full cleanup). Config loads from merged Pi settings
  * (global ~/.pi/agent + project-local <cwd>/.pi)
  * via loadMulliganConfig → setConfig; absent/invalid settings fail-open to validated DEFAULT_CONFIG
  * (enabled:true, log off).
@@ -53,11 +54,14 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool(auditTool);
   pi.registerTool(makeCancelTool(pi)); // 4th tool — marker retraction (P3.M1.T3.S1 / E21)
 
-  // 4. Register the 2 human slash commands (spec/13 §2–§3; v1.1 replaces the v1 mulligan_checkpoint
-  //    agent tool — E23 RESOLVED). Both are FACTORIES capturing `pi` via closure (mirroring the tool
-  //    factories above). No try/catch — fail-fast by design (GOTCHA #7).
+  // 4. Register the 3 human slash commands (spec/13 §2–§4; v1.1 replaces the v1 mulligan_checkpoint
+  //    agent tool — E23 RESOLVED). All three are FACTORIES capturing `pi` via closure (mirroring the
+  //    tool factories above). makeAuditCommand's `pi` is captured for registration-uniformity but
+  //    UNUSED — its reads go through ctx/pure helpers (spec/13 §4; P2.M2.T1.S1). No try/catch — fail-fast.
   pi.registerCommand("mulligan_checkpoint", makeCheckpointCommand(pi));
   pi.registerCommand("mulligan_checkpoint_revoke", makeCheckpointRevokeCommand(pi));
+  pi.registerCommand("mulligan_audit", makeAuditCommand(pi)); // human-facing audit (spec/13 §4) — SAME report
+  //   as the agent's mulligan_audit tool, surfaced to the human via ctx.ui.notify (never event.messages).
 
   // 5. Arm the 3 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart
