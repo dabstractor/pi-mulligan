@@ -1,0 +1,249 @@
+h1.0 pi-mulligan — Specification
+ h2.0 0. How to read this document
+ h2.1 1. Executive summary
+ h2.2 2. Problem statement (PRD)
+  h3.0 2.1 The pain
+  h3.1 2.2 Why Pi's existing tools don't solve this
+  h3.2 2.3 What we build
+  h3.3 2.4 Target users
+  h3.4 2.5 Success criteria
+  h3.5 2.6 Non-goals (explicitly out of scope)
+ h2.3 3. Design principles
+ h2.4 4. High-level architecture
+ h2.5 5. The two operations (plain-language summary)
+ h2.6 6. The two nudges (plain-language summary)
+ h2.7 7. Configuration surface (summary)
+ h2.8 8. Verification strategy (summary)
+ h2.9 9. Decision log (condensed)
+ h2.10 10. Glossary (summary)
+ h2.11 Index
+ h2.12 1. What an extension is
+ h2.13 2. The two context objects
+  h3.6 2.1 ExtensionContext — given to event handlers and tools
+  h3.7 2.2 ExtensionCommandContext — given only to command handlers
+ h2.14 3. ExtensionAPI (the pi object) — what tools can actually do
+ h2.15 4. The session is an append-only tree; sessionManager is read-only
+  h3.8 4.1 The on-disk format
+  h3.9 4.2 ReadonlySessionManager — the read surface
+ h2.16 5. The context event — Mulligan's primary surface
+ h2.17 6. The agent loop & "auto-prompt"
+ h2.18 7. getContextUsage() — and why Mulligan must not trust it
+ h2.19 8. Compaction (so Mulligan can coexist with it)
+ h2.20 9. Built-in tool truncation (calibrates the "bloat" problem)
+ h2.21 10. Modes (ctx.mode)
+ h2.22 Cross-references
+ h2.23 C1. A tool cannot mutate the session through ctx.sessionManager
+ h2.24 C2. An extension-injected message does NOT dispatch as a command
+ h2.25 C3. navigateTree is command-context-only (and thus unreachable by the agent)
+ h2.26 C4. The context event is non-destructive and per-inference — and that is exactly what we want
+ h2.27 C5. The filter takes effect on the next inference in the same loop, and the model auto-continues
+ h2.28 C6. tool_result / message_end rewrites persist — but only at production time
+ h2.29 C7. pi.appendEntry returns void, not an id
+ h2.30 C8. pi.sendMessage from within a tool is safe and synchronous-ish
+ h2.31 C9. pi.setLabel / getLabel round-trip works from a tool
+ h2.32 C10. Extension-injected messages traverse the input event
+ h2.33 C11. Compaction summarizes the head, not the tail — rewind is a distinct primitive
+ h2.34 C12. The session rebinds after certain operations — captured references go stale
+ h2.35 Summary table — what a Mulligan tool may and may not do
+ h2.36 Cross-references
+ h2.37 1. One-sentence architecture
+ h2.38 2. Components
+  h3.10 2.1 Tools (@05-tools.md)
+  h3.11 2.2 Event handlers
+  h3.12 2.3 Pure helpers (@06-context-filter.md)
+ h2.39 3. Data flow
+  h3.13 3.1 A rewind, step by step
+  h3.14 3.2 A shrink, step by step
+  h3.15 3.3 The per-turn nudge, step by step (@07-preventive-and-nudges.md)
+ h2.40 4. Where each piece of information lives
+ h2.41 5. Ordering, composition, and idempotency
+ h2.42 6. Why this shape (rejected alternatives)
+ h2.43 7. Module layout (internal)
+ h2.44 8. Cross-references
+ h2.45 1. Versioning
+ h2.46 2. The note (input + rendered)
+  h3.16 2.1 NoteInput — what the agent passes to mulligan_rewind
+  h3.17 2.2 FileLedger — deterministically extracted, appended to the note
+  h3.18 2.3 Rendered note (the CustomMessage content)
+ h2.47 3. Marker: rewind
+ h2.48 4. Marker: shrink
+ h2.49 5. Turn metric (for the nudge)
+ h2.50 5½. Marker: cancel (marker retraction)
+ h2.51 6. Checkpoint
+ h2.52 7. Configuration (mulligan in settings.json)
+ h2.53 8. In-memory (non-persisted) state
+ h2.54 9. Logging shape (for log.file)
+ h2.55 10. Cross-references
+ h2.56 1. mulligan_rewind
+  h3.19 Purpose
+  h3.20 When the agent should use it
+  h3.21 Parameter schema (typebox)
+  h3.22 Return shape
+  h3.23 Behavior (step by step)
+  h3.24 Notes on resolution timing
+  h3.25 Example
+ h2.57 2. mulligan_shrink
+  h3.26 Purpose
+  h3.27 When to use it (vs mulligan_rewind)
+  h3.28 Parameter schema
+  h3.29 Return shape
+  h3.30 Behavior
+ h2.58 3. mulligan_checkpoint — REMOVED as an agent tool (v1.1)
+ h2.59 4. mulligan_audit
+  h3.31 Purpose (the read-only exception)
+  h3.32 Parameter schema
+  h3.33 Return shape
+  h3.34 Behavior
+ h2.60 5. mulligan_cancel
+  h3.35 Purpose (retraction — amends D6)
+  h3.36 When the agent should use it
+  h3.37 Parameter schema (typebox)
+  h3.38 Return shape
+  h3.39 Behavior (step by step)
+  h3.40 Target resolution → marker uuid (critical)
+  h3.41 Refusal / no-op conditions
+  h3.42 Example
+ h2.61 6. Tool registration summary (for index.ts)
+  h3.43 Description strings (craft carefully — they drive LLM usage)
+ h2.62 7. Cross-references
+ h2.63 1. The handler (glue)
+ h2.64 2. Pairing: the cardinal rule
+ h2.65 3. resolveLastToolCallGroup
+ h2.66 4. resolveLastTurn
+ h2.67 5. applyShrink — content substitution
+ h2.68 5.1 Render-time awareness stamp (stampShrink)
+ h2.69 6. Checkpoint targeting (entry → message mapping)
+ h2.70 7. Caching the filtered view for mulligan_audit
+ h2.71 8. Protected messages
+ h2.72 9. Parallel-tool-mode corner case
+ h2.73 10. Interaction with compaction
+ h2.74 11. Composition & idempotency (recap with example)
+ h2.75 12. Pseudocode: the full pipeline (reference)
+ h2.76 13. Cross-references
+ h2.77 1. Nudge A — bloated-result reminder (tool_result event)
+  h3.44 Purpose
+  h3.45 Mechanism
+  h3.46 renderBloatReminder(toolName, bytes)
+  h3.47 Threshold default & calibration
+  h3.48 Interaction with shrink/rewind
+  h3.49 Why advisory, not auto-shrink (D3)
+ h2.78 2. Nudge B — per-turn drift nudge (turn_end → context injection)
+  h3.50 Purpose
+  h3.51 Mechanism — two phases
+  h3.52 Why this is zero-extra-requests
+  h3.53 Cost
+  h3.54 Edge cases
+ h2.79 3. Determinism & testability
+ h2.80 4. Cross-references
+ h2.81 5. Drift-nudge refinements (REQUIRED)
+  h3.55 5.1 Windowed drift signaling (REQUIRED)
+  h3.56 5.2 Edge-triggered high-water signal (REQUIRED)
+  h3.57 5.3 Suppress the drift nudge when the agent already acted (REQUIRED)
+ h2.82 E1. Orphaned toolResult (no matching toolCall)
+ h2.83 E2. Rewinding the executing turn
+ h2.84 E3. Rewinding across a protected message
+ h2.85 E4. Max rewind depth exceeded
+ h2.86 E5. Rewinding a span that had side effects (writes/bash)
+ h2.87 E6. Parallel tool mode: mulligan_rewind with siblings
+ h2.88 E7. Compaction summarizes content Mulligan hid
+ h2.89 E8. Marker targets nothing (already removed/compacted)
+ h2.90 E9. Note field validation failure
+ h2.91 E10. Checkpoint name invalid or not found
+ h2.92 E11. Session reload / /resume mid-task
+ h2.93 E12. getContextUsage() undefined (no model / pre-first-inference)
+ h2.94 E13. Tool throws internally
+ h2.95 E14. Extension disabled via config
+ h2.96 E15. Very large number of accumulated markers/notes (long sessions)
+ h2.97 E16. mulligan_audit called before any inference
+ h2.98 E17. Two shrinks target the same message
+ h2.99 E18. The model ignores the nudges
+ h2.100 E19. Shrink target is a non-toolResult message
+ h2.101 E20. pi.appendEntry / pi.sendMessage ordering race
+ h2.102 E21. Marker retraction — cancel an erroneous/stale marker (REQUIRED; softens D6)
+ h2.103 E22. Same-prompt rewind retry loop — runaway growth (REQUIRED; hard backstop)
+ h2.104 E23. mulligan_checkpoint — exposed to the wrong actor (RESOLVED in v1.1)
+ h2.105 E24. Pinned hide no-ops under compaction (KNOWN LIMITATION; leak, not replay)
+ h2.106 E25. Redundant re-shrink of already-shrunk content (awareness stamp)
+ h2.107 E26. Active-checkpoint banner — the user forgets they armed destructive power (v1.1)
+ h2.108 E27. Working-tree revert fails best-effort (v1.2)
+ h2.109 E28. No git AND no writable CAS storage (v1.2)
+ h2.110 E29. Snapshot caps exceeded (v1.2)
+ h2.111 E30. Concurrent/external modification — dirty guard REFUSES (v1.2)
+ h2.112 E31. Index/staged divergence after restore (v1.2 — documented, not "fixed")
+ h2.113 E32. Post-reload snapshot loss → RESOLVED in v1.2
+ h2.114 Cross-references
+ h2.115 1. Where config is read
+ h2.116 2. Schema & defaults
+ h2.117 3. Rationale per knob
+ h2.118 4. Validation rules (in config.ts)
+ h2.119 5. Environment overrides (optional, v1.1 — not required for v1)
+ h2.120 6. Cross-references
+ h2.121 1. Tier 1 — Unit tests (pure helpers, no Pi)
+  h3.58 1.1 partitionIntoUnits (pairing)
+  h3.59 1.2 resolveLastToolCallGroup
+  h3.60 1.3 resolveLastTurn
+  h3.61 1.4 applyRewind
+  h3.62 1.5 applyShrink
+  h3.63 1.6 extractFileLedger
+  h3.64 1.7 estimateTokens
+  h3.65 1.8 renderNote / field validation
+  h3.66 1.9 Pipeline composition (filterPipeline)
+  h3.67 1.10 Retry-cap & context-fraction guards (E22)
+  h3.68 1.11 Cancel target resolution (E21, target-based)
+ h2.122 2. Tier 2 — Integration smoke harness (real pi)
+  h3.69 2.1 Required scenarios & pass criteria (mirror the spike)
+  h3.70 2.2 Driving reliability
+  h3.71 2.3 Session JSONL assertions
+ h2.123 3. Property/invariant tests (optional, high-value)
+ h2.124 4. Manual / TUI smoke
+ h2.125 5. Cross-references
+ h2.126 1. Repository layout
+  h3.72 1.1 package.json (minimum viable)
+  h3.73 1.2 tsconfig.json (minimum)
+ h2.127 2. Build order (do these in sequence; verify before proceeding)
+  h3.74 Step 0 — Scaffold & types (15 min)
+  h3.75 Step 1 — config.ts + log.ts + runtime.ts (30 min)
+  h3.76 Step 2 — Pure helpers: tokens.ts, ledger.ts, notes.ts (1–2 h)
+  h3.77 Step 3 — Pure core: transforms.ts (2–3 h — the bulk)
+  h3.78 Step 4 — markers.ts (30 min)
+  h3.79 Step 5 — filter.ts (1 h)
+  h3.80 Step 6 — Tools: tools/rewind.ts, shrink.ts, audit.ts, cancel.ts (2 h)
+  h3.81 Step 6b — Human commands + active-checkpoint banner (v1.1; ~1 h)
+  h3.82 Step 6c — Working-tree revert: snapshot/ + rewind integration (v1.2; ~3–4 h)
+  h3.83 Step 7 — nudges.ts (1 h)
+  h3.84 Step 8 — index.ts wiring + edge pass (1 h)
+  h3.85 Step 9 — Polish
+ h2.128 3. "Definition of done"
+ h2.129 4. Cross-references
+ h2.130 Glossary
+ h2.131 References
+  h3.86 Pi documentation (read during the spike; authoritative for the surfaces used)
+  h3.87 Pi examples referenced
+  h3.88 Project-internal references
+  h3.89 Decision log (one-line each; full reasoning in @reference/HANDOFF.md and @SPEC.md §9)
+ h2.132 0. Mechanism — pi.registerCommand (and why C2 does not block it)
+ h2.133 1. The guardrail — no rewind wipes user input (REQUIRED)
+ h2.134 2. /mulligan_checkpoint <name> (set) — REPLACES the agent tool
+ h2.135 3. /mulligan_checkpoint_revoke <name> (revoke)
+ h2.136 4. /mulligan_audit (user-facing)
+ h2.137 5. Active-checkpoint banner (persistent reminder — REQUIRED)
+ h2.138 6. Interaction with the rest of the spec
+ h2.139 7. Cross-references
+ h2.140 0. Motivation & scope
+ h2.141 1. Opt-in model & guardrails
+ h2.142 2. Architecture — the SnapshotStore
+ h2.143 3. GitBackend (external shadow repository — preferred in a repo)
+ h2.144 4. CasBackend (universal, non-git) + non-git modes
+  h3.90 4.1 "cas" (default — comprehensive, whole-tree)
+  h3.91 4.2 "explicit-paths" (conservative alternative — the pi-undo-redo model)
+  h3.92 4.3 Cross-cutting implementation requirements (both non-git modes AND path handling)
+ h2.145 5. Capture lifecycle & retention
+ h2.146 6. Restore semantics — refuse-on-dirty, then restore
+ h2.147 7. mulligan_rewind integration
+ h2.148 8. Configuration (@09-configuration.md §2)
+ h2.149 9. Edge cases → @08-edge-cases.md E27–E32
+ h2.150 10. Testing → @10-testing.md
+ h2.151 11. Future enhancements (deferred from v1.2)
+ h2.152 12. Cross-references
+---
+code:68 para:264 list:157 table:9 quote:30
