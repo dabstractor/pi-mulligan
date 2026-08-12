@@ -52,6 +52,7 @@ import {
   turnStartCaptureHandler,
   agentEndCaptureHandler,
   gcTurnSnapshots,
+  rebuildCheckpointSnapshots,
 } from "../../src/capture.js";
 import { detectAndCreate, type SnapshotStore } from "../../src/snapshot/store.js";
 import {
@@ -602,26 +603,13 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
     // E32 DURABILITY: the R0 git object is STILL resolvable after resetRuntime + detectAndCreate(same storage).
     expect(await store2.has(R0)).toBe(true);
 
-    // REBUILD rt2.snapshots from the persisted mulligan:revert-checkpoint control entries. Production NEVER does
-    // this read-side — it is the BUG-002 gap tracked by P1.M2.T1: a future session_start hook will scan the
-    // mulligan:revert-checkpoint entries and rebuild rt.snapshots (so the in-memory Map need not survive reload).
-    // The test SIMULATES that rebuild here to prove the CONTROL DATA is durable even though the Map is not. For each control entry,
-    // restore a minimal RevertCheckpoint (turnIndex:-1 sentinel; beforeRef from the stored ref).
-    const controlEntries = (appended as unknown[]).filter(
-      (e) =>
-        typeof e === "object" &&
-        e !== null &&
-        (e as { customType?: string }).customType === "mulligan:revert-checkpoint",
-    ) as { data: { label: string; ref: string; backend: "git" | "cas" } }[];
-    for (const ce of controlEntries) {
-      rt2.snapshots!.set(ce.data.label, {
-        label: ce.data.label,
-        backend: ce.data.backend,
-        beforeRef: ce.data.ref,
-        turnIndex: -1,
-        ts: Date.now(),
-      });
-    }
+    // [P1.M2.T1.S2 / BUG-002] Production now rebuilds rt2.snapshots from the persisted control entries —
+    // call the SAME exported helper session_start uses (rebuildCheckpointSnapshots in capture.ts) instead
+    // of hand-simulating it. This proves the PRODUCTION read-path populates the snapshot, not a test
+    // replica. (Previously this block manually iterated `appended` and called rt2.snapshots.set() — a
+    // simulation that masked BUG-002. makeSessionCtx exposes the same shared array via getEntries(), so
+    // the helper reads identical data.)
+    await rebuildCheckpointSnapshots(ctx, rt2);
 
     // ASSERT the rebuilt snapshot restored ckpt:x's beforeRef === R0.
     const rebuiltCkpt = rt2.snapshots?.get("ckpt:x") as RevertCheckpoint | undefined;

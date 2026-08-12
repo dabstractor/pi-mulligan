@@ -14,6 +14,7 @@ import {
   turnStartCaptureHandler,
   registerTurnStartCapture,
   gcTurnSnapshots,
+  rebuildCheckpointSnapshots,
   agentEndCaptureHandler,
   registerAgentEndCapture,
 } from "../src/capture.js";
@@ -451,6 +452,126 @@ describe("gcTurnSnapshots — shared prompt-boundary GC helper", () => {
     // call again to confirm clearing still happens after a throwing gc
     await gcTurnSnapshots(rt);
     expect(rt.snapshots?.has("turn")).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// rebuildCheckpointSnapshots — the shared cross-reload checkpoint rebuild helper (BUG-002 read-side)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("rebuildCheckpointSnapshots — shared cross-reload checkpoint rebuild helper", () => {
+  /** Minimal fake ctx whose sessionManager.getEntries() returns the given array (the ONLY field the helper reads). */
+  function makeRebuildCtx(entries: unknown[]): ExtensionContext {
+    return {
+      sessionManager: { getEntries: () => entries },
+    } as unknown as ExtensionContext;
+  }
+
+  /** Minimal fake store with a controllable `.has(ref)` result (the ONLY method the helper calls). */
+  function makeRebuildStore(opts: { has?: boolean | ((ref: string) => boolean); hasThrows?: boolean } = {}): SnapshotStore {
+    return {
+      async has(ref: string): Promise<boolean> {
+        if (opts.hasThrows) throw new Error("has boom");
+        return typeof opts.has === "function" ? opts.has(ref) : (opts.has ?? true);
+      },
+    } as unknown as SnapshotStore;
+  }
+
+  it("rebuilds rt.snapshots from mulligan:revert-checkpoint control entries (happy-path)", async () => {
+    const entries = [
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:x", ref: "r1", backend: "git" } },
+      { type: "custom", customType: "mulligan:rewind", data: { kind: "rewind" } }, // unrelated → skipped
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:y", ref: "r2", backend: "cas" } },
+    ];
+    const ctx = makeRebuildCtx(entries);
+    const rt = getRuntime("rb-1");
+    rt.store = makeRebuildStore();
+    await rebuildCheckpointSnapshots(ctx, rt);
+    const x = rt.snapshots?.get("ckpt:x") as RevertCheckpoint | undefined;
+    expect(x).toBeTruthy();
+    expect(x!.beforeRef).toBe("r1");
+    expect(x!.backend).toBe("git");
+    expect(x!.turnIndex).toBe(-1);
+    expect(x!.afterRef).toBeUndefined(); // checkpoints capture once
+    const y = rt.snapshots?.get("ckpt:y") as RevertCheckpoint | undefined;
+    expect(y).toBeTruthy();
+    expect(y!.beforeRef).toBe("r2");
+    expect(y!.backend).toBe("cas");
+  });
+
+  it("is a no-op when rt.store is undefined", async () => {
+    const ctx = makeRebuildCtx([
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:x", ref: "r1", backend: "git" } },
+    ]);
+    const rt = getRuntime("rb-none");
+    expect(rt.store).toBeUndefined();
+    await expect(rebuildCheckpointSnapshots(ctx, rt)).resolves.toBeUndefined();
+    expect(rt.snapshots?.size).toBe(0);
+  });
+
+  it("skips malformed entries (bad fields / null data / non-objects / unknown backend)", async () => {
+    const entries = [
+      "not-an-object", // non-object → skipped
+      null,
+      [],
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: null }, // null data → skipped
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "", ref: "r", backend: "git" } }, // empty label
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ok", ref: "", backend: "git" } }, // empty ref
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: 123, ref: "r", backend: "git" } }, // non-string label
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ok", ref: "r", backend: "NONE" } }, // bad backend
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ok", ref: "r", backend: "git" } }, // VALID
+    ];
+    const ctx = makeRebuildCtx(entries);
+    const rt = getRuntime("rb-malformed");
+    rt.store = makeRebuildStore();
+    await rebuildCheckpointSnapshots(ctx, rt);
+    expect(rt.snapshots?.size).toBe(1);
+    expect(rt.snapshots?.has("ok")).toBe(true);
+  });
+
+  it("skips an entry whose ref is absent (rt.store.has→false — NoOpStore-equivalent)", async () => {
+    const entries = [
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:absent", ref: "gone", backend: "git" } },
+    ];
+    const ctx = makeRebuildCtx(entries);
+    const rt = getRuntime("rb-absent");
+    rt.store = makeRebuildStore({ has: false });
+    await rebuildCheckpointSnapshots(ctx, rt);
+    expect(rt.snapshots?.size).toBe(0);
+  });
+
+  it("skips an entry whose rt.store.has() throws (fail-open), still rebuilds other valid entries", async () => {
+    const entries = [
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:ok", ref: "r1", backend: "git" } },
+    ];
+    const ctx = makeRebuildCtx(entries);
+    const rt = getRuntime("rb-has-throw");
+    rt.store = makeRebuildStore({ hasThrows: true });
+    await expect(rebuildCheckpointSnapshots(ctx, rt)).resolves.toBeUndefined();
+    expect(rt.snapshots?.size).toBe(0); // the throwing has() ⇒ present=false ⇒ skipped
+  });
+
+  it("swallows a throwing-Proxy entry and still rebuilds a later valid entry (never throws)", async () => {
+    const throwingProxy = new Proxy({}, { get() { throw new Error("boom"); } });
+    const entries = [
+      throwingProxy, // per-entry catch → skipped
+      { type: "custom", customType: "mulligan:revert-checkpoint", data: { label: "ckpt:late", ref: "r1", backend: "git" } },
+    ];
+    const ctx = makeRebuildCtx(entries);
+    const rt = getRuntime("rb-proxy");
+    rt.store = makeRebuildStore();
+    await expect(rebuildCheckpointSnapshots(ctx, rt)).resolves.toBeUndefined();
+    expect(rt.snapshots?.has("ckpt:late")).toBe(true); // the valid entry after the throwing one still rebuilt
+  });
+
+  it("is a no-op when ctx.sessionManager.getEntries() throws (fail-open read)", async () => {
+    const ctx = {
+      sessionManager: { getEntries: () => { throw new Error("read boom"); } },
+    } as unknown as ExtensionContext;
+    const rt = getRuntime("rb-getentries-throw");
+    rt.store = makeRebuildStore();
+    await expect(rebuildCheckpointSnapshots(ctx, rt)).resolves.toBeUndefined();
+    expect(rt.snapshots?.size).toBe(0);
   });
 });
 

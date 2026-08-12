@@ -70,6 +70,74 @@ export async function gcTurnSnapshots(rt: SessionRuntime): Promise<void> {
 }
 
 /**
+ * rebuildCheckpointSnapshots — [P1.M2.T1.S1/S2 / spec/14 §5 / E32 / BUG-002] rebuild rt.snapshots from the
+ * persisted `mulligan:revert-checkpoint` control entries that `/mulligan_checkpoint` wrote (commands.ts
+ * step 4b). After a `/resume` (or reload), `resetRuntime` wiped `rt.snapshots` to a fresh empty Map; E32
+ * ("post-reload snapshot loss → RESOLVED in v1.2") requires the READ-SIDE: re-read the persisted
+ * `{label, ref, backend}` control data, reconstruct each `RevertCheckpoint` (beforeRef←ref, turnIndex:-1,
+ * NO afterRef — checkpoints capture once), optionally verify the ref still exists via `rt.store.has(ref)`
+ * (fail-open skip on absent/NoOpStore/throw), and repopulate the Map so a later checkpoint-granularity
+ * rewind finds its snapshot (BUG-001's restore path proceeds to `store.restore()` instead of the
+ * "no working-tree snapshot" skip).
+ *
+ * MUST run AFTER `gcTurnSnapshots` (ckpt:* refs are exempt from gc → survive → `has()` confirms them
+ * truthfully). Defensive entry-scan mirroring `clearCheckpointByName` (commands.ts ~120-145): per-entry
+ * object guard + per-entry try/catch + customType filter + typeof field guards. BEST-EFFORT: a malformed
+ * entry or a throwing-Proxy `get` trap is skipped; the helper NEVER throws. EXPORTED so BOTH the
+ * `session_start` handler (src/index.ts) AND the F-revert-reload integration test call the SAME code —
+ * single source of truth (the `gcTurnSnapshots` precedent: exported, dual-caller). Last-wins for duplicate
+ * labels (iterate in order; each valid+present `set()` overwrites).
+ *
+ * @param ctx the Pi ExtensionContext (reads ctx.sessionManager.getEntries() for the control entries).
+ * @param rt the live per-session runtime (reads rt.store.has + rt.snapshots.set). No-op if rt.store is unset.
+ */
+export async function rebuildCheckpointSnapshots(
+  ctx: ExtensionContext,
+  rt: SessionRuntime,
+): Promise<void> {
+  if (!rt.store) return; // self-gate (mirror gcTurnSnapshots) — needs rt.store.has()
+  let entries: unknown;
+  try {
+    entries = ctx.sessionManager.getEntries(); // read FRESH (C12)
+  } catch {
+    return; // getEntries threw → no rebuild (fail-open)
+  }
+  if (!Array.isArray(entries)) return;
+  for (const e of entries) {
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown; data?: unknown };
+      if (ee.type !== "custom") continue;
+      if (ee.customType !== "mulligan:revert-checkpoint") continue;
+      const data = ee.data;
+      if (typeof data !== "object" || data === null || Array.isArray(data)) continue;
+      const d = data as { label?: unknown; ref?: unknown; backend?: unknown };
+      if (typeof d.label !== "string" || d.label.length === 0) continue;
+      if (typeof d.ref !== "string" || d.ref.length === 0) continue;
+      if (d.backend !== "git" && d.backend !== "cas") continue;
+      // optional E32 verification: the ref must STILL exist in the store (survived gc / storage intact).
+      // NoOpStore.has→false (backend 'none' ⇒ nothing to restore); a throw ⇒ skip (fail-open).
+      let present = true;
+      try {
+        present = await rt.store.has(d.ref);
+      } catch {
+        present = false;
+      }
+      if (!present) continue;
+      rt.snapshots?.set(d.label, {
+        label: d.label,
+        backend: d.backend,
+        beforeRef: d.ref,
+        turnIndex: -1, // checkpoint sentinel (matches commands.ts step 4b)
+        ts: Date.now(),
+      });
+    } catch {
+      // a throwing-Proxy entry → skip (fail-open, never throw on the session_start path)
+    }
+  }
+}
+
+/**
  * turnStartCaptureHandler — the v1.2 turn_start capture hook (spec/14 §5). At the start of each agent
  * turn: (1) run prompt-boundary GC FIRST (drop all prior turns' turn/* refs + reclaim), then (2)
  * capture("turn") and store its before-ref in rt.snapshots so a last_turn rewind (P4.M2.T1.S1 step 6b)

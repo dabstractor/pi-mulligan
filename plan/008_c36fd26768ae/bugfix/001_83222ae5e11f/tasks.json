@@ -62,14 +62,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Major Fix — Cross-Reload Snapshot Rebuild (BUG-002)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Add the missing read-side of the E32 cross-reload for checkpoint snapshots. The mulligan:revert-checkpoint control entry is written by /mulligan_checkpoint but never read by session_start. After resetRuntime on session_start, rt.snapshots is a fresh empty Map so checkpoint snapshots are lost across /resume. The fix adds a session_start pass that scans getEntries() for mulligan:revert-checkpoint entries and rebuilds rt.snapshots.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Add session_start checkpoint snapshot rebuild from persisted mulligan:revert-checkpoint entries",
-              "status": "Researching",
+              "status": "Complete",
               "description": "In src/index.ts session_start handler, after detectAndCreate creates rt.store, add a pass that scans ctx.sessionManager.getEntries() for mulligan:revert-checkpoint control entries and rebuilds rt.snapshots so checkpoint snapshots survive /resume in production. Also update the integration test that manually simulates this rebuild.",
               "subtasks": [
                 {
@@ -91,7 +91,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Update cross-reload integration test to verify production rebuild path (remove manual simulation)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -127,7 +127,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Add pendingExplicitPaths accumulator to SessionRuntime + create tool_call capture hook in capture.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-003 and architecture/codebase_patterns.md §1 (event handler pattern). The CasBackend.capture(label, explicitPaths?) already accepts explicitPaths and delegates to captureExplicitPaths when nonGitMode === 'explicit-paths' (src/snapshot/cas.ts:~465). But NO caller passes explicitPaths — capture.ts calls `rt.store.capture('turn')` with no second arg. The Pi API exposes `pi.on('tool_call', handler)` which fires BEFORE the tool runs. WriteToolInput = { path: string, content: string }, EditToolInput = { path: string, edits: [...] }. The tool_call event type is `ToolCallEvent` (a union: BashToolCallEvent | WriteToolCallEvent | EditToolCallEvent | ...). Discriminate via `event.toolName === 'write'` / `event.toolName === 'edit'`.\n2. INPUT: The SessionRuntime interface in src/runtime.ts (add a new optional field). The Pi ToolCallEvent type (event.toolName, event.input.path). The CasBackend.notifyBashUsed() method (already exists — src/snapshot/cas.ts). The capture.ts module's existing handler pattern.\n3. LOGIC: (a) Add `pendingExplicitPaths?: string[]` to the SessionRuntime interface in src/runtime.ts. Initialize it in freshRuntime() to `[]`. (b) Create a `toolCallCaptureHandler(event: ToolCallEvent, ctx: ExtensionContext): Promise<void>` in src/capture.ts following the EXACT pattern of turnStartCaptureHandler (read sessionId FIRST, config.revert.enabled gate, getRuntime, rt.store check, backend check). Inside: if the backend describe().backend !== 'cas', return (explicit-paths is CasBackend-specific). If getConfig().revert.nonGitMode !== 'explicit-paths', return. Then: if event.toolName === 'write' or event.toolName === 'edit', extract `const path = (event.input as { path?: string }).path;` (defensive — typeof string check) and push to `rt.pendingExplicitPaths` (dedupe optional). If event.toolName === 'bash', call `(rt.store as CasBackend).notifyBashUsed()` (cast — the method is CasBackend-specific, not on the SnapshotStore interface). (c) Create `registerToolCallCapture(pi: ExtensionAPI): void { pi.on('tool_call', toolCallCaptureHandler); }`. Wrap the handler body in try/catch → log (E27 fail-open). Import ToolCallEvent type from @earendil-works/pi-coding-agent.\n4. OUTPUT: src/runtime.ts with the new `pendingExplicitPaths?: string[]` field. src/capture.ts with the new `toolCallCaptureHandler` + `registerToolCallCapture` exports. The handler accumulates write/edit paths per turn and warns on bash usage in explicit-paths mode.\n5. DOCS: [Mode A] Add JSDoc to the new handler + the pendingExplicitPaths field documenting the explicit-paths capture flow (spec/14 §4.2, BUG-003). No user-facing/config/API surface change.",
