@@ -48,11 +48,11 @@ const execFile = promisify(execFileCb);
  * (mode-agnostic — spec/14 §2). `index.ts` (P3.M1.T2) creates ONE store via the `detectAndCreate()`
  * factory (P2.M1.T1.S2) and threads it into the rewind tool + capture hooks.
  *
- * METHOD SIGNATURES ARE SYNCHRONOUS (spec/14 §2 + the work-item contract — GOTCHA #1) — e.g.
- * `capture()` returns `string | null`, NOT `Promise<string | null>`. Each backend constructs its
- * own `AsyncMutex` (below) in its constructor and serializes its operations internally (spec §4.3);
- * the interface itself is a pure type contract, decoupled from the mutex. See
- * `@14-working-tree-revert.md` §2 (architecture), §3 (GitBackend), §4 (CasBackend), §5 (capture
+ * METHOD SIGNATURES ARE ASYNC (Promise return; serialized via AsyncMutex — spec/14 §4.3). The five
+ * IO-bearing methods (`capture`/`dirtyCheck`/`restore`/`has`/`retire`) return Promises so each
+ * backend can acquire its own `AsyncMutex` (below) and await `child_process.execFile` without
+ * freezing the Pi event loop (execFileSync would). `describe()` stays SYNC (pure metadata — no IO).
+ * See `@14-working-tree-revert.md` §2 (architecture), §3 (GitBackend), §4 (CasBackend), §5 (capture
  * lifecycle), §6 (restore semantics).
  *
  * EXPORTED so git.ts/cas.ts (P2.M2/P2.M3) `implements SnapshotStore` and index.ts (P3.M1.T2) +
@@ -77,7 +77,7 @@ export interface SnapshotStore {
    * the ref's retention namespace (turn/* GC'd at prompt-boundary; checkpoint/* exempt — spec §5).
    * spec/14 §2, §5. IMPLEMENTED BY: GitBackend/CasBackend.
    */
-  capture(label: string): string | null;
+  capture(label: string): Promise<string | null>;
 
   /**
    * Return the subset of `paths` whose CURRENT work-tree content differs from the `afterRef`
@@ -87,7 +87,7 @@ export interface SnapshotStore {
    * is content-equality (git diff against the afterRef tree / CAS hash equality). spec/14 §2, §6.
    * IMPLEMENTED BY: git/cas.
    */
-  dirtyCheck(afterRef: string, paths: string[]): string[];
+  dirtyCheck(afterRef: string, paths: string[]): Promise<string[]>;
 
   /**
    * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state). `opts`
@@ -99,14 +99,14 @@ export interface SnapshotStore {
    * Working-tree ONLY — never touches the source git index/refs. spec/14 §2, §6. CONSUMED BY:
    * rewindExecute step 6b (P4.M2.T1.S2). IMPLEMENTED BY: git/cas.
    */
-  restore(beforeRef: string, opts: RestoreOpts): RestoreResult;
+  restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult>;
 
   /**
    * Does a snapshot ref still exist (resolvable) in the backend's store? Used by the capture
    * lifecycle / cross-reload (E32) to decide whether a persisted RevertCheckpoint's refs are still
    * honored. spec/14 §2. IMPLEMENTED BY: git/cas.
    */
-  has(ref: string): boolean;
+  has(ref: string): Promise<boolean>;
 
   /**
    * Drop a protected ref so its underlying objects can be reclaimed by the next GC pass (git
@@ -114,7 +114,7 @@ export interface SnapshotStore {
    * (spec §5 "Checkpoints are exempt… held until revoked or consumed"). The prompt-boundary GC pass
    * (spec §5) retires turn/* refs en masse. spec/14 §2, §5. IMPLEMENTED BY: git/cas.
    */
-  retire(ref: string): void;
+  retire(ref: string): Promise<void>;
 }
 
 /**
@@ -216,12 +216,13 @@ export class AsyncMutex {
 /**
  * Constructor shape GitBackend (src/snapshot/git.ts, P2.M2.T1) MUST satisfy. LOCAL + UN-EXPORTED —
  * exists ONLY to type the forward-compat dynamic-import cast below (not a public contract; P2.M2 may
- * widen `implements` details freely as long as the ctor takes `(cwd, revertConfig)`). Repo-root
- * resolution happens INSIDE GitBackend (its own `rev-parse --show-toplevel`); detectAndCreate only
- * proves the workspace is a git repo, it does NOT locate the repo root.
+ * widen `implements` details freely as long as the ctor takes `(cwd, revertConfig, sessionDir?)`).
+ * `sessionDir?` is used ONLY when `storageDir` is null, to resolve `<sessionDir>/mulligan/`.
+ * Repo-root resolution happens INSIDE GitBackend (its own `rev-parse --show-toplevel`); detectAndCreate
+ * only proves the workspace is a git repo, it does NOT locate the repo root.
  */
 interface GitBackendCtor {
-  new (cwd: string, revertConfig: MulliganConfig["revert"]): SnapshotStore;
+  new (cwd: string, revertConfig: MulliganConfig["revert"], sessionDir?: string | null): SnapshotStore;
 }
 
 /**
@@ -292,11 +293,11 @@ function summarize(msg: string): string {
  * solely for real backends). spec/14 §2 ("Detection"), §6 (rewind proceeds without file revert),
  * spec/14 E28 (fail-open), spec/14 §1 layer 1 (revert is opt-in — its absence is always non-fatal).
  *
- * The 6 methods mirror SnapshotStore but are SYNCHRONOUS no-ops (GOTCHA #1 — the interface is sync;
- * capture returns `null`, NOT `Promise<null>`). `capture` is null (revert unavailable), `dirtyCheck`
- * is empty (no drift info to give), `restore` returns the 5 empty buckets (nothing was done), `has` is
- * false, `retire` is void. detectAndCreate is ASYNC (it awaits execFile + import + mkdir), but the
- * store it returns exposes the sync interface.
+ * The 6 methods mirror the async SnapshotStore interface: `capture` is an async no-op returning null
+ * (revert unavailable), `dirtyCheck` is an async no-op returning `[]` (no drift info), `restore` is an
+ * async no-op returning the 5 empty buckets (nothing was done), `has` is an async no-op returning
+ * false, `retire` is an async no-op void. `describe()` stays sync (pure metadata). detectAndCreate is
+ * ASYNC (it awaits execFile + import + mkdir); the store it returns exposes the async interface.
  *
  * EXPORTED so the rewind tool (rewindExecute, P4.M2.T1.S2) can read `store.describe().backend` and
  * skip the file-revert branch when it is "none", and so tests + index.ts (P3.M1.T2) can observe the
@@ -311,23 +312,23 @@ export class NoOpStore implements SnapshotStore {
     return { backend: "none", reason: this.reason };
   }
 
-  capture(_label: string): null {
+  async capture(_label: string): Promise<null> {
     return null; // revert unavailable — capture never succeeds
   }
 
-  dirtyCheck(_afterRef: string, _paths: string[]): string[] {
+  async dirtyCheck(_afterRef: string, _paths: string[]): Promise<string[]> {
     return []; // no drift info available from a no-op store
   }
 
-  restore(_beforeRef: string, _opts: RestoreOpts): RestoreResult {
+  async restore(_beforeRef: string, _opts: RestoreOpts): Promise<RestoreResult> {
     return { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
   }
 
-  has(_ref: string): boolean {
+  async has(_ref: string): Promise<boolean> {
     return false; // NoOpStore holds no refs
   }
 
-  retire(_ref: string): void {
+  async retire(_ref: string): Promise<void> {
     /* no-op — nothing to retire */
   }
 }
@@ -381,7 +382,7 @@ export async function detectAndCreate(
       // exit 0 ⇒ is a git repo ⇒ construct the GitBackend (P2.M2.T1).
       const spec = "./git.js"; // NON-LITERAL specifier → not statically resolved by tsc/rollup
       const mod = (await import(spec)) as { GitBackend: GitBackendCtor };
-      return new mod.GitBackend(cwd, revertConfig);
+      return new mod.GitBackend(cwd, revertConfig, sessionDir);
     } catch {
       // not git — fall through to the CAS branch.
     }

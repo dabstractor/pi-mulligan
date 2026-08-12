@@ -147,14 +147,14 @@ describe("AsyncMutex — spec/14 §4.3 serialization contract", () => {
 });
 
 describe("SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex — type shapes (spec/14 §2)", () => {
-  it("(type) capture(label) takes one string and returns a SYNCHRONOUS string | null (GOTCHA #1)", () => {
+  it("(type) capture(label) takes one string and returns an ASYNC Promise<string | null> (spec §4.3)", () => {
     expectTypeOf<SnapshotStore["capture"]>().parameters.toEqualTypeOf<[string]>();
-    expectTypeOf<SnapshotStore["capture"]>().returns.toEqualTypeOf<string | null>();
+    expectTypeOf<SnapshotStore["capture"]>().returns.toEqualTypeOf<Promise<string | null>>();
   });
 
-  it("(type) restore(beforeRef, opts) returns RestoreResult (sync — GOTCHA #1)", () => {
+  it("(type) restore(beforeRef, opts) returns Promise<RestoreResult> (async — spec §4.3)", () => {
     expectTypeOf<SnapshotStore["restore"]>().parameters.toEqualTypeOf<[string, RestoreOpts]>();
-    expectTypeOf<SnapshotStore["restore"]>().returns.toEqualTypeOf<RestoreResult>();
+    expectTypeOf<SnapshotStore["restore"]>().returns.toEqualTypeOf<Promise<RestoreResult>>();
   });
 
   it("(type) describe() returns { backend: 'git'|'cas'|'none'; reason?: string } (3-valued — GOTCHA #6)", () => {
@@ -165,16 +165,16 @@ describe("SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex — type shap
     }>();
   });
 
-  it("(type) dirtyCheck(afterRef, paths) returns string[] (sync)", () => {
+  it("(type) dirtyCheck(afterRef, paths) returns Promise<string[]> (async — spec §4.3)", () => {
     expectTypeOf<SnapshotStore["dirtyCheck"]>().parameters.toEqualTypeOf<[string, string[]]>();
-    expectTypeOf<SnapshotStore["dirtyCheck"]>().returns.toEqualTypeOf<string[]>();
+    expectTypeOf<SnapshotStore["dirtyCheck"]>().returns.toEqualTypeOf<Promise<string[]>>();
   });
 
-  it("(type) has(ref) returns boolean; retire(ref) returns void (sync)", () => {
+  it("(type) has(ref) returns Promise<boolean>; retire(ref) returns Promise<void> (async — spec §4.3)", () => {
     expectTypeOf<SnapshotStore["has"]>().parameters.toEqualTypeOf<[string]>();
-    expectTypeOf<SnapshotStore["has"]>().returns.toEqualTypeOf<boolean>();
+    expectTypeOf<SnapshotStore["has"]>().returns.toEqualTypeOf<Promise<boolean>>();
     expectTypeOf<SnapshotStore["retire"]>().parameters.toEqualTypeOf<[string]>();
-    expectTypeOf<SnapshotStore["retire"]>().returns.toEqualTypeOf<void>();
+    expectTypeOf<SnapshotStore["retire"]>().returns.toEqualTypeOf<Promise<void>>();
   });
 
   it("(type) RestoreOpts = { revertFileChanges: boolean; deleteCreatedFiles: boolean }", () => {
@@ -227,19 +227,19 @@ describe("NoOpStore — fail-open terminal store (spec/14 §2, E28)", () => {
     });
   });
 
-  it("(b) capture() returns null (SYNCHRONOUS — GOTCHA #1; revert unavailable)", () => {
+  it("(b) capture() returns null (ASYNC no-op — revert unavailable; spec §4.3)", async () => {
     const store = new NoOpStore("x");
-    expect(store.capture("turn")).toBeNull(); // null, NOT Promise<null>
+    expect(await store.capture("turn")).toBeNull();
   });
 
-  it("(c) dirtyCheck() returns [] (no drift info available)", () => {
+  it("(c) dirtyCheck() returns [] (async no-op — no drift info available)", async () => {
     const store = new NoOpStore("x");
-    expect(store.dirtyCheck("after-ref", ["a.ts", "b.ts"])).toEqual([]);
+    expect(await store.dirtyCheck("after-ref", ["a.ts", "b.ts"])).toEqual([]);
   });
 
-  it("(d) restore() returns the 5 EMPTY buckets (nothing was done — sync)", () => {
+  it("(d) restore() returns the 5 EMPTY buckets (async no-op — nothing was done)", async () => {
     const store = new NoOpStore("x");
-    expect(store.restore("before-ref", { revertFileChanges: true, deleteCreatedFiles: true })).toEqual({
+    expect(await store.restore("before-ref", { revertFileChanges: true, deleteCreatedFiles: true })).toEqual({
       reverted: [],
       deleted: [],
       failed: [],
@@ -248,15 +248,14 @@ describe("NoOpStore — fail-open terminal store (spec/14 §2, E28)", () => {
     });
   });
 
-  it("(e) has() returns false (NoOpStore holds no refs)", () => {
+  it("(e) has() returns false (async no-op — NoOpStore holds no refs)", async () => {
     const store = new NoOpStore("x");
-    expect(store.has("any-ref")).toBe(false);
+    expect(await store.has("any-ref")).toBe(false);
   });
 
-  it("(f) retire() is a no-op void (never throws)", () => {
+  it("(f) retire() is an async no-op void (never throws)", async () => {
     const store = new NoOpStore("x");
-    expect(() => store.retire("any-ref")).not.toThrow();
-    expect(store.retire("any-ref")).toBeUndefined();
+    await expect(store.retire("any-ref")).resolves.toBeUndefined();
   });
 
   it("(g) satisfies the full SnapshotStore interface (all 6 methods present)", () => {
@@ -345,11 +344,12 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     const storageDir = await mkdtemp(join(tmpdir(), "git-store-"));
     dirs.push(storageDir);
     const cfg = { ...REVERT_CFG, storageDir };
-    // TODAY: detection reaches the git branch (rev-parse exit 0), but import("./git.js") rejects
-    // (git.ts ships in P2.M2.T1) → fail-open to NoOpStore. AFTER P2.M2.T1: backend === "git".
+    // BEFORE P2.M2.T1: detection reached the git branch (rev-parse exit 0) but import("./git.js")
+    // rejected (git.ts absent) → fail-open to NoOpStore. AFTER P2.M2.T1: git.ts exists → the dynamic
+    // import resolves → detectAndCreate constructs a GitBackend → backend === "git" (the intended flip;
+    // this test now pins that forward-compat contract landed correctly).
     const store = await detectAndCreate(gitDir, cfg, null);
-    expect(store).toBeInstanceOf(NoOpStore);
-    expect(store.describe().backend).toBe("none");
+    expect(store.describe().backend).toBe("git");
   });
 
   it("(e) storageDir===null + sessionDir → default <sessionDir>/mulligan/ resolved (no throw)", async () => {
