@@ -2038,6 +2038,7 @@ The drift nudge (§2) MUST NOT fire for a turn in which the agent already issued
 ## E19. Shrink target is a non-`toolResult` message
 - **Situation:** `by_content_includes` matches a user/assistant/custom message, not a tool result.
 - **Behavior:** `applyShrink` replaces `content` but **preserves `role`**. Shrinking a user message is allowed but unusual; the description steers the agent toward tool results. No special handling beyond role preservation. (Pairing unaffected since it's not a toolResult.)
+- **The original is never lost (hard invariant):** shrink is a *view substitution* — the user's actual message stays on disk and is recoverable via `/tree` (D2 / soft-delete). Summarizing user input is acceptable precisely because the original always survives; only the model's in-context copy is replaced.
 
 ## E20. `pi.appendEntry` / `pi.sendMessage` ordering race
 - **Situation:** the tool calls `appendEntry` then `sendMessage`; could the note land before the marker in the entry order?
