@@ -57,6 +57,7 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -499,5 +500,244 @@ describe("F-revert-cas/dirtyguard integration (spec/10 §2.1 / spec/14 §4/§6) 
     expect(marker).toBeTruthy();
     //   (d) the refuse branch left NO revert block (never assigns revertBlock / never calls restore).
     expect(marker.revert).toBeUndefined();
+  });
+
+  // ── F-revert-failopen (spec/10 §2.1 row F-revert-failopen / E27 — cas backend) ──
+  //
+  // CasBackend.restore writes pre-existing manifest files back IN PLACE via fs.writeFile(abs, content)
+  // (cas.ts:1050). To make that write fail → chmod the FILE 0o444 (open(O_WRONLY|O_CREAT|O_TRUNC)
+  // returns EACCES → failed[] push at cas.ts:1053). The git failopen test (revert-git:494) locks a
+  // SUBDIR because `git checkout` unlinks+recreates (only a read-only DIR stops the unlink) — that
+  // rationale does NOT transfer to cas (a read-only dir does NOT block an in-place writeFile to an
+  // existing file). LOCK THE FILE here, not the dir.
+  it("F-revert-failopen (cas): read-only-locked file lands in failedFiles; the rest reverted; rewind SUCCEEDS (E27 — CasBackend.restore best-effort)", async () => {
+    // chmod is a no-op for root (root ignores the read-only bit → the file WOULD revert and
+    // failedFiles would be empty). Guard: skip under root so the assertions stay faithful.
+    if (process.getuid && process.getuid() === 0) {
+      console.warn(
+        "[revert-cas] running as root — skipping F-revert-failopen (chmod is ineffective for root)",
+      );
+      return;
+    }
+
+    // SETUP: a real NON-git temp dir with two pre-span files (NO makeRepo, NO git commit — non-git).
+    const repoDir = makeNonGitDir("rev-cas-failopen-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "a.ts"), "A1\n");
+    writeFileSync(join(repoDir, "b.ts"), "B1\n");
+
+    const preSpan = {
+      a: readFileSync(join(repoDir, "a.ts"), "utf8"),
+      b: readFileSync(join(repoDir, "b.ts"), "utf8"),
+    };
+
+    // SEPARATE storage dir (must NOT resolve inside cwd — config rejects that → NoOpStore).
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+
+    // CONFIG + STORE + RUNTIME. cas mode → real hooks work (whole-tree capture through them).
+    setConfig({ revert: { enabled: true, nonGitMode: "cas", storageDir } });
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("cas");
+
+    const sid = "s-cas-failopen";
+    const rt = getRuntime(sid);
+    rt.store = store; // before the capture hooks (they self-gate on rt.store)
+    const { appended, pi } = makePi();
+
+    // Two writes so ledger.modifiedFiles = [a.ts, b.ts] (the dirty guard checks both).
+    const contextEntries = [
+      msgEntry(user("rewrite the files")),
+      msgEntry(asstWrite("w1", "a.ts")),
+      msgEntry(result("w1")),
+      msgEntry(asstWrite("w2", "b.ts")),
+      msgEntry(result("w2")),
+      msgEntry(asst("final")),
+      msgEntry(result("final")),
+    ];
+    const { ctx } = makeCtx({ sessionId: sid, contextEntries });
+
+    // CAPTURE turn_start (REAL hook — cas-mode whole-tree walk).
+    await turnStartCaptureHandler(
+      { type: "turn_start", turnIndex: 0, timestamp: Date.now() },
+      ctx,
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("turn");
+
+    // MUTATE both files in-span (the abandoned work).
+    writeFileSync(join(repoDir, "a.ts"), "A2\n");
+    writeFileSync(join(repoDir, "b.ts"), "B2\n");
+    // LOCK b.ts (the failopen target) read-only — cas restore writes the FILE in place, so a 0o444
+    // file blocks the open(O_WRONLY) → EACCES → failed[] (cas.ts:1053). Lock the FILE, not the dir.
+    chmodSync(join(repoDir, "b.ts"), 0o444);
+
+    // CAPTURE agent_end (REAL hook — whole-tree afterRef).
+    await agentEndCaptureHandler({ type: "agent_end", messages: [] }, ctx);
+    expect(rt.snapshots?.get("turn")?.afterRef).toBe("turn-after");
+
+    // DRIVE + ASSERT inside a try/finally so the read-only b.ts is always restored to 0o644 for the
+    // afterEach rmSync cleanup (a leaked read-only file can make rmSync fail with EACCES on strict
+    // platforms).
+    try {
+      const res = await run(
+        pi,
+        ctx,
+        { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+        "final",
+      );
+
+      // ASSERT rewind SUCCEEDS (fail-open, E27 — the op NEVER throws; best-effort). NOTE: the revert
+      // summary line contains "0 refused (see log)" even on success, so check the REFUSAL PREFIX,
+      // not the bare word "refused".
+      expect(firstText(res)).not.toContain("Mulligan: refused");
+      expect(firstText(res)).toContain("Reverted");
+
+      // ASSERT a.ts (the unlocked one) REVERTED.
+      expect(readFileSync(join(repoDir, "a.ts"), "utf8")).toBe(preSpan.a);
+
+      // ASSERT b.ts (the locked one) NOT reverted (stays mutated — the read-only file blocked the
+      // in-place writeFile).
+      expect(readFileSync(join(repoDir, "b.ts"), "utf8")).not.toBe(preSpan.b);
+      expect(readFileSync(join(repoDir, "b.ts"), "utf8")).toBe("B2\n");
+
+      // ASSERT the marker: b.ts in failedFiles, a.ts in revertedFiles.
+      const revert = rewindMarker(appended).revert;
+      expect(revert?.backend).toBe("cas");
+      expect(revert?.failedFiles).toEqual(expect.arrayContaining(["b.ts"]));
+      expect(revert?.revertedFiles).toEqual(expect.arrayContaining(["a.ts"]));
+    } finally {
+      // Restore perms so afterEach rmSync(repoDir) does not EACCES on the read-only file.
+      chmodSync(join(repoDir, "b.ts"), 0o644);
+    }
+  });
+
+  // ── F-revert-delete (spec/10 §2.1 row F-revert-delete — the double-gate, cas backend) ──
+
+  it("F-revert-delete (cas, off): deletion REFUSED when allowDeleteCreatedFiles is false (file stays; deletedFiles empty)", async () => {
+    // SETUP: a real NON-git temp dir with one pre-existing file (so the tree is non-empty).
+    const repoDir = makeNonGitDir("rev-cas-delete-off-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "existing.txt"), "E1\n");
+
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    // config gate OFF + per-call flag ON → the cas double-gate (cas.ts:1057/1078) refuses deletion.
+    setConfig({
+      revert: { enabled: true, nonGitMode: "cas", allowDeleteCreatedFiles: false, storageDir },
+    });
+
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("cas");
+
+    const sid = "s-cas-delete-off";
+    const rt = getRuntime(sid);
+    rt.store = store;
+    const { appended, pi } = makePi();
+    const contextEntries = [
+      msgEntry(user("create a file")),
+      msgEntry(asstWrite("w1", "new.ts")),
+      msgEntry(result("w1")),
+      msgEntry(asst("final")),
+      msgEntry(result("final")),
+    ];
+    const { ctx } = makeCtx({ sessionId: sid, contextEntries });
+
+    // CAPTURE turn_start (beforeRef — new.ts does NOT exist yet; cas whole-tree walk records it absent).
+    await turnStartCaptureHandler(
+      { type: "turn_start", turnIndex: 0, timestamp: Date.now() },
+      ctx,
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("turn");
+
+    // CREATE the file IN-SPAN (after turn_start so it is absent from the beforeRef manifest —
+    // CRITICAL #7: a file present at turn_start IS in the manifest and would NOT be deleted).
+    writeFileSync(join(repoDir, "new.ts"), "CREATED\n");
+
+    // CAPTURE agent_end.
+    await agentEndCaptureHandler({ type: "agent_end", messages: [] }, ctx);
+    expect(rt.snapshots?.get("turn")?.afterRef).toBe("turn-after");
+
+    // DRIVE: per-call delete_created_files:true — but the config gate is OFF → the double-gate
+    // blocks the unlink ⇒ file stays, deletedFiles empty.
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", delete_created_files: true },
+      "final",
+    );
+
+    // ASSERT the created file STILL EXISTS (NOT deleted).
+    expect(existsSync(join(repoDir, "new.ts"))).toBe(true);
+
+    // ASSERT marker.deletedFiles is empty (the config gate blocked the double-gate).
+    const revert = rewindMarker(appended).revert;
+    expect(revert?.deletedFiles).toEqual([]);
+
+    // ASSERT rewind succeeds (not a refusal).
+    expect(firstText(res)).not.toContain("Mulligan: refused");
+  });
+
+  it("F-revert-delete (cas, on): deletion PERFORMED when allowDeleteCreatedFiles is true (file gone; deletedFiles populated)", async () => {
+    // SEPARATE repo + store + runtime (do NOT reuse the off-sub-case's captured refs — a second
+    // turn_start on the same runtime would GC the prior turn/* refs).
+    const repoDir = makeNonGitDir("rev-cas-delete-on-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "existing.txt"), "E1\n");
+
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    // config gate ON + per-call flag ON → the cas double-gate permits deletion.
+    setConfig({
+      revert: { enabled: true, nonGitMode: "cas", allowDeleteCreatedFiles: true, storageDir },
+    });
+
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("cas");
+
+    const sid = "s-cas-delete-on";
+    const rt = getRuntime(sid);
+    rt.store = store;
+    const { appended, pi } = makePi();
+    const contextEntries = [
+      msgEntry(user("create a file")),
+      msgEntry(asstWrite("w1", "new.ts")),
+      msgEntry(result("w1")),
+      msgEntry(asst("final")),
+      msgEntry(result("final")),
+    ];
+    const { ctx } = makeCtx({ sessionId: sid, contextEntries });
+
+    // CAPTURE turn_start.
+    await turnStartCaptureHandler(
+      { type: "turn_start", turnIndex: 0, timestamp: Date.now() },
+      ctx,
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("turn");
+
+    // CREATE the file IN-SPAN (after turn_start so it is absent from the beforeRef manifest).
+    writeFileSync(join(repoDir, "new.ts"), "CREATED\n");
+
+    // CAPTURE agent_end.
+    await agentEndCaptureHandler({ type: "agent_end", messages: [] }, ctx);
+    expect(rt.snapshots?.get("turn")?.afterRef).toBe("turn-after");
+
+    // DRIVE: per-call delete_created_files:true AND config gate ON → the cas tree-walk delete
+    // (cas.ts:1073-1094: walk present-not-in-beforeRef files + unlink) removes new.ts.
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", delete_created_files: true },
+      "final",
+    );
+
+    // ASSERT the created file is GONE (deleted).
+    expect(existsSync(join(repoDir, "new.ts"))).toBe(false);
+
+    // ASSERT marker.deletedFiles ⊇ {new.ts}.
+    const revert = rewindMarker(appended).revert;
+    expect(revert?.deletedFiles).toEqual(expect.arrayContaining(["new.ts"]));
+
+    // sanity: not a refusal.
+    expect(firstText(res)).not.toContain("Mulligan: refused");
   });
 });

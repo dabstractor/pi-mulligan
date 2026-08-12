@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "v1.2 Working-Tree-Revert Bugfix Release",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix seven defects (1 Critical, 3 Major, 3 Minor) in the v1.2 working-tree-revert feature. The architecture is sound but the rewind-tool-to-store integration has a wrong dirty-baseline for checkpoints (BUG-001), an incomplete cross-reload read path (BUG-002), a fully-missing explicit-paths capture hook (BUG-003), and an under-broad dirty-guard affected set (BUG-004), plus three minor issues (BUG-005/006/007). All fixes are additive or localized line changes within the existing src/snapshot/ + src/tools/rewind.ts + src/capture.ts + src/index.ts modules — no new modules or dependencies. The full existing 1277-test suite must continue to pass.",
       "milestones": [
         {
@@ -376,21 +376,21 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Test Hardening + Documentation Sync",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Strengthen the F-revert-* integration tests to exercise real scenarios (not degenerate/contrived paths), and sync changeset-level documentation to README.md and spec cross-references.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Strengthen F-revert-* integration tests for real scenarios",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add integration tests that exercise the real use cases the PRD identified as untested: a checkpoint span with actual file changes (handled by P1.M1.T1.S2), an explicit-paths mode test (handled by P1.M3.T1.S3), and an E30 dirty-guard test for bash/python-modified files (handled by P1.M4.T2.S2). This task covers any REMAINING test gaps.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Audit and close remaining F-revert-* integration test gaps from PRD recommendations",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",
@@ -410,14 +410,14 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update README.md and any overview documentation to reflect the bug fixes. Ensure spec cross-references are accurate. This is the catch-all that prevents a coherent delta from shipping with stale docs.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Update README.md v1.2 working-tree-revert section to reflect bug fixes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
