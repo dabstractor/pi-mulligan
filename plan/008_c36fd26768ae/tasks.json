@@ -570,7 +570,7 @@
                   "type": "Subtask",
                   "id": "P5.M1.T1.S1",
                   "title": "F-revert-git + F-revert-failopen + F-revert-delete",
-                  "status": "Researching",
+                  "status": "Planned",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T2.S1",
