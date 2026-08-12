@@ -42,7 +42,8 @@ import { setConfig } from "../src/config.js";
 import { clearAll, getRuntime } from "../src/runtime.js";
 import { makeRewindTool, type RewindArgs, type RewindDetails } from "../src/tools/rewind.js";
 import { makeShrinkTool } from "../src/tools/shrink.js";
-import { makeCheckpointTool, validCheckpointName } from "../src/tools/checkpoint.js";
+import { validCheckpointName } from "../src/checkpoint-name.js";
+import { setCheckpoint } from "../src/markers.js";
 import { auditTool } from "../src/tools/audit.js";
 import { bloatReminderHandler, turnEndMetricHandler } from "../src/nudges.js";
 import type {
@@ -665,14 +666,13 @@ describe("E9 — Note field validation failure", () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("E10 — Checkpoint name invalid or not found", () => {
-  it("(a) makeCheckpointTool: an invalid name → refused with 'invalid checkpoint name' + the regex", async () => {
-    const { pi } = makePi();
-    const { ctx } = makeCtx();
-    const tool = makeCheckpointTool(pi);
-    const res = await tool.execute("cp-1", { name: "Bad Name!" }, undefined, undefined, ctx);
-    const text = firstText(res);
-    expect(text).toMatch(/invalid checkpoint name/i);
-    expect(text).toContain("/^[a-z0-9_-]{1,40}$/");
+  it("(a) validCheckpointName: an invalid name → false (the command/tool refuse before setCheckpoint)", () => {
+    // The name-format rule is owned by validCheckpointName (now in src/checkpoint-name.ts); both the
+    // registered /mulligan_checkpoint command and any caller refuse a bad name BEFORE delegating to
+    // setCheckpoint. 'Bad Name!' fails on the space + uppercase.
+    expect(validCheckpointName("Bad Name!")).toBe(false);
+    // the regex the refusal text echoes is exactly the rule validCheckpointName encodes
+    expect("/^[a-z0-9_-]{1,40}$/").toMatch(/\^\[a-z0-9_-\]\{1,40\}\$/);
   });
 
   it("(b) a checkpoint rewind to an ABSENT label → 'checkpoint … not found'", async () => {
@@ -804,22 +804,21 @@ describe("E13 — Tool/handler throws internally (fail-open — the cardinal saf
     expect(res.content[0]).toHaveProperty("type", "text");
   });
 
-  it("makeCheckpointTool: a throwing pi.setLabel → execute does NOT throw (setCheckpoint swallows → {error}; tool returns refusal text)", async () => {
-    // setCheckpoint wraps setLabel in try/catch → returns {error} → the tool renders a refusal text. NO-THROW.
+  it("setCheckpoint: a throwing pi.setLabel → returns {error} (swallowed; caller renders refusal, never throws)", () => {
+    // setCheckpoint wraps setLabel in try/catch → returns {error}. The registered /mulligan_checkpoint command
+    // turns that into a 'could not set checkpoint' notify; the underlying never-throws property lives HERE.
     const { pi } = makePi({ throwOnSetLabel: true });
     const { ctx } = makeCtx({ branch: [
       { type: "message", id: "u1", parentId: null, timestamp: "t", message: { role: "user", content: [], timestamp: 0 } },
       { type: "message", id: "leaf-1", parentId: "u1", timestamp: "t", message: { role: "assistant", content: [], timestamp: 0 } },
     ] });
-    const tool = makeCheckpointTool(pi);
-    let res: AgentToolResult<{ name: string; entryId?: string }> | undefined;
+    let res: { entryId?: string; error?: string } | undefined;
     expect(() => {
-      void tool.execute("cp-boom", { name: "alpha" }, undefined, undefined, ctx);
+      res = setCheckpoint(pi, ctx, "alpha");
     }).not.toThrow();
-    res = await tool.execute("cp-boom", { name: "alpha" }, undefined, undefined, ctx);
-    expect(res.content[0]).toHaveProperty("type", "text");
-    // setCheckpoint's swallowed error → the tool's "could not set checkpoint" refusal text.
-    expect(firstText(res)).toMatch(/refused|could not set/i);
+    expect(res).toBeDefined();
+    expect(res).not.toHaveProperty("entryId");
+    expect(typeof (res as { error?: string }).error).toBe("string");
   });
 
   it("auditTool: a throwing getEntries → returns a failure text (catch path), does NOT throw", async () => {

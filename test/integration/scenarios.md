@@ -35,7 +35,7 @@ pi … -p "/mulligan_smoke <scenario>" -p "Reply with exactly: OK"
 
 - The **first** `-p` dispatches the `/mulligan_smoke` extension command (Pi intercepts `/cmd` prompts and runs
   the command handler — no model call). The command sets up the scenario's persisted state using the **REAL**
-  Mulligan tools (`makeRewindTool`/`makeShrinkTool`/`makeCheckpointTool` — imported from `src/`, same process).
+  Mulligan tools (`makeRewindTool`/`makeShrinkTool` + `setCheckpoint` — imported from `src/`, same process).
 - The **second** `-p` triggers a model turn, which (a) fires the `context` event so Mulligan's filter runs and
   the smoke helper logs `context.fire`, and (b) produces an assistant message so Pi **persists the session
   JSONL** (Pi only flushes the session file once an assistant message exists).

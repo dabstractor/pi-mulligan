@@ -700,7 +700,7 @@ async function auditExecute(
  * helper (CRITICAL INSIGHT #1). `defineTool` preserves `AuditParams`/`AuditDetails` inference.
  *
  * index.ts (P1.M7.T1.S1) does: `pi.registerTool(auditTool);` (NO factory call — unlike
- * makeCheckpointTool/makeRewindTool/makeShrinkTool which capture `pi`).
+ * makeRewindTool/makeShrinkTool which capture `pi`).
  * Unit tests do: `const res = await auditTool.execute("c1", {top:8}, undefined, undefined, fakeCtx);`.
  */
 export const auditTool: ToolDefinition<typeof AuditParams, AuditDetails> = defineTool({

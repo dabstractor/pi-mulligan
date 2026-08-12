@@ -1,7 +1,7 @@
 /**
  * shrink.test.ts — unit tests for the `mulligan_shrink` tool (src/tools/shrink.ts).
  *
- * Mirrors the house tool-test idiom from test/tools/checkpoint.test.ts + test/tools/rewind.test.ts:
+ * Mirrors the house tool-test idiom from test/tools/rewind.test.ts:
  * vitest, hand-rolled `makePi()`/`makeCtx()` fakes (NO vi.fn()), `.js` import paths, `expectTypeOf` for
  * type assertions, `clearAll()` runtime reset (nextSeq mutates the shared module-scoped runtime map —
  * GOTCHA #8 in markers.test.ts). Reuses the markers.test.ts makePi (captures appendEntry) + a makeCtx

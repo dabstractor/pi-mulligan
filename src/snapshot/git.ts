@@ -527,20 +527,6 @@ export class GitBackend implements SnapshotStore {
   }
 
   /**
-   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY `refs/mulligan/snapshots/turn/*`
-   * ref (the whole turn namespace — reclaims prior turns whose in-memory entry no longer exists;
-   * `checkpoint/*` is EXEMPT via the for-each-ref PREFIX arg) AND physically reclaims via
-   * `git gc --auto --prune=now` (self-throttling — a cheap no-op under the loose-object threshold).
-   * Serialized by the mutex (spec §4.3).
-   *
-   * BEST-EFFORT (E27): NEVER rejects — any git error (incl. a missing shadow repo on a fresh
-   * session — ensureInit runs first, mirroring capture/retire) is caught, warned, and returns void
-   * (objects linger until the next GC pass or `session_shutdown`; never blocks the turn). The
-   * for-each-ref PREFIX `refs/mulligan/snapshots/turn/` matches the WHOLE turn namespace
-   * (turn/turn + turn/turn-after) but NOT checkpoint/* — that is the exempt boundary. Called by the
-   * turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
-   */
-  /**
    * Best-effort full teardown (spec/14 §5: "Both stores are deleted entirely on
    * session_shutdown — no cross-session buildup"). Deletes the per-repo SHADOW repo subdir
    * (`join(storageDir, shadowKey(repoRoot))`) — NOT the shared storageDir + NOT other repos'
@@ -575,6 +561,20 @@ export class GitBackend implements SnapshotStore {
     }
   }
 
+  /**
+   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY `refs/mulligan/snapshots/turn/*`
+   * ref (the whole turn namespace — reclaims prior turns whose in-memory entry no longer exists;
+   * `checkpoint/*` is EXEMPT via the for-each-ref PREFIX arg) AND physically reclaims via
+   * `git gc --auto --prune=now` (self-throttling — a cheap no-op under the loose-object threshold).
+   * Serialized by the mutex (spec §4.3).
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any git error (incl. a missing shadow repo on a fresh
+   * session — ensureInit runs first, mirroring capture/retire) is caught, warned, and returns void
+   * (objects linger until the next GC pass or `session_shutdown`; never blocks the turn). The
+   * for-each-ref PREFIX `refs/mulligan/snapshots/turn/` matches the WHOLE turn namespace
+   * (turn/turn + turn/turn-after) but NOT checkpoint/* — that is the exempt boundary. Called by the
+   * turn_start capture hook (P3.M1.T1.S1) + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
+   */
   async gc(): Promise<void> {
     const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
     try {

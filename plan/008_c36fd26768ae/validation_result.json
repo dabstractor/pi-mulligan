@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 3,
+  "summary": "No Critical/Major defects: 1309/1309 tests + typecheck pass and v1.2 git-safety is integration-verified; 3 minor issues (stale committed tarball, orphaned gc() JSDoc in two backends, vestigial makeCheckpointTool dead code). Smoke blocked in this checkout by an environmental global-package collision (not a code bug)."
+}

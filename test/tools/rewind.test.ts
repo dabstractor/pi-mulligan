@@ -1,7 +1,7 @@
 /**
  * rewind.test.ts — unit tests for the `mulligan_rewind` tool (src/tools/rewind.ts).
  *
- * Mirrors the house test idiom from test/tools/checkpoint.test.ts + test/markers.test.ts: vitest, hand-rolled
+ * Mirrors the house test idiom from test/markers.test.ts: vitest, hand-rolled
  * `makePi()`/`makeCtx()` fakes (NO vi.fn()), `.js` import paths, `expectTypeOf` for type assertions,
  * `clearAll()` runtime reset before/after each test (nextSeq mutates the shared module-scoped runtime map).
  *

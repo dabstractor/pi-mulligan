@@ -890,23 +890,6 @@ export class CasBackend implements SnapshotStore {
   }
 
   /**
-   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY turn/* manifest (the whole turn
-   * namespace — reclaims prior turns whose in-memory entry no longer exists) AND mark-sweeps
-   * unreferenced content blobs. `checkpoint/*` manifests (filenames starting with `ckpt`) are
-   * EXEMPT: kept, and their referenced blob hashes are collected into the surviving set so the
-   * mark-sweep preserves their blobs. Serialized by the mutex (spec §4.3).
-   *
-   * CAS has no native reachability GC (spec §5 "CAS backend reclamation — the non-git analog"), so
-   * this implements the mark-sweep explicitly: turn manifests are deleted FIRST, then the surviving
-   * set is the union of checkpoint-manifest blob hashes (exactly PRD §5 "the surviving set is the
-   * active snapshots' union"), then any blob NOT in the surviving set is reclaimed.
-   *
-   * BEST-EFFORT (E27): NEVER rejects — any fs error is caught, warned, and returns void (objects
-   * linger until the next GC pass / `session_shutdown`; never blocks the turn). A missing manifests
-   * or blobs dir ⇒ early void (nothing to GC). Called by the turn_start capture hook (P3.M1.T1.S1)
-   * + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
-   */
-  /**
    * Best-effort full teardown (spec/14 §5: "Both stores are deleted entirely on
    * session_shutdown — no cross-session buildup"). Deletes the WHOLE CAS dir (`storageDir` —
    * blobs/ + manifests/ + all shards) so there is no cross-session disk buildup.
@@ -931,6 +914,23 @@ export class CasBackend implements SnapshotStore {
     }
   }
 
+  /**
+   * The prompt-boundary reclamation pass (spec/14 §5). Drops EVERY turn/* manifest (the whole turn
+   * namespace — reclaims prior turns whose in-memory entry no longer exists) AND mark-sweeps
+   * unreferenced content blobs. `checkpoint/*` manifests (filenames starting with `ckpt`) are
+   * EXEMPT: kept, and their referenced blob hashes are collected into the surviving set so the
+   * mark-sweep preserves their blobs. Serialized by the mutex (spec §4.3).
+   *
+   * CAS has no native reachability GC (spec §5 "CAS backend reclamation — the non-git analog"), so
+   * this implements the mark-sweep explicitly: turn manifests are deleted FIRST, then the surviving
+   * set is the union of checkpoint-manifest blob hashes (exactly PRD §5 "the surviving set is the
+   * active snapshots' union"), then any blob NOT in the surviving set is reclaimed.
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any fs error is caught, warned, and returns void (objects
+   * linger until the next GC pass / `session_shutdown`; never blocks the turn). A missing manifests
+   * or blobs dir ⇒ early void (nothing to GC). Called by the turn_start capture hook (P3.M1.T1.S1)
+   * + the session_start GC (P3.M1.T2.S1). @14 §5 + §4.3.
+   */
   async gc(): Promise<void> {
     const release = await this.mutex.acquire(); // §4.3 — serialize ALL store ops incl. gc
     try {

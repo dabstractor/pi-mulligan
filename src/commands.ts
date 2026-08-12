@@ -31,7 +31,7 @@ import { filterPipeline } from "./transforms.js"; // E16 fallback only (spec/06 
 import { readMarkers } from "./filter.js"; // active markers (rewinds/shrinks/cancelledIds)
 import { estimateTokens } from "./tokens.js"; // total + per-message token estimates
 import { bloatThresholdFor } from "./nudges.js"; // per-tool bloat threshold (Nudge A)
-import { validCheckpointName } from "./tools/checkpoint.js";
+import { validCheckpointName } from "./checkpoint-name.js";
 import { reconcileBanner } from "./banner.js";
 import {
   renderAuditReport,

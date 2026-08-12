@@ -16,8 +16,8 @@
  *       of size; its role is as a shrink target (RESULT_CANARY). New defaults: global bloatThresholdBytes=16384,
  *       bloatThresholdBytesByTool={read:24576}.
  *   (5) registerCommand /mulligan_smoke <scenario> → the DETERMINISTIC driver. Dispatches per scenario using
- *       the REAL tool factories (makeRewindTool/makeShrinkTool/makeCheckpointTool — shared module, same
- *       process) and triggers an observing inference via pi.sendUserMessage("ok",{deliverAs:"followUp"}) so
+ *       the REAL tool factories (makeRewindTool/makeShrinkTool — shared module, same
+ *       process) + setCheckpoint (markers.ts) for the checkpoint scenarios, and triggers an observing inference via pi.sendUserMessage("ok",{deliverAs:"followUp"}) so
  *       the filter's effect is observable (GOTCHA #2).
  *   (6) OPTIONAL: enable Mulligan's OWN corroborating filter.fire log (wrapped in try/catch; OFF-by-default).
  *
@@ -37,9 +37,8 @@ import { appendFileSync, writeFileSync } from "node:fs";
 // factory closures that capture `pi`, so they work correctly regardless of module cache identity).
 import { makeRewindTool } from "../../src/tools/rewind.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js";
-import { makeCheckpointTool } from "../../src/tools/checkpoint.js";
 import { auditTool } from "../../src/tools/audit.js";
-import { appendRewindMarker, type RewindMarkerInput } from "../../src/markers.js";
+import { appendRewindMarker, setCheckpoint, type RewindMarkerInput } from "../../src/markers.js";
 
 // ── Log destination (per-scenario isolation via env; orchestrator sets MULLIGAN_SMOKE_LOG) ───────────
 const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";
@@ -272,9 +271,10 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // Set a checkpoint, then rewind to it. The checkpoint is a label entry; the rewind hides back to it.
         // The orchestrator's second `-p` triggers the observing inference.
         try {
-          const cpTool = makeCheckpointTool(pi);
-          const cpRes = await cpTool.execute("smoke-cp-1", { name: "alpha" }, undefined, undefined, ctx);
-          const cpText = resultText(cpRes.content as unknown as { type: string; text?: string }[]);
+          const cpRes = setCheckpoint(pi, ctx, "alpha");
+          const cpText = "entryId" in cpRes
+            ? `checkpoint 'alpha' set at entry ${cpRes.entryId}`
+            : `checkpoint failed: ${cpRes.error}`;
           smokeLog("tool.checkpoint", "info", { text: cpText.slice(0, 120) });
         } catch (e) {
           smokeLog("tool.checkpoint", "fail", { error: String(e) });
@@ -288,9 +288,10 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // setCheckpoint labels — so it SUCCEEDS (fixes the baseline breakage where a fresh 2-prompt session has no
         // stable entry). A SEED_HIDDEN model turn runs AFTER this, then F-checkpoint-rewind hides it (K>0).
         try {
-          const cpTool = makeCheckpointTool(pi);
-          const cpRes = await cpTool.execute("smoke-cp-1", { name: "alpha" }, undefined, undefined, ctx);
-          const cpText = resultText(cpRes.content as unknown as { type: string; text?: string }[]);
+          const cpRes = setCheckpoint(pi, ctx, "alpha");
+          const cpText = "entryId" in cpRes
+            ? `checkpoint 'alpha' set at entry ${cpRes.entryId}`
+            : `checkpoint failed: ${cpRes.error}`;
           smokeLog("tool.checkpoint", "info", { phase: "set", text: cpText.slice(0, 120) });
         } catch (e) {
           smokeLog("tool.checkpoint", "fail", { phase: "set", error: String(e) });

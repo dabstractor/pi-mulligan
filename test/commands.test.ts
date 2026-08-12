@@ -3,7 +3,7 @@
  * (src/commands.ts: `makeCheckpointCommand`, `makeCheckpointRevokeCommand`) and the exported
  * `clearCheckpointByName` helper.
  *
- * Mirrors the house test idiom from test/tools/checkpoint.test.ts: vitest, hand-rolled
+ * Mirrors the house test idiom from test/tools/rewind.test.ts: vitest, hand-rolled
  * `makePi()`/`makeCtx()` fakes (NO vi.fn for Pi objects), `.js` import paths, `clearAll()` +
  * `setConfig(undefined)` reset, verbatim-string assertions. The fake `ctx` is RICHER than the
  * tool-test sibling's because command handlers touch `ctx.hasUI` + `ctx.ui` + `clearCheckpointByName`
