@@ -500,8 +500,9 @@ describe("renderHighWaterNudge — one-line annotation (spec/07 §5.2)", () => {
     expect(s.length).toBeGreaterThan(0);
     expect(s).toContain("~70%");
     expect(s).toContain("[mulligan]");
-    expect(s).toContain("mulligan_shrink");
-    expect(s).toContain("mulligan_rewind");
+    expect(s).not.toContain("mulligan_shrink");   // BUG-002: high-water is awareness-only (spec/07 §5.2 v1.1 note)
+    expect(s).not.toContain("mulligan_rewind");
+    expect(s).toContain("review recent output");  // the new awareness phrasing
   });
 
   it("rounds the percentage (0.75 → 75%, 0.666 → 67%)", () => {
@@ -515,7 +516,9 @@ describe("renderHighWaterNudge — one-line annotation (spec/07 §5.2)", () => {
     expect(typeof s).toBe("string");
     expect(s.length).toBeGreaterThan(0);
     expect(s).not.toContain("%"); // no NaN/Infinity%
-    expect(s).toContain("mulligan_shrink"); // still recommends the tools
+    expect(s).not.toContain("mulligan_shrink"); // BUG-002: fallback is awareness-only too
+    expect(s).not.toContain("mulligan_rewind");
+    expect(s).toContain("review recent output");
   });
 });
 

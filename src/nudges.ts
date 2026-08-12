@@ -516,9 +516,13 @@ export function shouldHighWater(
 /**
  * renderHighWaterNudge — §5.2 high-water one-line annotation (spec/07-preventive-and-nudges.md §5.2, REQUIRED).
  * PURE, never throws. Composes the single-line annotation in the renderDriftNudge style (notes.ts): leading
- * "[mulligan] " prefix, recommends mulligan_shrink/mulligan_rewind, NO trailing newline, ~25–40 tokens. The text
- * format is PINNED by the item contract:
- *   `[mulligan] Context is at ~<pct>% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`
+ * "[mulligan] " prefix, AWARENESS-ONLY (does NOT prescribe rewind/shrink), NO trailing newline, ~25–40 tokens.
+ * The text is awareness-only per spec/07 §5.2 v1.1 note (D10): the high-water signal measures TOTAL filtered
+ * context (including user-supplied content), so it must NOT prescribe mulligan_rewind/mulligan_shrink — those
+ * would mis-fire on user-attributable bloat the guardrail (spec/13 §1) protects from rewind. (This separates
+ * "the agent should shed something" = drift delta, agent-attributable, from "the window is filling" = high-water,
+ * total awareness.) The text format is PINNED by the item contract:
+ *   `[mulligan] Context is at ~<pct>% of the window; review recent output for reclaimable space.`
  * where `<pct>` = `Math.round((totalFilteredTokens / windowTokens) * 100)` (round, not floor/trunc — the contract
  * example "~70%" for 0.7 needs Math.round(0.7*100)=70).
  *
@@ -536,10 +540,10 @@ export function renderHighWaterNudge(totalFilteredTokens: number, windowTokens: 
     // Defensive: can't compute a percentage. shouldHighWater short-circuits this in prod, but this renderer is
     // exported + directly callable — never let NaN/Infinity% leak. Fail to a percentage-free line (mirrors
     // renderDriftNudge/renderBloatReminder's never-throws discipline — spec/07 §2/§1, E13).
-    return "[mulligan] Context is filling up. Consider mulligan_shrink or mulligan_rewind to reclaim space.";
+    return "[mulligan] Context is filling up; review recent output for reclaimable space.";
   }
   const pct = Math.round((totalFilteredTokens / windowTokens) * 100);
-  return `[mulligan] Context is at ~${pct}% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`;
+  return `[mulligan] Context is at ~${pct}% of the window; review recent output for reclaimable space.`;
 }
 
 /**
