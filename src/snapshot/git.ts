@@ -455,6 +455,64 @@ export class GitBackend implements SnapshotStore {
   }
 
   /**
+   * Return the WORKSPACE-RELATIVE POSIX paths that differ between the `beforeRef` snapshot (a
+   * shadow-repo commit SHA from `capture()`) and the CURRENT working tree — EXACTLY the set
+   * `restore()` would touch. This is the spec-mandated AFFECTED SET for the dirty guard (BUG-004):
+   * spec/14 §6 step 2 defines it VERBATIM as "paths that differ between `beforeRef` and the
+   * current tree (the files restore would touch)".
+   *
+   * git algorithm: `git diff --name-only <beforeRef>` via `shadowEnv()` (env.GIT_DIR=shadowDir +
+   * GIT_WORK_TREE=repoRoot). A single-commit-arg `git diff` compares the named COMMIT'S TREE
+   * against the WORKING TREE WITHOUT consulting the index (git docs: "the changes you have in
+   * your working tree relative to the named <commit>") — so it is ROBUST to a polluted shadow
+   * index, e.g. a prior restore()'s `read-tree` (which loads beforeRef into the shadow index).
+   *
+   * NO `--diff-filter` is applied. The default filter includes Added/Deleted/Modified (and
+   * Rename/Copy) → FULL coverage of what restore touches. Do NOT use `--diff-filter=MD`: that is
+   * restore()'s INDEX-vs-WORKTREE step AFTER read-tree (where the shadow index === beforeRef, so
+   * MD = modified/deleted vs beforeRef); for this standalone beforeRef-vs-worktree query it would
+   * MISS span-created (Added) files. Created files ARE reverted (deleted) by restore step (c) but
+   * would NEVER be inspected by the dirty guard — re-introducing the EXACT BUG-004 under-coverage
+   * gap this method exists to close (bash/python/perl/heredoc-modified files absent from
+   * `ledger.modifiedFiles`). NO path filter (no `--`, no pathspec tail) — changedPaths has no
+   * path scope (unlike `dirtyCheck`, which scopes to caller paths).
+   *
+   * CONSUMED BY: rewindExecute step 6b (the BUG-004 fix, P1.M4.T2.S1) — REPLACES the heuristic
+   * `ledger.modifiedFiles` so the dirty guard inspects EVERY file restore would touch, closing the
+   * E30 gap for files mutated via `python -c` / `node script.js` / `perl -i` / heredocs /
+   * `awk -i inplace` (which land in `ledger.bashSideEffects`, not `modifiedFiles`).
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any git error (bad beforeRef → git exits 128, exec failure)
+   * is caught, warned, and returns `[]` (the dirty guard's own refuse/allow decision is the
+   * caller's). Serialized by the per-backend AsyncMutex (spec §4.3 — every IO-bearing store op).
+   * IMPLEMENTED BY: git/cas.
+   */
+  async changedPaths(beforeRef: string): Promise<string[]> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    try {
+      await this.ensureInit();
+      if (!beforeRef) return []; // no baseline ⇒ no changed paths (mirrors dirtyCheck's empty-ref guard)
+      const out = await this.exec(
+        "git",
+        ["diff", "--name-only", beforeRef],
+        this.shadowEnv(),
+      );
+      return out.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    } catch (err) {
+      // E27 best-effort: any git error ⇒ [] (no changed paths detected). Never rejects.
+      console.warn(
+        `[mulligan] snapshot.changedPaths failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    } finally {
+      release();
+    }
+  }
+
+  /**
    * Does a snapshot ref still exist (resolvable) in the SHADOW repo? Used by the capture lifecycle /
    * cross-reload (E32) to decide whether a persisted RevertCheckpoint's refs are still honored.
    * spec/14 §2, §5.

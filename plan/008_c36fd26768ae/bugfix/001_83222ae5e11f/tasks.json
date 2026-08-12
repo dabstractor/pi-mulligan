@@ -188,7 +188,7 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Add changedPaths() to SnapshotStore interface + NoOpStore + both backends",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the changedPaths(beforeRef) method to the SnapshotStore interface, NoOpStore, GitBackend, and CasBackend. This method returns the set of paths that differ between the beforeRef snapshot and the current working tree — the files that restore() would touch. It is the spec-mandated affected set for the dirty guard (spec §6 step 2).",
               "subtasks": [
                 {
@@ -210,7 +210,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Implement changedPaths in GitBackend (git diff --name-only)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1"
@@ -227,7 +227,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S3",
                   "title": "Implement changedPaths in CasBackend (manifest hash-compare)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"

@@ -364,6 +364,47 @@ describe("GitBackend.dirtyCheck — spec/14 §3/§6", () => {
   });
 });
 
+describe("GitBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
+  it("issues `git diff --name-only <beforeRef>` (NO --, NO paths, NO --diff-filter) with env.GIT_DIR===shadow", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { stdoutByCmd: { diff: "a.ts\nb.ts\n" } });
+    const changed = await gb.changedPaths("BEFORE1");
+    expect(changed).toEqual(["a.ts", "b.ts"]);
+    const diff = findCmd(calls, "diff")!;
+    expect(diff.args).toEqual(["diff", "--name-only", "BEFORE1"]);
+    expect(diff.args).not.toContain("--diff-filter"); // CRITICAL: full A/D/M coverage, not just MD
+    expect(diff.args).not.toContain("--"); // CRITICAL: no path filter (unlike dirtyCheck)
+    expect(diff.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+    expect(diff.opts?.env?.GIT_WORK_TREE).toBe("/fake/repo");
+  });
+
+  it("returns [] when beforeRef is empty (no diff issued)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls);
+    await expect(gb.changedPaths("")).resolves.toEqual([]);
+    expect(findCmd(calls, "diff")).toBeUndefined(); // no diff issued
+  });
+
+  it("trims + drops blank stdout lines", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { stdoutByCmd: { diff: " a.ts \n\nb.ts\n  \n" } });
+    expect(await gb.changedPaths("BEFORE1")).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("never rejects on a git error (warn + [])", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { throwOn: { cmd: "diff", call: 1 } });
+    await expect(gb.changedPaths("BEFORE1")).resolves.toEqual([]); // NOT a rejection
+  });
+
+  it("acquires the mutex (two concurrent both complete — §4.3)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { stdoutByCmd: { diff: "a.ts\n" } });
+    await Promise.all([gb.changedPaths("B1"), gb.changedPaths("B2")]); // must not hang
+    expect(calls.filter((c) => c.args[0] === "diff")).toHaveLength(2);
+  });
+});
+
 describe("GitBackend.has — spec/14 §2", () => {
   it("issues `git rev-parse --verify <ref>` (shadow); exit0⇒true", async () => {
     const calls: Call[] = [];
