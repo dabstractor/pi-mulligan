@@ -797,7 +797,9 @@ async function rewindExecute(
     //      marker entry (the session tree is append-only — C7). S1 (P4.M2.T1.S1) computes the DECISION: gate on
     //      config → gate on granularity → resolve the RevertCheckpoint from rt.snapshots → run the dirty guard
     //      (store.dirtyCheck) against the ledger's modified-file set → produce a proceed/refuse/skip decision + the
-    //      success-text notices for every terminal branch. S2 (P4.M2.T1.S2) FILLS the proceed seam: calls
+    //      success-text notices for every terminal branch. [BUG-001 fix, P1.M1.T1.S1]: the dirty guard is
+    //      CONDITIONAL on checkpoint.afterRef existing (spec/14 §6 step 3) — skipped (restore proceeds) for
+    //      checkpoint-granularity rewinds, which capture once and have no afterRef. S2 (P4.M2.T1.S2) FILLS the proceed seam: calls
     //      store.restore + folds the RestoreResult into the success text (revertClause) + the marker's revert
     //      block (revertBlock) + RewindDetails.revertSummary. Best-effort: a 6b failure (e.g. a thrown dirtyCheck)
     //      degrades to a skip notice; the rewind ALWAYS completes (E13/E27/E30).
@@ -837,38 +839,30 @@ async function rewindExecute(
             revertClause =
               "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)";
           } else {
+            // branch (5)+(6): resolve the checkpoint + run the (CONDITIONAL) dirty guard + proceed.
             // CRITICAL #3: affectedPaths = ledger.modifiedFiles (the only deterministic file list available at
             //     this point — the SnapshotStore exposes no diff/listChanged method). Best-effort approximation
             //     of "files restore would touch"; documented limitation in the PRP. Passing [] would make git.ts
             //     trivially return [] (guard always passes), so modifiedFiles (possibly empty) is strictly better.
+            //     [BUG-004 / P1.M4 will later derive this from store.changedPaths(beforeRef) — left as the
+            //     heuristic here, unchanged by BUG-001.]
             const affectedPaths = ledger.modifiedFiles;
-            // afterRef ?? beforeRef: turn checkpoints get afterRef (set post agent_end); checkpoint-granularity
-            //     checkpoints have NO afterRef (they capture once) ⇒ fall back to beforeRef (spec-sanctioned
-            //     degrade — @14 §6 step 3 "if afterRef exists").
-            const afterRef = checkpoint.afterRef ?? checkpoint.beforeRef;
-            // CRITICAL #4: dirtyCheck is ASYNC (await it). Returns the subset of `paths` that drifted vs afterRef.
-            const driftedPaths = await store.dirtyCheck(
-              afterRef,
-              affectedPaths,
-            );
-            if (driftedPaths.length > 0) {
-              // CRITICAL #5: REFUSE THE WHOLE file-revert on ANY drift (not per-path — @14 §6 step 3). The context
-              //     rewind still proceeds; only the file-revert is refused. revertRefused=true signals P4.M2.T2.T1.
-              revertRefused = true;
-              revertClause = `(file revert refused: ${driftedPaths.length} path(s) changed since the turn ended — not overwritten; re-request if intended)`;
-            } else {
+
+            // [BUG-001 fix, P1.M1.T1.S1] Restore + RestoreResult folding. FACTORED into a local async closure
+            //   so it runs on BOTH proceed paths: (a) afterRef exists AND dirtyCheck is clean, (b) NO afterRef
+            //   (checkpoint granularity — checkpoints capture ONCE, so there is no post-turn baseline to
+            //   dirty-check against). store.restore NEVER throws (E27 — per-path failures land in failed[]);
+            //   a hypothetical throw is caught by the enclosing inner try/catch → E13 skip notice. restore
+            //   ALWAYS uses checkpoint.beforeRef (the PRE-span state), NEVER the dirty-guard afterRef.
+            //   allowDeleteCreatedFiles is gated INSIDE the backend (git.ts ~693 `opts.deleteCreatedFiles &&
+            //   this.cfg.allowDeleteCreatedFiles`) — pass the per-call flag verbatim; do NOT read
+            //   config.revert.allowDeleteCreatedFiles here (double-gate). `revert: revertBlock` rides the
+            //   existing `as RewindMarkerInput` cast. skipped string[] → boolean for the marker.
+            //   GOTCHA #1: `store`/`checkpoint` are `const`-narrowed → type-check inside this closure.
+            const doRestore = async (): Promise<void> => {
               // PROCEED — dirty guard clean. [P4.M2.T1.S2] perform the working-tree restore + fold the
               //     RestoreResult into the success text (revertClause) + the marker's revert block (revertBlock)
-              //     + RewindDetails.revertSummary (revertSummaryDetails). store.restore NEVER throws (E27 —
-              //     per-path failures land in failed[]); this lives inside S1's existing inner try/catch (fail-open:
-              //     a hypothetical restore throw degrades to the skip notice + revertBlock stays undefined + the
-              //     rewind STILL completes — E13). CRITICAL #4: restore uses checkpoint.beforeRef (the PRE-span
-              //     state), NOT the dirty-guard afterRef. CRITICAL #3: allowDeleteCreatedFiles is gated INSIDE the
-              //     backend (git.ts ~693 `opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles`) — pass the
-              //     per-call flag verbatim; do NOT read config.revert.allowDeleteCreatedFiles here (double-gate).
-              //     CRITICAL #2: `revert: revertBlock` rides the EXISTING `as RewindMarkerInput` cast (the field IS
-              //     in RewindMarkerInput — no new cast). CRITICAL #7: skipped string[] → boolean for the marker.
-              //     CRITICAL #6: the clause has NO leading space (successText() prepends " ").
+              //     + RewindDetails.revertSummary (revertSummaryDetails).
               const restoreResult: RestoreResult = await store.restore(
                 checkpoint.beforeRef,
                 {
@@ -902,6 +896,38 @@ async function rewindExecute(
                 `Reverted ${restoreResult.reverted.length} file(s), deleted ${restoreResult.deleted.length}; ` +
                 `${restoreResult.skipped.length + restoreResult.failed.length} skipped/failed, ` +
                 `${restoreResult.refused.length} refused (see log).`;
+            };
+
+            // [BUG-001 fix, P1.M1.T1.S1] afterRef is OPTIONAL (RevertCheckpoint.afterRef?: string). Turns set
+            //   it post agent_end; checkpoints NEVER set it (single capture). The PREVIOUS code fell back to
+            //   `?? checkpoint.beforeRef` (the pre-checkpoint tree), which made dirtyCheck compare the CURRENT
+            //   tree to the PRE-checkpoint tree → the agent's OWN intervening file work was flagged as drift →
+            //   the file-revert was REFUSED on every real checkpoint span (BUG-001). Per spec/14 §6 step 3 the
+            //   dirty guard is CONDITIONAL on afterRef existing — NO fallback. When afterRef is absent
+            //   (checkpoint granularity) the guard is SKIPPED and restore proceeds directly.
+            const afterRef = checkpoint.afterRef;
+            if (afterRef) {
+              // Dirty guard (pre-flight) — REFUSE on ANY drift vs the post-turn baseline (spec/14 §6 step 3).
+              // CRITICAL #4: dirtyCheck is ASYNC. Returns the subset of `paths` that drifted vs afterRef.
+              const driftedPaths = await store.dirtyCheck(
+                afterRef,
+                affectedPaths,
+              );
+              if (driftedPaths.length > 0) {
+                // CRITICAL #5: REFUSE THE WHOLE file-revert on ANY drift (not per-path — @14 §6 step 3). The
+                //     context rewind still proceeds; only the file-revert is refused. revertRefused=true
+                //     signals P4.M2.T2.T1 (the conditional E5 mutation-warning reword).
+                revertRefused = true;
+                revertClause = `(file revert refused: ${driftedPaths.length} path(s) changed since the turn ended — not overwritten; re-request if intended)`;
+              } else {
+                // PROCEED — dirty guard clean.
+                await doRestore();
+              }
+            } else {
+              // No afterRef (checkpoint granularity) — skip the dirty guard entirely and proceed to restore.
+              //   spec/14 §6 step 3: the guard runs only "if afterRef exists"; checkpoints capture once, so
+              //   there is no post-span baseline to compare against. (BUG-001 fix — was: refused every time.)
+              await doRestore();
             }
           }
         }
