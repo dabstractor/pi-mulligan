@@ -56,7 +56,8 @@ export interface RewindMarker extends MulliganEnvelope {
   id: string;
   granularity: Granularity;
   options: {
-    /** Only for granularity=last_turn. If true, also discard the most recent user message (nuclear). Default false. */
+    /** Legacy v1.0 field; ignored by the v1.1 resolver — last_turn always keeps the user message. Kept optional so
+     *  old persisted markers type-check and read harmlessly. */
     to_previous_prompt?: boolean;
     /** Role list that must not be crossed (default from config.rewind.protectedRoles). */
     protect?: string[];

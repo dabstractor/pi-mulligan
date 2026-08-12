@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Remove to_previous_prompt; finalize the guardrail",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The to_previous_prompt option is gone from the agent API and the filter. last_turn always keeps the latest user message (the guardrail is enforced by construction). protectedOk is already first:user-only (verified transforms.ts:1230) — no change there. The rewind tool's nuclear-first-user refusal (BUG-006, rewind.ts step 5b) becomes dead code and is removed.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Remove to_previous_prompt from the rewind tool + transforms + markers",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove the to_previous_prompt option from RewindParams schema, resolveLastTurn signature/body, rewindExecute behavior, persisted payload.options, and all 39 test occurrences. Retain the checkpoint-granularity path. The marker type keeps to_previous_prompt as an optional legacy field for backward-compat reads.",
               "subtasks": [
                 {
@@ -59,7 +59,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "markers.ts backward-compat annotation (to_previous_prompt stays optional)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -74,7 +74,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S4",
                   "title": "Tests for to_previous_prompt removal (39 occurrences across 6 files)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
