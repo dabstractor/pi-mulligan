@@ -170,6 +170,11 @@ describe("SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex — type shap
     expectTypeOf<SnapshotStore["dirtyCheck"]>().returns.toEqualTypeOf<Promise<string[]>>();
   });
 
+  it("(type) changedPaths(beforeRef) returns Promise<string[]> (async — spec/14 §6 step 2, BUG-004)", () => {
+    expectTypeOf<SnapshotStore["changedPaths"]>().parameters.toEqualTypeOf<[string]>();
+    expectTypeOf<SnapshotStore["changedPaths"]>().returns.toEqualTypeOf<Promise<string[]>>();
+  });
+
   it("(type) has(ref) returns Promise<boolean>; retire(ref) returns Promise<void> (async — spec §4.3)", () => {
     expectTypeOf<SnapshotStore["has"]>().parameters.toEqualTypeOf<[string]>();
     expectTypeOf<SnapshotStore["has"]>().returns.toEqualTypeOf<Promise<boolean>>();

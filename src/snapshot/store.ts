@@ -90,6 +90,28 @@ export interface SnapshotStore {
   dirtyCheck(afterRef: string, paths: string[]): Promise<string[]>;
 
   /**
+   * Return the workspace-relative POSIX paths that differ between the `beforeRef` snapshot and the
+   * CURRENT working tree — exactly the set of files `restore()` would touch (the affected set the
+   * rewind dirty guard must inspect). This is the spec-mandated affected set for the dirty guard —
+   * spec/14 §6 step 2: "paths that differ between beforeRef and the current tree".
+   *
+   * Algorithm: git backend runs `git diff --name-only <beforeRef>` against the shadow-repo ref
+   * (lists every tracked path whose current work-tree blob differs from the beforeRef tree blob);
+   * cas backend loads the beforeRef manifest and hash-compares each entry against the current file's
+   * hash (plus detects files NEW since capture — present in the work tree but absent from the
+   * manifest). Both return workspace-relative POSIX paths (POSIX-normalized like restore()'s buckets).
+   *
+   * Used by rewindExecute step 6b (the BUG-004 fix, P1.M4.T2.S1) to replace the HEURISTIC
+   * `ledger.modifiedFiles`, which misses files mutated via `python -c` / `node script.js` /
+   * `perl -i` / heredocs / `awk -i inplace` (those land in `ledger.bashSideEffects`, not
+   * `modifiedFiles`) — so the guard currently inspects a SUBSET of what restore touches and can
+   * silently clobber concurrent human edits (E30). BEST-EFFORT: never rejects — returns `[]` on any
+   * error (mirrors restore()'s "NEVER throws" + gc()'s "NEVER rejects" guarantees).
+   * IMPLEMENTED BY: git/cas.
+   */
+  changedPaths(beforeRef: string): Promise<string[]>;
+
+  /**
    * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state). `opts`
    * gates the two actions: revert modified files (revertFileChanges) and delete span-created files
    * (deleteCreatedFiles — honored only when BOTH the per-call flag AND
@@ -346,6 +368,10 @@ export class NoOpStore implements SnapshotStore {
 
   async dirtyCheck(_afterRef: string, _paths: string[]): Promise<string[]> {
     return []; // no drift info available from a no-op store
+  }
+
+  async changedPaths(_beforeRef: string): Promise<string[]> {
+    return []; // no snapshot ⇒ no changed paths
   }
 
   async restore(

@@ -499,7 +499,7 @@ describe("F-revert-explicit real-hook integration (spec/14 §4.2 / spec/10 §2.1
     // RESTORE DIRECTLY — bypass the rewind tool's dirty guard (see DESIGN NOTE above: the guard would
     // falsely REFUSE because c.ts exists-now but is absent from the afterRef manifest — BUG-004, not
     // this test's contract). The point here is capture-doesn't-include-bash, not dirty-guard behavior.
-    const rr = await (store as CasBackend).restore("turn", {
+    const rr = await (store as unknown as CasBackend).restore("turn", {
       revertFileChanges: true,
       deleteCreatedFiles: false,
     });

@@ -244,7 +244,7 @@ export async function agentEndCaptureHandler(
     const backend = rt.store.describe().backend;
     const afterRef =
       backend === "cas"
-        ? await (rt.store as CasBackend).capture(
+        ? await (rt.store as unknown as CasBackend).capture(
             "turn-after",
             rt.pendingExplicitPaths ?? [],
           )
@@ -291,7 +291,7 @@ export function registerAgentEndCapture(pi: ExtensionAPI): void {
  * `event.input.path` into `rt.pendingExplicitPaths` — the accumulator S2 will thread into
  * `rt.store.capture("turn", rt.pendingExplicitPaths)` so `captureExplicitPaths` has a non-empty manifest
  * (BUG-003 root cause: no caller ever passed the 2nd arg → empty manifest → restore reverted nothing);
- * and (b) for the `bash` tool, delegates to `(rt.store as CasBackend).notifyBashUsed()` to emit the
+ * and (b) for the `bash` tool, delegates to `(rt.store as unknown as CasBackend).notifyBashUsed()` to emit the
  * once-per-turn "bash changes NOT captured" warning (its file mutations are invisible to path-based
  * capture). All other tools (read/grep/find/ls/custom) are clean no-ops (no file mutation captured by
  * path). ASYNC (Pi awaits event handlers) but does no awaiting itself in S1 (push + a sync method call).
@@ -325,7 +325,7 @@ export function registerAgentEndCapture(pi: ExtensionAPI): void {
  *
  * SCOPE NOTE: this handler is registered by `registerToolCallCapture` below, which index.ts step 5
  * calls once at startup (S2 wired it). S2 also (a) snapshots the pre-write file state via
- * `(rt.store as CasBackend).appendExplicitPath("turn", path)` (the BUG-003 fix — captureExplicitPaths
+ * `(rt.store as unknown as CasBackend).appendExplicitPath("turn", path)` (the BUG-003 fix — captureExplicitPaths
  * at turn_start would loop an empty accumulator; the pre-write content is observable ONLY here, so
  * the hook captures each path's current state before the tool mutates it), (b) threads
  * `rt.pendingExplicitPaths` into `capture("turn-after", …)` at agent_end, and (c) clears the
@@ -364,7 +364,7 @@ export async function toolCallCaptureHandler(
         // appendExplicitPath is CasBackend-specific (NOT on SnapshotStore) ⇒ cast (S1 added the type import).
         // FAIL-OPEN (E27): a throw (escape path / fs error) is caught by the outer try/catch → log +
         // return; the tool_call is NEVER blocked — the path simply won't be reverted (best-effort).
-        await (rt.store as CasBackend).appendExplicitPath("turn", path);
+        await (rt.store as unknown as CasBackend).appendExplicitPath("turn", path);
       }
       return;
     }
@@ -373,7 +373,7 @@ export async function toolCallCaptureHandler(
       // notifyBashUsed is PUBLIC on CasBackend but NOT on the SnapshotStore interface → cast required
       // (CRITICAL #2). The method self-guards on nonGitMode==='explicit-paths' (already gated above) +
       // once-per-turn; the handler does NOT replicate those guards — CasBackend owns them.
-      (rt.store as CasBackend).notifyBashUsed();
+      (rt.store as unknown as CasBackend).notifyBashUsed();
       return;
     }
     // read/grep/find/ls/custom → no file mutation captured by path → no-op (fall through to return)

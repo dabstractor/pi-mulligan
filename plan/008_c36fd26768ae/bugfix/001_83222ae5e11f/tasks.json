@@ -195,7 +195,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Add changedPaths to SnapshotStore interface + NoOpStore stub",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-004 and architecture/system_context.md. The SnapshotStore interface is in src/snapshot/store.ts. NoOpStore is also in store.ts. The interface currently has: describe, capture, dirtyCheck, restore, has, retire, gc, destroy — all async (Promise return). changedPaths is a new method.\n2. INPUT: The SnapshotStore interface in src/snapshot/store.ts (add a method). The NoOpStore class in store.ts (add a stub).\n3. LOGIC: (a) Add to the SnapshotStore interface: `changedPaths(beforeRef: string): Promise<string[]>;` with JSDoc: 'Return workspace-relative POSIX paths that differ between the beforeRef snapshot and the CURRENT working tree — the files restore() would touch. This is the spec-mandated affected set for the dirty guard (spec/14 §6 step 2: \"paths that differ between beforeRef and the current tree\"). git: git diff --name-only; cas: hash-compare the beforeRef manifest vs current files. Used by rewindExecute step 6b (BUG-004 fix) to replace the heuristic ledger.modifiedFiles. BEST-EFFORT: never rejects — returns [] on any error.' (b) Add to NoOpStore: `async changedPaths(_beforeRef: string): Promise<string[]> { return []; }` (no snapshot → no changed paths). Export no new types.\n4. OUTPUT: src/snapshot/store.ts with the new changedPaths method on the interface + NoOpStore. GitBackend and CasBackend will fail typecheck until S2/S3 implement it (expected — they land next).\n5. DOCS: [Mode A] Add JSDoc to the changedPaths interface method documenting spec/14 §6 step 2 and BUG-004. No user-facing/config/API surface change.",
@@ -210,7 +210,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Implement changedPaths in GitBackend (git diff --name-only)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1"
