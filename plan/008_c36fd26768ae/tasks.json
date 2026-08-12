@@ -245,7 +245,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "CAS hash + blob store + manifest format",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M1.T1.S1",
@@ -264,7 +264,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S2",
                   "title": "CAS 'cas' mode whole-tree capture with mtime short-circuit",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M3.T1.S1"

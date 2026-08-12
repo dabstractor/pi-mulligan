@@ -206,11 +206,13 @@ describe("SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex — type shap
 //
 // TODAY-vs-AFTER behavior (document so future maintainers know the "backend none today" assertions
 // are INTENTIONAL, not bugs):
-//   - The git branch's dynamic `import("./git.js")` REJECTS today (git.ts ships in P2.M2.T1) →
-//     detectAndCreate fail-opens to NoOpStore (backend "none"). After P2.M2.T1 this flips to "git".
-//   - The cas branch's dynamic `import("./cas.js")` REJECTS today (cas.ts ships in P2.M3.T1) →
-//     detectAndCreate fail-opens to NoOpStore (backend "none"). After P2.M3.T1 this flips to "cas".
-// These tests pin CURRENT behavior so the suite stays green now AND act as regression sentinels later.
+//   - The git branch's dynamic `import("./git.js")` REJECTED before P2.M2.T1 (git.ts absent) →
+//     detectAndCreate fail-opened to NoOpStore (backend "none"). After P2.M2.T1 this flipped to "git"
+//     (test (d) pins the landed forward-compat contract).
+//   - The cas branch's dynamic `import("./cas.js")` REJECTED before P2.M3.T1 (cas.ts absent) →
+//     detectAndCreate fail-opened to NoOpStore (backend "none"). After P2.M3.T1 this flipped to "cas"
+//     (tests (a)/(c)/(e) pin the landed forward-compat contract).
+// These tests pin CURRENT behavior so the suite stays green AND act as regression sentinels later.
 //
 // House idiom: REAL temp dirs (os.mkdtemp) + a REAL `git init` — NOT mocks — so the genuine fail-open
 // path (including the real import-reject of an absent module) is exercised. afterEach restores
@@ -289,12 +291,13 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     dirs.length = 0;
   });
 
-  it("(a) NEVER throws — a non-existent cwd returns NoOpStore (E28)", async () => {
+  it("(a) NEVER throws — a non-existent cwd falls through to cas branch (non-git + writable storage)", async () => {
     const badCwd = join(tmpdir(), `nonexistent-det-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    // badCwd does NOT exist on disk → execFile rejects (ENOENT on cwd) → fail-open.
+    // badCwd does NOT exist on disk → execFile rejects (ENOENT on cwd) → not git → cas branch.
+    // cas.ts now ships (P2.M3.T1) + the sessionDir storage is writable → backend "cas".
+    // (BEFORE P2.M3.T1 this fail-opened to NoOpStore because ./cas.js was absent.)
     const store = await detectAndCreate(badCwd, REVERT_CFG, await mkdtemp(join(tmpdir(), "sess-")));
-    expect(store).toBeInstanceOf(NoOpStore);
-    expect(store.describe().backend).toBe("none");
+    expect(store.describe().backend).toBe("cas");
   });
 
   it("(b) non-git dir + UNWRITABLE storage → NoOpStore, reason mentions 'writable'", async () => {
@@ -311,18 +314,18 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     expect((desc.reason ?? "").toLowerCase()).toContain("writable");
   });
 
-  it("(c) non-git dir + WRITABLE storage → reaches cas branch → NoOpStore TODAY (./cas.js absent)",
+  it("(c) non-git dir + WRITABLE storage → reaches cas branch → CasBackend (P2.M3.T1 landed)",
     async () => {
-      // TODAY: the dynamic import("./cas.js") rejects (cas.ts ships in P2.M3.T1) → fail-open to NoOpStore.
-      // AFTER P2.M3.T1: this returns a CasBackend and describe().backend === "cas".
+      // BEFORE P2.M3.T1: the dynamic import("./cas.js") rejected (cas.ts absent) → fail-open NoOpStore.
+      // AFTER P2.M3.T1: cas.ts ships → the dynamic import resolves → CasBackend → backend "cas".
+      // This test now pins that the forward-compat contract landed correctly (mirror of test (d)).
       const cwd = await mkdtemp(join(tmpdir(), "nongit-w-"));
       dirs.push(cwd);
       const storageDir = await mkdtemp(join(tmpdir(), "rw-store-"));
       dirs.push(storageDir);
       const cfg = { ...REVERT_CFG, storageDir };
       const store = await detectAndCreate(cwd, cfg, null);
-      expect(store).toBeInstanceOf(NoOpStore);
-      expect(store.describe().backend).toBe("none");
+      expect(store.describe().backend).toBe("cas");
     });
 
   it("(d) real `git init` dir → reaches git branch → NoOpStore TODAY (./git.js absent)", async () => {
@@ -352,18 +355,18 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     expect(store.describe().backend).toBe("git");
   });
 
-  it("(e) storageDir===null + sessionDir → default <sessionDir>/mulligan/ resolved (no throw)", async () => {
+  it("(e) storageDir===null + sessionDir → default <sessionDir>/mulligan/ resolved, CasBackend", async () => {
     // cwd non-git; sessionDir writable → resolveStorageDir yields <sessionDir>/mulligan/, mkdir+access
-    // succeed → reaches cas branch → NoOpStore TODAY (./cas.js absent). AFTER P2.M3.T1: backend "cas".
+    // succeed → reaches cas branch. AFTER P2.M3.T1: cas.ts ships → backend "cas".
+    // (BEFORE P2.M3.T1 this fail-opened to NoOpStore because ./cas.js was absent.)
     const cwd = await mkdtemp(join(tmpdir(), "nongit-sess-"));
     dirs.push(cwd);
     const sessionDir = await mkdtemp(join(tmpdir(), "sess-"));
     dirs.push(sessionDir);
     const cfg = { ...REVERT_CFG, storageDir: null }; // null ⇒ default <sessionDir>/mulligan/
     const store = await detectAndCreate(cwd, cfg, sessionDir);
-    // No throw; reaches the cas branch (fail-open NoOpStore today because ./cas.js is absent).
-    expect(store).toBeInstanceOf(NoOpStore);
-    expect(store.describe().backend).toBe("none");
+    // No throw; reaches the cas branch → CasBackend now that ./cas.js ships.
+    expect(store.describe().backend).toBe("cas");
     // Side-check: the default <sessionDir>/mulligan/ was actually created (mkdir recursive ran).
     const mulliganDir = join(sessionDir, "mulligan");
     let created = false;
