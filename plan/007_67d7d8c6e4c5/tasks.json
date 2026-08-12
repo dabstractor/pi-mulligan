@@ -305,7 +305,7 @@
                   "type": "Subtask",
                   "id": "P2.M2.T1.S1",
                   "title": "commands.ts: makeAuditCommand(pi)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"
@@ -321,7 +321,7 @@
                   "type": "Subtask",
                   "id": "P2.M2.T1.S2",
                   "title": "index.ts: register the audit command",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M2.T1.S1",
