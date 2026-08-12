@@ -1,4 +1,5 @@
 import { describe, it, expectTypeOf, expect, beforeEach, vi } from "vitest";
+import os from "node:os";
 import {
   DEFAULT_CONFIG,
   getConfig,
@@ -22,6 +23,16 @@ describe("DEFAULT_CONFIG", () => {
         requireMutationWarning: true,
       },
       shrink: { enabled: true, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 },           // no autoOnBloat (not v1)
+      revert: {
+        enabled: false,
+        allowDeleteCreatedFiles: false,
+        nonGitMode: "cas",
+        storageDir: null,
+        maxFileBytes: 262144,
+        maxTotalBytes: 33554432,
+        maxSnapshotsPerTurn: 64,
+        excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
+      },
       nudges: {
         bloatReminder: true,
         perTurnDrift: true,
@@ -79,6 +90,16 @@ describe("validateConfig", () => {
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, maxRetriesPerPrompt: 5, abortContextFraction: 0.9, requireMutationWarning: false },
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2, notifyMaxChars: 2048 },
+      revert: {
+        enabled: false,
+        allowDeleteCreatedFiles: false,
+        nonGitMode: "cas",
+        storageDir: null,
+        maxFileBytes: 262144,
+        maxTotalBytes: 33554432,
+        maxSnapshotsPerTurn: 64,
+        excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
+      },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { read: 24576 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
       ui: { activeCheckpointBanner: false },
@@ -661,5 +682,221 @@ describe("ui.activeCheckpointBanner (P2.M3.T1.S1 / spec/09 §2-§4, spec/13 §5)
 
   it("(type) ui.activeCheckpointBanner is a required boolean", () => {
     expectTypeOf<MulliganConfig["ui"]>().toHaveProperty("activeCheckpointBanner").toEqualTypeOf<boolean>();
+  });
+});
+
+// ── revert.* (P1.M1.T1.S1 / spec/14 §8, spec/09 §2-§4) ─────────────────────────────────────
+// v1.2 opt-in working-tree revert config block. validateConfig deep-merges over the INERT
+// defaults (enabled:false). Mirrors the shrink/ui block shape (safeGet → isRecord → per-field
+// coerce). The storageDir "must not resolve inside cwd" rule is the one non-trivial piece.
+describe("revert.* (P1.M1.T1.S1 / spec/14 §8, spec/09 §2-§4)", () => {
+  const REVERT_DEFAULT = {
+    enabled: false,
+    allowDeleteCreatedFiles: false,
+    nonGitMode: "cas",
+    storageDir: null,
+    maxFileBytes: 262144,
+    maxTotalBytes: 33554432,
+    maxSnapshotsPerTurn: 64,
+    excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
+  };
+
+  it("(a) defaults to the spec/14 §8 block with NO warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({}).revert).toEqual(REVERT_DEFAULT);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(b) passes through a full valid override", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cfg = validateConfig({
+        revert: {
+          enabled: true,
+          allowDeleteCreatedFiles: true,
+          nonGitMode: "explicit-paths",
+          storageDir: os.tmpdir(),
+          maxFileBytes: 1000,
+          maxTotalBytes: 2000,
+          maxSnapshotsPerTurn: 3,
+          excludeGlobs: ["foo", "bar"],
+        },
+      });
+      expect(cfg.revert).toEqual({
+        enabled: true,
+        allowDeleteCreatedFiles: true,
+        nonGitMode: "explicit-paths",
+        storageDir: os.tmpdir(),
+        maxFileBytes: 1000,
+        maxTotalBytes: 2000,
+        maxSnapshotsPerTurn: 3,
+        excludeGlobs: ["foo", "bar"],
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) enabled/allowDeleteCreatedFiles coerce with !! (never warn)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { enabled: 1 } }).revert.enabled).toBe(true);
+      expect(validateConfig({ revert: { enabled: 0 } }).revert.enabled).toBe(false);
+      expect(validateConfig({ revert: { allowDeleteCreatedFiles: "x" } }).revert.allowDeleteCreatedFiles).toBe(true);
+      expect(validateConfig({ revert: { allowDeleteCreatedFiles: null } }).revert.allowDeleteCreatedFiles).toBe(false);
+      expect(warn).not.toHaveBeenCalled(); // booleans never warn
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(d) nonGitMode: 'cas'/'explicit-paths' kept; invalid → 'cas' + 1 warn", () => {
+    expect(validateConfig({ revert: { nonGitMode: "explicit-paths" } }).revert.nonGitMode).toBe("explicit-paths");
+    expect(validateConfig({ revert: { nonGitMode: "cas" } }).revert.nonGitMode).toBe("cas");
+    for (const bad of ["bogus", 123, null, "CAS", "explicit_paths"]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        expect(validateConfig({ revert: { nonGitMode: bad } }).revert.nonGitMode).toBe("cas");
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("revert.nonGitMode");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it("(e) storageDir: null valid; string-outside-cwd valid; string-inside-cwd → null + warn; non-string → null + warn", () => {
+    // null → null, no warn
+    let warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { storageDir: null } }).revert.storageDir).toBe(null);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+    // string outside cwd → kept, no warn
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { storageDir: os.tmpdir() } }).revert.storageDir).toBe(os.tmpdir());
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+    // relative path resolving inside repo cwd → null + warn
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { storageDir: "./local-revert" } }).revert.storageDir).toBe(null);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("revert.storageDir");
+    } finally {
+      warn.mockRestore();
+    }
+    // cwd itself (rel === "") → null + warn
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { storageDir: process.cwd() } }).revert.storageDir).toBe(null);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("revert.storageDir");
+    } finally {
+      warn.mockRestore();
+    }
+    // non-string → null + warn
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { storageDir: 42 } }).revert.storageDir).toBe(null);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("revert.storageDir");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(f) maxFileBytes/maxTotalBytes/maxSnapshotsPerTurn: finite >0; invalid → default + 1 warn each", () => {
+    const fields: Array<[keyof typeof REVERT_DEFAULT, string]> = [
+      ["maxFileBytes", "revert.maxFileBytes"],
+      ["maxTotalBytes", "revert.maxTotalBytes"],
+      ["maxSnapshotsPerTurn", "revert.maxSnapshotsPerTurn"],
+    ];
+    for (const [field, label] of fields) {
+      for (const bad of [0, -1, NaN, Infinity, "x"]) {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const cfg = validateConfig({ revert: { [field]: bad } });
+          expect(cfg.revert[field]).toBe(REVERT_DEFAULT[field]);
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(warn.mock.calls[0][0]).toContain(label);
+        } finally {
+          warn.mockRestore();
+        }
+      }
+      // boundary 1 is valid (must be >0)
+      expect(validateConfig({ revert: { [field]: 1 } }).revert[field]).toBe(1);
+    }
+  });
+
+  it("(g) excludeGlobs: string[] kept; non-array → default + 1 warn; non-string elements dropped", () => {
+    // valid string array kept
+    expect(validateConfig({ revert: { excludeGlobs: ["foo", "bar"] } }).revert.excludeGlobs).toEqual(["foo", "bar"]);
+    // non-array → default + 1 warn
+    let warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { excludeGlobs: "not-array" } }).revert.excludeGlobs).toEqual(REVERT_DEFAULT.excludeGlobs);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("revert.excludeGlobs");
+    } finally {
+      warn.mockRestore();
+    }
+    // non-string elements dropped with per-entry warn
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: { excludeGlobs: [1, "ok", null, "ok2"] } }).revert.excludeGlobs).toEqual(["ok", "ok2"]);
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls[0][0]).toContain("revert.excludeGlobs entry");
+      expect(warn.mock.calls[1][0]).toContain("revert.excludeGlobs entry");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(h) non-record revert block → all defaults SILENTLY (no warn)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ revert: "oops" }).revert).toEqual(REVERT_DEFAULT);
+      expect(validateConfig({ revert: [1, 2] }).revert).toEqual(REVERT_DEFAULT);
+      expect(validateConfig({ revert: null }).revert).toEqual(REVERT_DEFAULT); // null is not a record
+      expect(warn).not.toHaveBeenCalled(); // matches ui/audit/shrink/nudges block handling
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(i) round-trip via setConfig/getConfig", () => {
+    setConfig({ revert: { enabled: true } });
+    const cfg = getConfig();
+    expect(cfg.revert.enabled).toBe(true);
+    // the other 7 fields are still the defaults (deep-merge holds)
+    expect(cfg.revert.allowDeleteCreatedFiles).toBe(false);
+    expect(cfg.revert.nonGitMode).toBe("cas");
+    expect(cfg.revert.storageDir).toBe(null);
+    expect(cfg.revert.maxFileBytes).toBe(262144);
+    expect(cfg.revert.maxTotalBytes).toBe(33554432);
+    expect(cfg.revert.maxSnapshotsPerTurn).toBe(64);
+    expect(cfg.revert.excludeGlobs).toEqual(REVERT_DEFAULT.excludeGlobs);
+  });
+
+  it("(type) revert fields are correctly typed", () => {
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("enabled").toEqualTypeOf<boolean>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("allowDeleteCreatedFiles").toEqualTypeOf<boolean>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("nonGitMode").toEqualTypeOf<"cas" | "explicit-paths">();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("storageDir").toEqualTypeOf<string | null>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("maxFileBytes").toEqualTypeOf<number>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("maxTotalBytes").toEqualTypeOf<number>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("maxSnapshotsPerTurn").toEqualTypeOf<number>();
+    expectTypeOf<MulliganConfig["revert"]>().toHaveProperty("excludeGlobs").toEqualTypeOf<string[]>();
   });
 });

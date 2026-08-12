@@ -1,3 +1,5 @@
+import { resolve, relative, isAbsolute } from "node:path";
+
 /**
  * Granularity — the unit a rewind targets.
  * - "last_tool_call_group": hide just the most recent tool interaction (surgical).
@@ -75,6 +77,46 @@ export interface MulliganConfig {
     notifyMaxChars: number;
     // NOTE: "autoOnBloat" is reserved for a FUTURE opt-in mode and is NOT in v1
     //       (spec/07 §nudges: "Auto-shrink would risk data loss"). Do not add it.
+  };
+
+  /** Working-tree revert operation (`mulligan_rewind` file restoration) settings — v1.2,
+   *  opt-in. The whole block is INERT until `enabled` is set true AND the agent passes the
+   *  per-call revert flags on rewind (spec/14 §1 three-layer opt-in). Source: spec/14 §8,
+   *  spec/09 §2/§3. */
+  revert: {
+    /** Master opt-in. false (default) → snapshot machinery is fully inert (no capture, no
+     *  overhead). The rewind tool still accepts the per-call flags but ignores them.
+     *  Default: false. (spec/14 §1, spec/09 §2/§3) */
+    enabled: boolean;
+    /** Global kill-switch on the destructive delete path. Deletion is the one irreversible
+     *  revert action, so it sits behind BOTH the per-call `delete_created_files` flag AND
+     *  this config gate (both required). Default: false. (spec/14 §1, spec/09 §3) */
+    allowDeleteCreatedFiles: boolean;
+    /** Non-git capture strategy. "cas" (default — comprehensive whole-tree snapshot) or
+     *  "explicit-paths" (conservative — only write/edit tool paths; bash not captured; the
+     *  pi-undo-redo model). Git workspaces use the GitBackend regardless. Default: "cas".
+     *  (spec/14 §4.1/§4.2, spec/09 §3) */
+    nonGitMode: "cas" | "explicit-paths";
+    /** Root dir for the shadow repo / CAS store, or null for the default
+     *  `<sessionDir>/mulligan/`. MUST NOT resolve inside cwd (would pollute the workspace) —
+     *  validateConfig rejects such a value with null + warn. Default: null. (spec/14 §8,
+     *  spec/09 §3/§4) */
+    storageDir: string | null;
+    /** Per-file byte cap; files larger than this are skipped + warned (fail-closed — a huge
+     *  gitignored data file is never silently claimed restorable). Must be > 0.
+     *  Default: 262144 (256 KB). (spec/14 §8, spec/09 §3/§4) */
+    maxFileBytes: number;
+    /** Per-session byte cap for capture; capture stops (best-effort partial snapshot) beyond
+     *  it. Must be > 0. Default: 33554432 (32 MB). (spec/14 §8, spec/09 §3/§4) */
+    maxTotalBytes: number;
+    /** Count cap on snapshots captured per turn; capture stops accepting new data beyond it.
+     *  Must be > 0. Default: 64. (spec/14 §8, spec/09 §3/§4) */
+    maxSnapshotsPerTurn: number;
+    /** Snapshot exclude globs for BOTH backends. `.gitignore` is deliberately NOT consulted —
+     *  a gitignored `.env` is exactly the file a revert must restore. Non-array → default list.
+     *  Default: [".git","node_modules","dist","build",".next",".venv","target"].
+     *  (spec/14 §4.3/§8, spec/09 §3/§4) */
+    excludeGlobs: string[];
   };
 
   /** Preventive nudge settings (advisory; ride inferences that were already happening). */
@@ -159,6 +201,16 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     maxActive: 32,
     staleAfterFires: 3,
     notifyMaxChars: 2048,
+  },
+  revert: {
+    enabled: false,
+    allowDeleteCreatedFiles: false,
+    nonGitMode: "cas",
+    storageDir: null,
+    maxFileBytes: 262144,
+    maxTotalBytes: 33554432,
+    maxSnapshotsPerTurn: 64,
+    excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
   },
   nudges: {
     bloatReminder: true,
@@ -295,6 +347,27 @@ export function validateConfig(raw: unknown): MulliganConfig {
       if (v !== undefined) cfg.shrink.notifyMaxChars = coerceNumber("shrink.notifyMaxChars", v, cfg.shrink.notifyMaxChars, true);
     }
 
+    // revert.* (v1.2 working-tree revert; spec/14 §8, spec/09 §2/§4)
+    const revertRaw = safeGet(raw, "revert");
+    if (isRecord(revertRaw)) {
+      v = safeGet(revertRaw, "enabled");
+      if (v !== undefined) cfg.revert.enabled = coerceBoolean(v, cfg.revert.enabled);
+      v = safeGet(revertRaw, "allowDeleteCreatedFiles");
+      if (v !== undefined) cfg.revert.allowDeleteCreatedFiles = coerceBoolean(v, cfg.revert.allowDeleteCreatedFiles);
+      v = safeGet(revertRaw, "nonGitMode");
+      if (v !== undefined) cfg.revert.nonGitMode = coerceNonGitMode(v, cfg.revert.nonGitMode);
+      v = safeGet(revertRaw, "storageDir");
+      if (v !== undefined) cfg.revert.storageDir = coerceStorageDir(v, cfg.revert.storageDir);
+      v = safeGet(revertRaw, "maxFileBytes");
+      if (v !== undefined) cfg.revert.maxFileBytes = coerceNumber("revert.maxFileBytes", v, cfg.revert.maxFileBytes, true);
+      v = safeGet(revertRaw, "maxTotalBytes");
+      if (v !== undefined) cfg.revert.maxTotalBytes = coerceNumber("revert.maxTotalBytes", v, cfg.revert.maxTotalBytes, true);
+      v = safeGet(revertRaw, "maxSnapshotsPerTurn");
+      if (v !== undefined) cfg.revert.maxSnapshotsPerTurn = coerceNumber("revert.maxSnapshotsPerTurn", v, cfg.revert.maxSnapshotsPerTurn, true);
+      v = safeGet(revertRaw, "excludeGlobs");
+      if (v !== undefined) cfg.revert.excludeGlobs = coerceExcludeGlobs(v, cfg.revert.excludeGlobs);
+    }
+
     // nudges.*
     const nudgesRaw = safeGet(raw, "nudges");
     if (isRecord(nudgesRaw)) {
@@ -418,6 +491,51 @@ function coerceBloatThresholdByTool(
     }
   }
   return result;
+}
+
+/** nonGitMode: must be one of "cas"|"explicit-paths"; else fallback + warn (spec/09 §4). */
+function coerceNonGitMode(value: unknown, fallback: "cas" | "explicit-paths"): "cas" | "explicit-paths" {
+  if (value === "cas" || value === "explicit-paths") return value;
+  warnConfig("revert.nonGitMode", value);
+  return fallback;
+}
+
+/** storageDir: null (valid — default) or a string that MUST NOT resolve inside process.cwd()
+ *  (spec/14 §8: "NEVER under cwd"). A value that resolves inside cwd → null + warn.
+ *  Non-string/non-null → null + warn. Mirrors coerceLogFile's null-is-valid handling. */
+function coerceStorageDir(value: unknown, fallback: string | null): string | null {
+  if (value === null) return fallback;            // explicit "use default" — valid, no warn
+  if (typeof value !== "string") {
+    warnConfig("revert.storageDir", value);
+    return fallback;                              // non-string → null (default)
+  }
+  // Reject if the resolved path is inside cwd (would pollute the workspace).
+  const cwd = resolve(process.cwd());
+  const resolved = resolve(cwd, value);
+  const rel = relative(cwd, resolved);
+  const insideCwd = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  if (insideCwd) {
+    warnConfig("revert.storageDir", value);
+    return fallback;                              // inside cwd → null (default)
+  }
+  return value;
+}
+
+/** excludeGlobs: array of strings; non-array → fallback + warn. Non-string elements
+ *  dropped with a per-entry warn (mirrors coerceProtectedRoles' per-entry discipline).
+ *  Any non-empty string is valid (NO domain restriction, unlike protectedRoles).
+ *  spec/09 §4, spec/14 §8. */
+function coerceExcludeGlobs(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) {
+    warnConfig("revert.excludeGlobs", value);
+    return fallback;
+  }
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") out.push(entry);
+    else warnConfig("revert.excludeGlobs entry", entry);
+  }
+  return out;
 }
 
 /** estimateConfidence: must be one of low|medium|high; else fallback + warn. */
