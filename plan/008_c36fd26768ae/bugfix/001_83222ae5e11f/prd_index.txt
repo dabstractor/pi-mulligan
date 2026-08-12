@@ -1,0 +1,16 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: Checkpoint-granularity working-tree file revert is always refused when the span actually changed files (its only useful case)
+ h2.2 Major Issues (Should Fix)
+  h3.1 Issue 1: E32 cross-reload for checkpoint snapshots is write-only — session_start never rebuilds rt.snapshots from persisted mulligan:revert-checkpoint entries
+  h3.2 Issue 2: explicit-paths non-git mode (revert.nonGitMode:'explicit-paths') is non-functional — capture always produces EMPTY manifests
+  h3.3 Issue 3: Dirty guard's affected-set uses the heuristic ledger subset, not the snapshot diff — E30 'never silently clobber concurrent edits' is violated for bash/python/perl-modified files
+ h2.3 Minor Issues (Nice to Fix)
+  h3.4 Issue 1: RestoreResult.skipped bucket is never populated — E29 caps-degradation is invisible to the agent
+  h3.5 Issue 2: GitBackend capture chains every commit via lastCommit parent, defeating prompt-boundary GC object reclamation (unbounded within-session storage growth)
+  h3.6 Issue 3: SnapshotStore.has() is not mutex-serialized, contrary to spec §4.3's 'ALL store operations' contract
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:25 list:6
