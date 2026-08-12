@@ -556,21 +556,21 @@
           "type": "Milestone",
           "id": "P5.M1",
           "title": "Integration test scenarios (R6b)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The 8 v1.2 integration scenarios from spec/10 §2.1. Each tests a specific end-to-end revert behavior path: git/cas/explicit backends, failopen, delete gating, dirty guard refusal, granularity mismatch, reload persistence.",
           "tasks": [
             {
               "type": "Task",
               "id": "P5.M1.T1",
               "title": "Integration test scenarios F-revert-* (8 scenarios)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the 8 integration scenarios. Each requires a temp working directory, file mutations via write/edit/bash, a rewind call with revert flags, and assertions on file contents, marker fields, and git/CAS state.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P5.M1.T1.S1",
                   "title": "F-revert-git + F-revert-failopen + F-revert-delete",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T2.S1",
@@ -591,7 +591,7 @@
                   "type": "Subtask",
                   "id": "P5.M1.T1.S2",
                   "title": "F-revert-cas + F-revert-explicit + F-revert-dirtyguard",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T2.S1",
@@ -611,7 +611,7 @@
                   "type": "Subtask",
                   "id": "P5.M1.T1.S3",
                   "title": "F-revert-granularity + F-revert-reload",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M2.T2.S1",
