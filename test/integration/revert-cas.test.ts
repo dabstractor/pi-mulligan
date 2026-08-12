@@ -1,10 +1,15 @@
 /**
- * revert-cas.test.ts — F-revert-cas + F-revert-explicit + F-revert-dirtyguard integration tests
- * (spec/10-testing.md §2.1 scenario table F-revert-cas / F-revert-explicit / F-revert-dirtyguard;
+ * revert-cas.test.ts — F-revert-cas + F-revert-dirtyguard integration tests
+ * (spec/10-testing.md §2.1 scenario table F-revert-cas / F-revert-dirtyguard;
  * spec/14-working-tree-revert.md §4.1 ("cas" default — comprehensive whole-tree capture+restore),
- * §4.2 ("explicit-paths" — write/edit paths only, bash NOT captured + warned once per turn),
  * §6 restore/refuse-on-dirty semantics; spec/08-edge-cases.md E30 (dirty guard REFUSES — file not
  * overwritten) + E27 (revert best-effort, never blocks the rewind)).
+ *
+ * NOTE: the third scenario, F-revert-explicit (spec/14 §4.2 "explicit-paths" mode), MOVED to
+ * test/integration/revert-explicit.test.ts in P1.M3.T1.S3. That file now drives the REAL
+ * toolCallCaptureHandler / appendExplicitPath hook chain end-to-end (the previous block here was a
+ * direct-drive workaround whose comment asserted "there is NO tool_call hook" — now false as of
+ * P1.M3.T1.S1/S2). See the SUPERSEDED note inside the describe below.
  *
  * Drives the REAL v1.2 working-tree-revert CasBackend subsystem end-to-end against REAL temporary
  * NON-GIT directories (real files; real `sed`):
@@ -13,27 +18,20 @@
  *     whole-tree capture works through them)
  *   - the REAL `makeRewindTool` (the v1.2 step-6b revert decision tree)
  *
- * Three scenarios (mirror the spec/10 §2.1 scenario table):
+ * Two scenarios (mirror spec/10 §2.1 scenario table; F-revert-explicit moved out):
  *   F-revert-cas        — nonGitMode "cas": mutate via write+edit+bash sed → ALL three files restored
  *                         via the whole-tree manifest (incl. the sed file); backend "cas"; marker's
  *                         revert.revertedFiles ⊇ {a.ts,b.ts,c.ts}.
- *   F-revert-explicit   — nonGitMode "explicit-paths": write/edit files restored; the bash sed file
- *                         NOT restored (still the sed result); once-per-turn bash warning fired;
- *                         backend "cas"; revertedFiles ⊇ {a.ts,b.ts} but NOT c.ts.
  *   F-revert-dirtyguard — after agent_end, edit a file externally → file-revert REFUSED (file NOT
  *                         overwritten), context rewind still happens (marker persisted), and the
  *                         marker's data.revert is undefined (the refuse branch assigns no revert
  *                         block — CRITICAL FINDING #2).
  *
  * ── CRITICAL FINDINGS (from research/findings.md) ──
- *  #1 — there is NO `pi.on("tool_call",…)` hook (verified in src/index.ts). The real
- *       turnStartCaptureHandler/agentEndCaptureHandler call store.capture("turn")/"turn-after" with NO
- *       explicitPaths arg. In 'cas' mode that is fine (whole-tree walk). In 'explicit-paths' mode it
- *       would produce an EMPTY manifest (no tool_call hook supplies the write/edit paths). THEREFORE
- *       F-revert-explicit drives capture DIRECTLY: store.capture("turn",["a.ts","b.ts"]) +
- *       store.capture("turn-after",["a.ts","b.ts"]), sets rt.snapshots manually (mirroring what the
- *       hooks write), AND calls (store as CasBackend).notifyBashUsed() for the warning. F-revert-cas
- *       and F-revert-dirtyguard use the REAL hooks (cas-mode whole-tree capture works through them).
+ *  #1 — HISTORICAL: at the time, there was NO `pi.on("tool_call",…)` hook, so the (now-removed)
+ *       F-revert-explicit block drove capture DIRECTLY. As of P1.M3.T1.S1/S2 the REAL
+ *       toolCallCaptureHandler IS wired + CasBackend.appendExplicitPath exists; the real-hook
+ *       F-revert-explicit test now lives in revert-explicit.test.ts. This finding no longer applies.
  *  #2 — the REFUSE branch of step 6b does NOT assign revertBlock and does NOT call store.restore. So
  *       the persisted mulligan:rewind marker has data.revert === undefined on refuse, and refusedFiles
  *       is NEVER populated. F-revert-dirtyguard asserts the OBSERVABLE refuse contract instead:
@@ -78,7 +76,6 @@ import {
 } from "../../src/tools/rewind.js";
 import { setConfig, getConfig } from "../../src/config.js";
 import { getRuntime, clearAll } from "../../src/runtime.js";
-import type { RevertCheckpoint } from "../../src/markers.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -315,7 +312,7 @@ afterEach(() => {
 
 // ── the scenarios ───────────────────────────────────────────────────────────
 
-describe("F-revert-cas/explicit/dirtyguard integration (spec/10 §2.1 / spec/14 §4/§6)", () => {
+describe("F-revert-cas/dirtyguard integration (spec/10 §2.1 / spec/14 §4/§6) [F-revert-explicit → revert-explicit.test.ts]", () => {
   // ── F-revert-cas (spec/10 §2.1 row F-revert-cas / spec/14 §4.1) ─────────────
   //
   // nonGitMode "cas": mutate via write+edit+bash sed → ALL three files restored via the whole-tree
@@ -412,122 +409,14 @@ describe("F-revert-cas/explicit/dirtyguard integration (spec/10 §2.1 / spec/14 
     );
   });
 
-  // ── F-revert-explicit (spec/10 §2.1 row F-revert-explicit / spec/14 §4.2) ────
+  // ── F-revert-explicit — SUPERSEDED by test/integration/revert-explicit.test.ts ──
   //
-  // nonGitMode "explicit-paths": write/edit files restored; the bash sed file NOT restored (still the
-  // sed result — CRITICAL #4: explicit-paths never captured it). Once-per-turn bash warning fired.
-  // CRITICAL #1: the REAL hooks pass NO explicitPaths → EMPTY manifest in this mode; so capture is
-  // driven DIRECTLY (store.capture("turn",[paths]) + store.capture("turn-after",[paths])), rt.snapshots
-  // is set manually (mirroring what the hooks write), and (store as CasBackend).notifyBashUsed() fires
-  // the warning. This simulates the (unwired) tool_call hook.
-  it("F-revert-explicit: explicit-paths mode — write/edit reverted, bash sed NOT reverted (+ once-per-turn warning); backend 'cas'; revertedFiles ⊇ {a,b}.ts but NOT c.ts", async () => {
-    if (!(await sedAvailable())) {
-      console.warn("[revert-cas] sed not on PATH — skipping F-revert-explicit");
-      return;
-    }
-
-    // SETUP: a real NON-git temp dir with three pre-span files.
-    const repoDir = makeNonGitDir("rev-explicit-");
-    dirs.push(repoDir);
-    writeFileSync(join(repoDir, "a.ts"), "A1\n");
-    writeFileSync(join(repoDir, "b.ts"), "B1\n");
-    writeFileSync(join(repoDir, "c.ts"), "C1\n");
-
-    const preSpan = {
-      a: readFileSync(join(repoDir, "a.ts"), "utf8"),
-      b: readFileSync(join(repoDir, "b.ts"), "utf8"),
-      c: readFileSync(join(repoDir, "c.ts"), "utf8"),
-    };
-
-    const storageDir = makeStorage();
-    dirs.push(storageDir);
-
-    // CONFIG + STORE + RUNTIME. explicit-paths mode (the conservative write/edit-only model).
-    setConfig({ revert: { enabled: true, nonGitMode: "explicit-paths", storageDir } });
-    const store = await detectAndCreate(repoDir, getConfig().revert);
-    expect(store.describe().backend).toBe("cas"); // CRITICAL #3: still "cas" (the mode is a config knob)
-
-    const sid = "s1";
-    const rt = getRuntime(sid);
-    rt.store = store; // before any capture call (the store is the capturing backend)
-    const { appended, pi } = makePi();
-
-    // DRIVE CAPTURE DIRECTLY (CRITICAL #1 — NO tool_call hook; the real hooks would produce EMPTY
-    // manifests in this mode). Capture the write/edit paths' PRE-span state (simulate the tool_call-time
-    // capture). The explicitPaths arg is CasBackend-specific (NOT on the SnapshotStore interface — the
-    // P3 tool_call hook casts to CasBackend); 'cas'-mode capture ignores it (whole-tree), explicit-paths
-    // uses it. cast store once for both the 2-arg capture calls + notifyBashUsed below.
-    const cb = store as CasBackend;
-    const beforeRef = await cb.capture("turn", ["a.ts", "b.ts"]);
-    expect(beforeRef).toBe("turn");
-    rt.snapshots!.set("turn", {
-      label: "turn",
-      backend: "cas",
-      beforeRef: beforeRef as string,
-      turnIndex: 0,
-      ts: Date.now(),
-    } as RevertCheckpoint);
-
-    // MUTATE the span (the abandoned work): write a.ts, edit b.ts, bash sed c.ts.
-    writeFileSync(join(repoDir, "a.ts"), "A2\n");
-    writeFileSync(join(repoDir, "b.ts"), "B2\n");
-    await sed(join(repoDir, "c.ts"), "s/C1/C2/");
-
-    // CAPTURE afterRef DIRECTLY (so the dirty guard's dirtyCheck has a baseline; CRITICAL #1). Mirrors
-    // what agentEndCaptureHandler writes (it mutates the existing "turn" entry's afterRef in place).
-    // NOTE: the afterRef baseline must cover EVERY path in ledger.modifiedFiles — and the ledger's bash
-    // high-precision parser extracts `c.ts` from the `sed ... c.ts` command (sed ∈ FILE_MUTATING_COMMANDS),
-    // so modifiedFiles = {a.ts, b.ts, c.ts}. Capture c.ts in the afterRef (baseline) so the dirty guard
-    // does not falsely report it as drifted (current c.ts == afterRef c.ts). c.ts is NOT in the beforeRef
-    // manifest, so restore's manifest loop will NOT revert it (the explicit-paths guarantee — §4.2).
-    const afterRef = await cb.capture("turn-after", ["a.ts", "b.ts", "c.ts"]);
-    expect(afterRef).toBe("turn-after");
-    rt.snapshots!.get("turn")!.afterRef = afterRef as string;
-
-    // BASH WARNING (simulate the tool_call hook's notifyBashUsed on the bash toolCall — CRITICAL #1).
-    // notifyBashUsed is PUBLIC on CasBackend (cast store — the SnapshotStore interface does not expose it).
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    cb.notifyBashUsed(); // explicit-paths mode ⇒ warns ONCE this turn
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("explicit-paths"));
-    warn.mockRestore();
-
-    // BUILD ctx + SPAN (write a.ts, edit b.ts, bash sed c.ts). Paths are repo-relative POSIX.
-    const contextEntries = [
-      msgEntry(user("rewrite the files")),
-      msgEntry(asstWrite("w1", "a.ts")),
-      msgEntry(result("w1")),
-      msgEntry(asstEdit("e1", "b.ts")),
-      msgEntry(result("e1")),
-      msgEntry(asstBash("s1", "sed -i s/C1/C2/ c.ts")),
-      msgEntry(result("s1")),
-      msgEntry(asst("final")),
-      msgEntry(result("final")),
-    ];
-    const { ctx } = makeCtx({ sessionId: sid, contextEntries });
-
-    // DRIVE the REAL rewind tool (revert_file_changes → step 6b PROCEED branch → store.restore).
-    const res = await run(
-      pi,
-      ctx,
-      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
-      "final",
-    );
-
-    // ASSERT write/edit RESTORED, sed NOT reverted (CRITICAL #4: explicit-paths never captured c.ts).
-    expect(firstText(res)).toContain("Reverted");
-    expect(readFileSync(join(repoDir, "a.ts"), "utf8")).toBe(preSpan.a); // reverted
-    expect(readFileSync(join(repoDir, "b.ts"), "utf8")).toBe(preSpan.b); // reverted
-    expect(readFileSync(join(repoDir, "c.ts"), "utf8")).toBe("C2\n"); // NOT reverted (still the sed result)
-
-    // ASSERT backend + marker (CRITICAL #3: backend "cas"; CRITICAL #4: c.ts NOT in revertedFiles).
-    const marker = rewindMarker(appended);
-    expect(marker.revert?.backend).toBe("cas");
-    expect(marker.revert?.revertedFiles).toEqual(
-      expect.arrayContaining(["a.ts", "b.ts"]),
-    );
-    expect(marker.revert?.revertedFiles).not.toContain("c.ts");
-  });
+  // This describe previously held a DIRECT-DRIVE workaround `it()` block that drove capture DIRECTLY
+  // (store.capture("turn",[...]) + store.notifyBashUsed()) because its comment asserted "there is NO
+  // tool_call hook". As of P1.M3.T1.S1/S2 that is FALSE: the REAL toolCallCaptureHandler is wired and
+  // CasBackend.appendExplicitPath exists, so the REAL-hook end-to-end test now lives in
+  // revert-explicit.test.ts (F-revert-explicit-write + F-revert-explicit-bash). The stale workaround
+  // block was deleted to avoid a misleading test whose header comment became false.
 
   // ── F-revert-dirtyguard (spec/10 §2.1 row F-revert-dirtyguard / spec/14 §6 + E30) ─
   //
