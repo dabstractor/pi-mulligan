@@ -503,4 +503,29 @@ describe("turnEndMetricHandler — sync (no Promise returned)", () => {
     const result = turnEndMetricHandler(pi, makeEvent(1), ctx);
     expect(result).toBeUndefined();
   });
+
+  // ── P1.M2.T1.S3: D10 — agent-attributable delta (requires S2 applied) ────────────────────
+  it("D10 (agent-attributable): deltaTokens EXCLUDES the user-message contribution; baseline rolls agent-only", () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ sessionId: "s1" });
+    const rt = getRuntime("s1");
+    rt.tokenBaseline = 0; // previous agent baseline → delta == now
+
+    // The user pasted a 50k-token reference doc this turn; the agent replied with ~500 tokens.
+    // (Built INLINE — not msgOfChars, which is user-only — so this test is independent of S2's
+    //  existing-assertion fixes.)
+    rt.lastFiltered = [
+      { role: "user", content: "x".repeat(200000) },      // 50000 tokens — EXCLUDED (D10 ground-truth)
+      { role: "assistant", content: "x".repeat(2000) },    // 500 tokens — agent-attributable
+    ];
+
+    turnEndMetricHandler(pi, makeEvent(1), ctx);
+    const data = appended[0].data as Record<string, unknown>;
+
+    // POST-S2: now = estimateAgentTokens(rt.lastFiltered) = 500 → delta = 500 - 0 = 500.
+    // PRE-D10 this would have been 50500 (the paste inflated now). The user paste never inflates the drift delta.
+    expect(data.deltaTokens).toBe(500);
+    // The rolled baseline is agent-attributable (apples-to-apples with the next delta):
+    expect(rt.tokenBaseline).toBe(500);
+  });
 });

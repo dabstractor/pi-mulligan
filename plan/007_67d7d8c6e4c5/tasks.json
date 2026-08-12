@@ -97,14 +97,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Agent-attributable drift delta (D10)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "The drift nudge's deltaTokens excludes user messages (a user's prompt is ground-truth, never sheddable bloat). The high-water signal is unchanged (it measures total filtered context — correctly fills on a big user paste). New pure helper in the Pi-free tier.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "estimateAgentTokens + wire into turnEndMetricHandler",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a new pure helper estimateAgentTokens to tokens.ts that sums estimateTokens over non-user messages. Replace the estimateTokens call in turnEndMetricHandler's `now` computation with the new helper. Keep the getContextUsage() fallback as-is.",
               "subtasks": [
                 {
@@ -141,7 +141,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Tests for agent-attributable delta",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1",
@@ -176,7 +176,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "index.ts: stop registering the checkpoint agent tool",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/change_surface.md §Change 1 documents index.ts. Line 10: `import { makeCheckpointTool } from \"./tools/checkpoint.js\";`. Line 49: `pi.registerTool(makeCheckpointTool(pi));`. Line 17 JSDoc: 'all 5 agent-callable tools'. Line 44 comment: 'Register all 5 agent-callable tools.' Four remaining tools: mulligan_rewind (line 47), mulligan_shrink (line 48), mulligan_audit (line 50), mulligan_cancel (line 51).\n2. INPUT: No prior dependency.\n3. LOGIC: (a) Remove line 10: `import { makeCheckpointTool } from \"./tools/checkpoint.js\";`. (b) Remove line 49: `pi.registerTool(makeCheckpointTool(pi));`. (c) Update JSDoc line 17: 'all 5 agent-callable tools' → 'all 4 agent-callable tools'. (d) Update comment line 44: 'Register all 5 agent-callable tools' → 'Register all 4 agent-callable tools'. Do NOT delete src/tools/checkpoint.ts — Phase 2 reuses validCheckpointName + NAME_RE from it. The file becomes unregistered dead code until Phase 2 extracts its reusable bits.\n4. OUTPUT: index.ts registers exactly 4 tools. The checkpoint tool factory file still exists (exports used by tests). Consumed by P1.M3.T1.S2 (test assertions) and P2.M1.T1.S2 (index.ts is re-edited to add command registrations).\n5. DOCS: [Mode A] factory JSDoc (spec/03 §2.1 tool inventory). Rides WITH the work.",

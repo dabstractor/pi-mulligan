@@ -11,6 +11,7 @@ import type { TurnMetric, RewindMarker, ShrinkMarker } from "../src/markers.js";
 import type { MessageLike } from "../src/transforms.js";
 import type { SessionRuntime } from "../src/runtime.js";
 import type { MulliganConfig } from "../src/config.js";
+import { estimateAgentTokens, type MessageLike as TokenMessageLike } from "../src/tokens.js";
 
 // ── pure-function unit tests for Nudge B Phase 2 (spec/07 §2). NO Pi fakes, NO clearAll, NO setConfig. ──
 // shouldNudge / injectNudge / suppressCheck are pure helpers (spec/07 §3); these tests exercise them directly
@@ -135,6 +136,30 @@ describe("shouldNudge — windowed drift gate (spec/07 §5.1)", () => {
   it("does NOT fire on a single heavy turn amid small turns at threshold 4000 (criterion a holds at new default)", () => {
     // avg([8k,0.5k,0.5k]) = 3000 >= 4000? No → no fire (criterion a preserved at the lowered default).
     expect(shouldNudge([m(8000, false, 3), m(500, false, 2), m(500, false, 1)], cfg(3, 4000))).toBe(false);
+  });
+
+  // ── P1.M2.T1.S3: D10 — F-drift-userexempt-shaped (does NOT require S2) ───────────────────
+  it("D10 (F-drift-userexempt-shaped): a 50k-token user paste does NOT trip the drift nudge (agent-attributable delta stays below threshold)", () => {
+    // The turn's filtered view: a 50k-token user paste + a ~500-token assistant reply.
+    const filteredView = [
+      { role: "user", content: "x".repeat(200000) },      // 50000 tokens if counted — EXCLUDED by D10
+      { role: "assistant", content: "x".repeat(2000) },    // 500 tokens — agent-attributable
+    ] as unknown as TokenMessageLike[];
+
+    // turnEndMetricHandler (post-S2) computes `now` via estimateAgentTokens → the paste contributes 0.
+    const agentAttributableNow = estimateAgentTokens(filteredView);
+    expect(agentAttributableNow).toBe(500);                // NOT 50500 — the paste is ground-truth, never bloat
+
+    // A window of such turns: the windowed-average delta stays far below the threshold → no drift nudge.
+    expect(
+      shouldNudge(
+        [m(agentAttributableNow, false, 3), m(agentAttributableNow, false, 2), m(agentAttributableNow, false, 1)],
+        cfg(3, 6000),
+      ),
+    ).toBe(false);
+
+    // Contrast (pre-D10 would-have-fired): counting the paste gives a ~50000-token delta → drift nudge FIRES.
+    expect(shouldNudge([m(50000, false, 1)], cfg(3, 6000))).toBe(true);
   });
 });
 

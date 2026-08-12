@@ -1,6 +1,7 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
 import {
   estimateTokens,
+  estimateAgentTokens,
   CHARS_PER_TOKEN,
   resultBytes,
   approxTokens,
@@ -370,5 +371,54 @@ describe("types (P1.M2.T1.S2)", () => {
   it("resultBytes returns a number; approxTokens returns a number", () => {
     expectTypeOf(resultBytes([])).toEqualTypeOf<number>();
     expectTypeOf(approxTokens(0)).toEqualTypeOf<number>();
+  });
+});
+
+// ── estimateAgentTokens — D10 agent-attributable token count (spec/07 §2/§5.1 v1.1) ────────
+// P1.M2.T1.S3: locks the S1 helper — only NON-user messages count toward the drift delta's `now`.
+describe("estimateAgentTokens — D10 agent-attributable token count (spec/07 §2/§5.1 v1.1)", () => {
+  it("(1) a large user message + a small assistant message → ONLY the assistant tokens (user EXCLUDED)", () => {
+    const msgs: MessageLike[] = [
+      { role: "user", content: "x".repeat(200000) },      // 50000 tokens if counted
+      { role: "assistant", content: "x".repeat(2000) },    // 500 tokens
+    ];
+    expect(estimateAgentTokens(msgs)).toBe(500);           // NOT 50500 — the user paste is excluded (D10)
+  });
+
+  it("(2) empty / null / undefined / non-array → 0 (defensive — mirrors estimateTokens)", () => {
+    expect(estimateAgentTokens([])).toBe(0);
+    expect(estimateAgentTokens(null)).toBe(0);
+    expect(estimateAgentTokens(undefined)).toBe(0);
+    expect(estimateAgentTokens("nope" as unknown as MessageLike[])).toBe(0);
+  });
+
+  it("(3) an all-user-messages list → 0 (every message excluded)", () => {
+    const msgs: MessageLike[] = [
+      { role: "user", content: "x".repeat(200000) },
+      { role: "user", content: "abcd" },
+    ];
+    expect(estimateAgentTokens(msgs)).toBe(0);
+  });
+
+  it("(4) a mix of roles → sums the NON-user messages only (assistant + toolResult + custom)", () => {
+    const msgs: MessageLike[] = [
+      { role: "user", content: "abcd" },                                    // 1 token — EXCLUDED
+      { role: "assistant", content: [{ type: "text", text: "efgh" }] },     // 1 token — counted
+      { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "ijkl" }] }, // 1 — counted
+      { role: "custom", customType: "mulligan:nudge", content: "mnop" },    // 1 token — counted
+    ];
+    expect(estimateAgentTokens(msgs)).toBe(3);             // 1 + 1 + 1 (user excluded)
+  });
+
+  it("(edge) a message with no role is NOT 'user' → counted (when in doubt, attribute to agent)", () => {
+    const msgs = [{ content: "abcd" }] as unknown as MessageLike[]; // no role → counted (S1 contract)
+    expect(estimateAgentTokens(msgs)).toBe(1);
+  });
+
+  it("(type) estimateAgentTokens is exported and returns a non-negative number", () => {
+    expectTypeOf(estimateAgentTokens([])).toEqualTypeOf<number>();
+    const r = estimateAgentTokens([{ role: "assistant", content: "x" }]);
+    expect(typeof r).toBe("number");
+    expect(r).toBeGreaterThanOrEqual(0);
   });
 });
