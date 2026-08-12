@@ -551,6 +551,59 @@ describe("GitBackend.gc — prompt-boundary namespace-delete + reclaim (spec/14 
     const fers = calls.filter((c) => c.args[0] === "for-each-ref");
     expect(fers.length).toBe(2);
   });
+
+  // BUG-006: gc() must reset the in-memory commit-chain `lastCommit` so that turn/* commits
+  // deleted by the namespace-delete step become UNREACHABLE from future `commit-tree -p` children
+  // (otherwise git gc can never reclaim them → unbounded shadow-repo growth, contradicting spec §5
+  // "physically reclaims"). `lastCommit` is PRIVATE → assert behaviorally via the commit-tree argv.
+  it("BUG-006: gc() breaks the commit chain — the post-gc capture's commit-tree has NO -p parent", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan);
+    // (1) first capture: no parent yet (lastCommit starts null)
+    await gb.capture("turn");
+    // (2) second capture: chains onto the first via `-p COMMIT456` (makeExec returns COMMIT456)
+    await gb.capture("turn");
+    // (3) gc() is the turn boundary → resets lastCommit to null
+    await gb.gc();
+    // (4) third capture: must NOT chain (no -p) — proves lastCommit was reset
+    await gb.capture("turn");
+
+    const cts = calls.filter((c) => c.args[0] === "commit-tree");
+    expect(cts.length).toBe(3);
+    // the first two captures chain (each subsequent one reuses lastCommit = COMMIT456)
+    expect(cts[0]!.args).not.toContain("-p");
+    expect(cts[1]!.args).toContain("-p");
+    expect(cts[1]!.args).toContain("COMMIT456");
+    // the post-gc capture MUST NOT chain — the reset broke the reachability chain
+    expect(cts[2]!.args).not.toContain("-p");
+  });
+
+  // BUG-006: gc() must reset the per-turn `capturesThisTurn` counter (this GC pass IS the spec'd
+  // turn-boundary reset point). Without the reset, after maxSnapshotsPerTurn captures EVERY later
+  // capture() returns null (the cap check is before scan/add). `capturesThisTurn` is PRIVATE →
+  // assert behaviorally: with maxSnapshotsPerTurn:1, a 2nd capture returns null, then gc() resets,
+  // then a 3rd capture succeeds again.
+  it("BUG-006: gc() resets capturesThisTurn — a capped-out capture succeeds again after gc()", async () => {
+    const calls: Call[] = [];
+    const cfg = { ...BASE_CFG, maxSnapshotsPerTurn: 1 };
+    const gb = makeBackend(calls, cfg, emptyScan);
+    // (1) first capture of the turn: succeeds (capturesThisTurn 0 → 1)
+    const c1 = await gb.capture("turn");
+    expect(c1).toBe("COMMIT456");
+    expect(calls.filter((c) => c.args[0] === "write-tree")).toHaveLength(1);
+    // (2) second capture: capped (capturesThisTurn 1 >= maxSnapshotsPerTurn 1) → null, NO pipeline
+    const c2 = await gb.capture("turn");
+    expect(c2).toBeNull();
+    // the cap check fires BEFORE scan/add, so the capped capture issues NO write-tree
+    expect(calls.filter((c) => c.args[0] === "write-tree")).toHaveLength(1);
+    // (3) gc() resets capturesThisTurn to 0
+    await gb.gc();
+    // (4) third capture: succeeds again — proves the counter was reset
+    const c3 = await gb.capture("turn");
+    expect(c3).toBe("COMMIT456");
+    // now TWO write-tree calls total (1 from capture #1 + 1 from capture #3)
+    expect(calls.filter((c) => c.args[0] === "write-tree")).toHaveLength(2);
+  });
 });
 
 describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {

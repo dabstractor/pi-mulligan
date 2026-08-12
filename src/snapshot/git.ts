@@ -654,7 +654,11 @@ export class GitBackend implements SnapshotStore {
    * ref (the whole turn namespace — reclaims prior turns whose in-memory entry no longer exists;
    * `checkpoint/*` is EXEMPT via the for-each-ref PREFIX arg) AND physically reclaims via
    * `git gc --auto --prune=now` (self-throttling — a cheap no-op under the loose-object threshold).
-   * Serialized by the mutex (spec §4.3).
+   * Also resets the in-memory commit-chain `lastCommit` (so freshly-deleted turn/* commits become
+   * UNREACHABLE from future `commit-tree -p` children → git gc can actually reclaim them, per spec
+   * §5 "physically reclaims") and the per-turn `capturesThisTurn` counter (this GC pass IS the
+   * turn boundary / spec'd reset point — without it, after `maxSnapshotsPerTurn` captures every
+   * later capture would return null). Serialized by the mutex (spec §4.3).
    *
    * BEST-EFFORT (E27): NEVER rejects — any git error (incl. a missing shadow repo on a fresh
    * session — ensureInit runs first, mirroring capture/retire) is caught, warned, and returns void
@@ -684,6 +688,12 @@ export class GitBackend implements SnapshotStore {
       for (const rn of refnames) {
         await this.exec("git", ["update-ref", "-d", rn], this.shadowEnv());
       }
+      // BUG-006: reset the commit chain so deleted turn/* commits become unreachable from future
+      // commits → git gc can reclaim them. Also reset the maxSnapshotsPerTurn counter (the turn
+      // boundary / GC pass is the spec'd reset point — currently never reset, which could prevent
+      // captures after enough turns).
+      this.lastCommit = null;
+      this.capturesThisTurn = 0;
       // (2) physical reclaim — self-throttling (cheap no-op under the loose-object threshold).
       await this.exec("git", ["gc", "--auto", "--prune=now"], this.shadowEnv());
     } catch (err) {

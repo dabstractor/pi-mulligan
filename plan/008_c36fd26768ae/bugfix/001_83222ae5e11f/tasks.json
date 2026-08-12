@@ -326,14 +326,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "Reset GitBackend lastCommit at turn boundary to enable GC reclamation (BUG-006)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "GitBackend.capture() chains every commit via lastCommit parent (-p). lastCommit is never reset, so after gc() deletes turn/* refs, the commits remain reachable via the parent chain of subsequent commits, preventing git gc from reclaiming them. Reset lastCommit = null inside gc() after the ref deletion.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Reset lastCommit in gc() so deleted turn-snapshot commits become unreachable",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-006. In src/snapshot/git.ts: capture() pushes `-p this.lastCommit` to commitArgs (line ~366) and sets `this.lastCommit = commitSha` (line ~377). lastCommit is a per-backend private field NEVER reset. gc() deletes all turn/* refs and runs git gc --auto --prune=now, but deleted commits remain reachable via the parent chain.\n2. INPUT: The GitBackend class in src/snapshot/git.ts. The gc() method (~line 500+). The lastCommit private field.\n3. LOGIC: In src/snapshot/git.ts gc() method, AFTER the ref deletion loop (for-each-ref → update-ref -d) and BEFORE the `git gc --auto --prune=now` call, add `this.lastCommit = null;`. This breaks the commit chain so the next capture starts a fresh commit (no parent). Deleted turn/* commits become unreachable and git gc can reclaim them. Add a comment: 'BUG-006: reset the commit chain so deleted turn/* commits become unreachable from future commits → git gc can reclaim them.' Also reset `this.capturesThisTurn = 0;` in the same place (the maxSnapshotsPerTurn counter should reset at the turn boundary / GC pass — currently never reset, which could prevent captures after enough turns). The gc() method already acquires the mutex, so this is safe.\n4. OUTPUT: src/snapshot/git.ts gc() resets lastCommit + capturesThisTurn. Deleted turn-snapshot commits become unreachable and git gc reclaims them.\n5. DOCS: [Mode A] Update gc() JSDoc to note the lastCommit reset (BUG-006, spec §5 'physically reclaims'). No user-facing/config/API surface change.",
