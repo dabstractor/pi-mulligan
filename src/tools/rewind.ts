@@ -73,7 +73,7 @@ import { computeFilteredTotal } from "./audit.js"; // E22 out-of-band context-fr
 
 /**
  * RewindParams — the typebox parameter schema for `mulligan_rewind` (spec/05 §1, VERBATIM). `Static<typeof
- * RewindParams>` === `{ note: NoteInput, granularity, to_previous_prompt?, checkpoint? }`. EXPORTED for tests +
+ * RewindParams>` === `{ note: NoteInput, granularity, checkpoint? }`. EXPORTED for tests +
  * the index.ts wiring step.
  */
 export const RewindParams = Type.Object({
@@ -105,12 +105,6 @@ export const RewindParams = Type.Object({
         "last_turn = hide all your work after the most recent user message, landing back at that prompt to re-attempt the turn. " +
         "checkpoint = hide back to a named checkpoint you set earlier (requires `checkpoint`).",
     },
-  ),
-  to_previous_prompt: Type.Optional(
-    Type.Boolean({
-      description:
-        "Only for granularity=last_turn. If true, also discard the most recent user message (nuclear: you abandon the current ask entirely). Default false.",
-    }),
   ),
   checkpoint: Type.Optional(
     Type.String({
@@ -441,7 +435,7 @@ function resolvePreview(
     const units = partitionIntoUnits(messages); // re-partition FRESH (filterPipeline GOTCHA #2)
     remove = resolveLastToolCallGroup(units, messages, toolCallId) ?? [];
   } else if (params.granularity === "last_turn") {
-    remove = resolveLastTurn(messages, { to_previous_prompt: params.to_previous_prompt }, toolCallId).remove;
+    remove = resolveLastTurn(messages, toolCallId).remove;
   } else {
     // checkpoint (existence already verified by the caller; resolveCheckpoint is defensive regardless)
     const branchEntries = ctx.sessionManager.getBranch() as BranchEntry[]; // GOTCHA #8: DATA, not ctx
@@ -591,24 +585,6 @@ async function rewindExecute(
       hideEntryIds = [];
     }
 
-    // (5b) protected-refusal check — spec/08 E3 ("the tool refuses before persisting") + spec/10 §2.1 F-protected
-    //      ("no marker created"). resolveLastTurn (transforms.ts:345) ALREADY refuses the nuclear-first-user case
-    //      by returning { remove: [] } (iFirstUser === iLastUser); resolvePreview surfaces that as k === 0. Act on
-    //      it HERE, before renderNote/persist, so a nuclear last_turn across the FIRST/ONLY user message (the
-    //      original task) refuses instead of persisting a no-op marker + stray note + success text (BUG-006).
-    //      NARROWLY SCOPED: the three-way AND excludes every legitimate K=0 success — last_tool_call_group
-    //      (granularity !== "last_turn") and default last_turn (to_previous_prompt !== true) stay on the success
-    //      path. If resolvePreview threw (catch above → k=0), a nuclear last_turn refuses too (SAFE per E3: when
-    //      in doubt, protect the original task; no existing test regresses — the best-effort tests use
-    //      last_tool_call_group/checkpoint, not nuclear-last_turn). Routes through refuse() so the
-    //      rt.rewindRefusedTurnIndex flag latches (P4.M1.T2.S3) like every other refusal.
-    if (granularity === "last_turn" && params.to_previous_prompt === true && k === 0) {
-      return refuse(
-        "would cross a protected message (to_previous_prompt would rewind across the first/only user message — the original task)",
-        "last_turn",
-      );
-    }
-
     // (6) render note (step 6 — note already validated by step 2; renderNote does NOT re-validate).
     const rendered = renderNote((params.note as NoteInput) ?? ({} as NoteInput), ledger, granularity);
 
@@ -617,7 +593,7 @@ async function rewindExecute(
     //     excludeToolCallId === toolCallId.)
     const payload = {
       granularity,
-      options: { to_previous_prompt: params.to_previous_prompt, protect: config.rewind.protectedRoles },
+      options: { protect: config.rewind.protectedRoles },
       excludeToolCallId: toolCallId,
       note: params.note,
       ledger,
