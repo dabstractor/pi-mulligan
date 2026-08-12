@@ -551,11 +551,13 @@ export class GitBackend implements SnapshotStore {
    * shadow DB ⇒ `true`; a non-zero exit (rev-parse --verify of a missing ref ⇒ exit 128) is caught
    * ⇒ `false`. `ref` is a commit SHA (capture()'s return — a SHA, NOT a refname).
    *
-   * NOT mutex-serialized (spec §4.3 omits `has` from the serialized list — it is a fast read-only
-   * existence check; serializing it would add latency to the cross-reload ref-honoring path for no
-   * correctness benefit, since it writes nothing and mutates no state). BEST-EFFORT: never rejects.
+   * Serialized by the per-backend AsyncMutex (spec §4.3 — EVERY store op acquires the mutex,
+   * including `has`; BUG-007). `has()` is read-only but the prompt-boundary GC pass (gc()) and
+   * destroy() ALSO acquire the mutex, so serializing `has` prevents it from observing a
+   * half-deleted shadow repo (refs deleted but pre-prune, or mid fsRm). BEST-EFFORT: never rejects.
    */
   async has(ref: string): Promise<boolean> {
+    const release = await this.mutex.acquire(); // BUG-007: serialized per spec §4.3 (ALL store operations acquire the mutex)
     try {
       await this.ensureInit();
       await this.exec("git", ["rev-parse", "--verify", ref], this.shadowEnv());
@@ -563,6 +565,8 @@ export class GitBackend implements SnapshotStore {
     } catch {
       // non-zero exit (missing ref ⇒ exit 128) or init failure ⇒ false. Never rejects.
       return false;
+    } finally {
+      release();
     }
   }
 

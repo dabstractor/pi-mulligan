@@ -295,7 +295,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Minor Fixes (BUG-005, BUG-006, BUG-007)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Fix three minor defects: (BUG-005) populate RestoreResult.skipped bucket so E29 caps-degradation is visible; (BUG-006) reset lastCommit at turn boundary so git GC can reclaim turn-snapshot commits; (BUG-007) acquire the mutex inside has() in both backends per spec §4.3 serialization contract. Each is a localized change.",
           "tasks": [
             {
@@ -350,14 +350,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Acquire mutex in has() in both backends per spec §4.3 serialization contract (BUG-007)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Both backends explicitly omit has() from the mutex. Spec §4.3 states 'a single mutex per store serializes ALL store operations.' Add mutex acquisition to has() in GitBackend and CasBackend.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Add mutex serialization to has() in GitBackend and CasBackend",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-007 and architecture/codebase_patterns.md §2 (mutex pattern). In src/snapshot/git.ts has() (~line 560): the JSDoc says 'NOT mutex-serialized' — it runs `git rev-parse --verify <ref>` without acquiring the mutex. In src/snapshot/cas.ts has() (~line 855): same — `fs.access(manifestPath(ref))` without mutex.\n2. INPUT: The GitBackend class (has method, mutex field). The CasBackend class (has method, mutex field). The AsyncMutex acquire/release pattern from codebase_patterns.md §2.\n3. LOGIC: (a) In GitBackend.has(): wrap the body in `const release = await this.mutex.acquire(); try { ... existing body ... } catch { return false; } finally { release(); }`. Remove the 'NOT mutex-serialized' comment and replace with a comment: 'BUG-007: serialized per spec §4.3 (ALL store operations acquire the mutex).' (b) In CasBackend.has(): same pattern — acquire/release. Both follow the exact same try/catch/finally structure as dirtyCheck/restore. The has() method is async so it already returns a Promise — no signature change needed.\n4. OUTPUT: Both has() implementations acquire the mutex. Spec §4.3 serialization contract is honored.\n5. DOCS: [Mode A] Update has() JSDoc in both backends — remove 'NOT mutex-serialized' note, document BUG-007 fix and spec §4.3 compliance. No user-facing/config/API surface change.",
@@ -383,14 +383,14 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Strengthen F-revert-* integration tests for real scenarios",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add integration tests that exercise the real use cases the PRD identified as untested: a checkpoint span with actual file changes (handled by P1.M1.T1.S2), an explicit-paths mode test (handled by P1.M3.T1.S3), and an E30 dirty-guard test for bash/python-modified files (handled by P1.M4.T2.S2). This task covers any REMAINING test gaps.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Audit and close remaining F-revert-* integration test gaps from PRD recommendations",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",

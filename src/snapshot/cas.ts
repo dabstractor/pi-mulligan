@@ -1115,17 +1115,21 @@ export class CasBackend implements SnapshotStore {
    * Implementation: `fs.access(manifestPath(ref))` (resolves ⇒ true; rejects ⇒ false). `ref` is a
    * manifest label (capture()'s return — the manifest filename, NOT a hash).
    *
-   * NOT mutex-serialized (spec §4.3 omits `has` from the serialized list — parity with git.ts — it
-   * is a fast read-only existence check; serializing it would add latency to the cross-reload
-   * ref-honoring path for no correctness benefit, since it writes nothing and mutates no state).
-   * BEST-EFFORT: never rejects. @14 §2.
+   * Serialized by the per-backend AsyncMutex (spec §4.3 — EVERY store op acquires the mutex,
+   * including `has`; BUG-007). `has()` is read-only but the prompt-boundary GC pass (gc()) and
+   * destroy() ALSO acquire the mutex, so serializing `has` prevents it from observing a
+   * half-deleted manifest dir (manifests deleted but pre-prune, or mid fsRm). BEST-EFFORT: never
+   * rejects. @14 §2.
    */
   async has(ref: string): Promise<boolean> {
+    const release = await this.mutex.acquire(); // BUG-007: serialized per spec §4.3 (ALL store operations acquire the mutex)
     try {
       await this.fs.access(this.manifestPath(ref)); // rejects if absent
       return true;
     } catch {
       return false; // missing/corrupt ⇒ false. Never rejects.
+    } finally {
+      release();
     }
   }
 

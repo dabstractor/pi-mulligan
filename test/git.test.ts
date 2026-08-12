@@ -427,6 +427,18 @@ describe("GitBackend.has — spec/14 §2", () => {
     const gb = makeBackend([], BASE_CFG, emptyScan, { throwOn: { cmd: "rev-parse", call: 3 } });
     await expect(gb.has("MISSING")).resolves.toBe(false);
   });
+
+  it("acquires the mutex (two concurrent both complete — §4.3 / BUG-007)", async () => {
+    const calls: Call[] = [];
+    const gb = makeBackend(calls);
+    // two concurrent has() must BOTH resolve — a forgotten release() (GOTCHA #5) would deadlock
+    // the 2nd acquire forever. Both issuing rev-parse --verify proves acquire+release each.
+    await Promise.all([gb.has("COMMIT456"), gb.has("COMMIT456")]);
+    const verify = calls
+      .filter((c) => c.args[0] === "rev-parse")
+      .filter((c) => c.args[1] === "--verify");
+    expect(verify).toHaveLength(2); // both ran (mutex acquired + released per call)
+  });
 });
 
 describe("GitBackend.retire — SHA→refname resolution", () => {

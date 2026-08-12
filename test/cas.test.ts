@@ -1508,6 +1508,16 @@ describe("CasBackend.has — spec/14 §2", () => {
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     expect(await cb.has("turn")).toBe(false); // no manifest written
   });
+
+  it("acquires the mutex (two concurrent both complete — §4.3 / BUG-007)", async () => {
+    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
+    await cb.capture("turn", ["a.ts"]); // write manifests/turn.json so has()→true
+    // two concurrent has() must BOTH resolve — a forgotten release() (GOTCHA #5) would deadlock
+    // the 2nd acquire forever. (BUG-007: has now serializes like every other store op.)
+    await Promise.all([cb.has("turn"), cb.has("turn")]);
+    expect(await cb.has("turn")).toBe(true); // sanity: the manifest is still readable
+  });
 });
 
 // ── retire — spec/14 §2/§5 ──────────────────────────────────────────────────────────────
@@ -1547,9 +1557,10 @@ describe("CasBackend.retire — spec/14 §2/§5", () => {
 // ── mutex serialization parity (§4.3) ────────────────────────────────────────────────────
 
 describe("CasBackend — mutex serializes capture/dirtyCheck/restore/retire (§4.3)", () => {
-  it("concurrent ops are serialized (max-in-flight 1) — has is NOT serialized", async () => {
+  it("concurrent ops are serialized (max-in-flight 1) — capture/dirtyCheck/restore/retire", async () => {
     // Use a fake that tracks in-flight concurrency via a counter. capture/dirtyCheck/restore/retire
-    // all acquire the mutex; their bodies must never overlap. has does NOT acquire it.
+    // all acquire the mutex; their bodies must never overlap. (has ALSO acquires the mutex — BUG-007;
+    // see the dedicated has smoke test in the CasBackend.has describe.)
     const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
     let inFlight = 0;
     let maxInFlight = 0;
