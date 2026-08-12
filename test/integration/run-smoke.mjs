@@ -260,15 +260,21 @@ function assertShrinkPersist({ smoke, piRes }) {
   const entries = readSessionEntries(sessionFile);
   const shrinkLines = smoke.lines.filter((l) => l.test === "tool.shrink");
   assert(results, "tool.shrink ran", shrinkLines.length >= 1, "");
+  // E19: the command drove a SECOND shrink (the user-message variant) → ≥2 tool.shrink lines total.
+  assert(results, "tool.shrink ran for BOTH variants (custom_message + user message)", shrinkLines.length >= 2, `${shrinkLines.length} shrink lines`);
   // context.fire shows the substitution took effect in the filtered view.
   const cf = smoke.contextFires[smoke.contextFires.length - 1];
   assert(results, "context.fire observed", !!cf, "");
   assert(results, "context.fire shrunkInContext:true (substitution in filtered view)", cf?.shrunkInContext === true, String(cf?.shrunkInContext));
+  // E19: the USER-message shrink variant. (i) substitution took effect in the filtered view.
+  assert(results, "context.fire userShrunkInContext:true (user-message substitution took effect)", cf?.userShrunkInContext === true, String(cf?.userShrunkInContext));
   // JSONL: mulligan:shrink (custom) + the ORIGINAL canary still on disk (shrink is a view-substitution, NOT a rewrite).
   if (entries.length > 0) {
     assert(results, "JSONL has mulligan:shrink (custom)", countCustom(entries, "mulligan:shrink", "shrink") >= 1, "");
     const originalOnDisk = entryIncludes(entries, "MULLIGAN-SMOKE-MSG-CANARY");
     assert(results, "JSONL original canary still on disk (view-substitution, not rewrite)", originalOnDisk, "");
+    // E19: the original USER content survives verbatim on disk (the hard invariant — true for user input specifically).
+    assert(results, "JSONL original USER canary still on disk (E19 — user input survives verbatim, not rewritten)", entryIncludes(entries, "MULLIGAN-SMOKE-USER-CANARY"), "");
     assertGlobalInvariants(results, entries);
   } else {
     console.log(`  ⚠ JSONL unavailable (model may have timed out) — smoke-log assertions are primary`);
@@ -520,6 +526,21 @@ const ASSERTERS = {
 };
 
 function runScenario(scenario) {
+  // F-shrink-persist: 3-prompt flow. Prompt 1 carries USER_CANARY (a REAL role:"user" message persisted to the
+  // session JSONL) BEFORE the command runs, so the command-time shrink resolves it. The command drives BOTH shrinks
+  // (the custom_message canary + the E19 user message). Prompt 3 is the observing inference — both substitutions
+  // are observable + the JSONL is persisted for the on-disk invariant.
+  if (scenario === "F-shrink-persist") {
+    const piRes = runPi(scenario, {
+      prompts: [
+        `MULLIGAN-SMOKE-USER-CANARY: please note this exact user-supplied string`, // E19 target (real role:"user")
+        `/mulligan_smoke F-shrink-persist`, // drives BOTH shrinks (custom_message canary + user message)
+        "Reply with exactly: OK", // observing inference — both substitutions observable + JSONL persisted
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
   // F-rewind-core: 3-prompt SEED flow. A seed model turn commits a hideable assistant reply BEFORE the command, so the
   // last_turn rewind pins it (K≥1) and the observing inference shows it HIDDEN. (The 2-prompt path gives K=0 — nothing
   // after the user message at command time.)

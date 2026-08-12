@@ -48,6 +48,12 @@ const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";
 const MSG_CANARY = "MULLIGAN-SMOKE-MSG-CANARY"; // injected at session_start; target of last_turn rewind
 const RESULT_CANARY = "MULLIGAN-SMOKE-RESULT-CANARY"; // in mulligan_smoke_big; target of shrink
 const SHRUNK_MARKER = "MULLIGAN-SMOKE-SHRUNK"; // the shrink replacement string
+// E19 (spec/08 §E19): a REAL user-message shrink target. USER_CANARY is delivered by the orchestrator's
+// FIRST -p prompt (a genuine role:"user" message — pi.sendMessage can only make custom_messages).
+// USER_SHRUNK_MARKER is a DISTINCT replacement so the user-message substitution is independently
+// observable from the custom_message canary shrink (GOTCHA #3).
+const USER_CANARY = "MULLIGAN-SMOKE-USER-CANARY";
+const USER_SHRUNK_MARKER = "MULLIGAN-SMOKE-USER-SHRUNK";
 
 // SEED canaries for the deterministic HIDING assertions (P1.M3.T2.S1). The session-start MSG_CANARY precedes the first
 // user message, so a last_turn rewind (which hides content AFTER the last user message) can NEVER hide it. Instead, a
@@ -196,6 +202,23 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
           smokeLog("tool.shrink", "info", { text: text.slice(0, 120) });
         } catch (e) {
           smokeLog("tool.shrink", "fail", { error: String(e) });
+        }
+        // E19 (spec/08 §E19): shrink a REAL USER message by_content_includes. USER_CANARY is the orchestrator's
+        // first -p prompt (role:"user"). Proves summarizing user input is acceptable because the original ALWAYS
+        // survives on disk (the hard invariant) — distinct replacement so it is independently observable.
+        try {
+          const tool2 = makeShrinkTool(pi);
+          const result2 = await tool2.execute(
+            "smoke-shrink-user",
+            { target: { by_content_includes: USER_CANARY }, replacement: USER_SHRUNK_MARKER, reason: "E19 user-message shrink (original must survive)" },
+            undefined,
+            undefined,
+            ctx,
+          );
+          const text2 = resultText(result2.content as unknown as { type: string; text?: string }[]);
+          smokeLog("tool.shrink", "info", { variant: "user-message", text: text2.slice(0, 120) });
+        } catch (e) {
+          smokeLog("tool.shrink", "fail", { variant: "user-message", error: String(e) });
         }
         break;
       }
@@ -463,6 +486,8 @@ export default function (pi: ExtensionAPI): void {
         notePresent: msgs.some((m) => m?.customType === "mulligan:note"),
         hasRewindMarker,
         shrunkInContext: has(SHRUNK_MARKER),
+        userCanaryPresent: has(USER_CANARY), // false on observing inference = original user text substituted in-context (E19)
+        userShrunkInContext: has(USER_SHRUNK_MARKER), // true on observing inference = user-message substitution took effect (E19)
         hasNudge: msgs.some((m) => m?.customType === "mulligan:nudge"),
         seedAnchorInAssistant,
         seedHiddenInAssistant,
