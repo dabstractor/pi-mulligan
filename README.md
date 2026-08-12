@@ -2,7 +2,7 @@
 
 > Autonomous, token-cheap context self-rewind for a [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent. The agent sheds context it produced by mistake and redoes a turn with a self-authored note — no human in the loop.
 
-**Pi:** `0.84.x` · **License:** MIT · **Status:** v1.0
+**Pi:** `0.84.x` · **License:** MIT · **Status:** v1.1
 
 ---
 
@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 20 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 21 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -102,6 +102,8 @@ All 20 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `audit.estimateConfidence` | `"medium"` | Honesty label reported with token estimates (`low` \| `medium` \| `high`). |
 | **log** | | |
 | `log.file` | `null` | Off by default. An absolute path to an append-only JSONL debug log. |
+| **ui** | | |
+| `ui.activeCheckpointBanner` | `true` | Show a persistent above-editor banner while a checkpoint is active (`spec/13` §5; `spec/08` E26). `false` hides the banner without disabling checkpoints. |
 
 ### Minimal example `settings.json`
 
@@ -120,13 +122,13 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
 
 #### Disabling
 
-`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, and **all five tools** refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (`rewind`, `shrink`, `cancel`, `audit`, **and `checkpoint`** all gate on the master switch — each refuses before doing any work; `audit` refuses while staying read-only in its normal operation). The human can disable Mulligan without uninstalling it.
+`enabled: false` makes the **entire extension a no-op**: no context transform (the filter passes messages through untouched), the nudges are inert, **all four tools** refuse cleanly with `Mulligan: refused — Mulligan is disabled.` (`rewind`, `shrink`, `cancel`, `audit` all gate on the master switch — each refuses before doing any work; `audit` refuses while staying read-only in its normal operation), and the three human commands (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`) refuse the same way. The human can disable Mulligan without uninstalling it.
 
 ---
 
 ## 4. Tools
 
-Mulligan registers five agent-callable tools. The descriptions below are **verbatim copies** of the LLM-facing description strings the agent sees at runtime (from `src/tools/*.ts`) — they are the agent's documentation, reproduced here so a human knows exactly what the agent can now do. When-to-use guidance follows each one (from `spec/05-tools.md`).
+Mulligan registers four agent-callable tools. The descriptions below are **verbatim copies** of the LLM-facing description strings the agent sees at runtime (from `src/tools/*.ts`) — they are the agent's documentation, reproduced here so a human knows exactly what the agent can now do. When-to-use guidance follows each one (from `spec/05-tools.md`).
 
 ### `mulligan_rewind`
 
@@ -144,9 +146,9 @@ Mulligan registers five agent-callable tools. The descriptions below are **verba
 |---------------|---------------|
 | `last_tool_call_group` | Surgical — the most recent assistant turn that issued tool calls *plus* its tool-result messages. Keeps surrounding reasoning. |
 | `last_turn` | Everything after the most recent user message (assistant + tool-result work produced this turn). The model lands back at the current user prompt. |
-| `checkpoint` | Back to a named checkpoint set via `mulligan_checkpoint` (requires the `checkpoint` param). |
+| `checkpoint` | Back to a named checkpoint the human set via `/mulligan_checkpoint` (requires the `checkpoint` param). |
 
-The optional `to_previous_prompt` (only valid with `last_turn`) is the *nuclear* option: it also discards the most recent user message, abandoning the current ask entirely. It is refused if there is no prior user message (it would otherwise cross the protected first user message).
+`last_turn` keeps your latest message; to rewind further (across your own subsequent prompts), set a checkpoint first.
 
 **The three-field note (confabulation defense).** A rewind requires a `note` with three non-empty fields — `what_happened` (what happened and the lesson to avoid repeating), `true_current_state` (task progress, decisions, and conclusions — files/commands are auto-captured in the ledger), and `next` (the immediate next action). Vacuous notes are refused. The resumed model reads this note as the most-recent context.
 
@@ -166,13 +168,7 @@ The optional `to_previous_prompt` (only valid with `last_turn`) is the *nuclear*
 
 The `replacement` must be non-empty and **faithful** — the model treats it as ground truth from then on.
 
-### `mulligan_checkpoint`
-
-> Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot.
-
-**When to use it:** before a speculative sub-task you might want to discard wholesale — set a checkpoint, and a later `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` returns to it in one shot. A checkpoint **auto-expires** once a rewind targets it: its label is cleared so it no longer lingers in the active-marker list (`mulligan_audit`); re-creating a checkpoint of the same name later is allowed. The match clears **all** concurrently-labeled targets — a name can be set on more than one target, and the rewind retires every one whose current `getLabel===needle`. (`spec/05-tools.md` §3.)
-
-The `name` must match `/^[a-z0-9_-]{1,40}$/` (lowercase, digits, hyphen, underscore; 1–40 chars). Invalid names are refused.
+Checkpoints moved to the human in v1.1 (the destructive cross-prompt power belongs to the user). See [Human commands (v1.1)](#human-commands-v11) below for `/mulligan_checkpoint` and `/mulligan_checkpoint_revoke`. The agent still rewinds to a checkpoint via `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")`; a checkpoint auto-expires once a rewind targets it.
 
 ### `mulligan_audit`
 
@@ -189,6 +185,15 @@ The token total is computed from the **filtered view** (what the model actually 
 **When to use it:** the safety valve for a mis-targeted `mulligan_rewind` or `mulligan_shrink` — a shrink issued against the wrong message, a rewind that hid something you still need, or any marker pointed at the wrong target. Without it, the mistaken transform would apply on every turn for the rest of the session, and a `mulligan_rewind` of the issuing call does **not** retire it (markers are control entries outside the rewind's span). Identify the marker by `target` — the same hint shape `mulligan_shrink` uses (`by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`), resolved live each turn; the most recent marker covering that content is retired. An explicit `markerId` (from `details`) is accepted as a fallback if you have one. The transform stops applying from the next turn on; cancelling a non-existent or already-cancelled marker is a safe no-op — call it freely if unsure. (`spec/05-tools.md` §5.)
 
 Retraction is **forward-only**: it suppresses the marker from the filtered view going forward. It does **not** undo on-disk side effects (file edits and bash commands persist) or replay originally-hidden content into the live turn — that stays recoverable by the human via `/tree`. This softens D6: a mistaken marker is no longer irrevocably permanent.
+
+### Human commands (v1.1)
+
+Checkpoints and the bloat diagnostic are the three narrow human commands (the destructive cross-prompt rewind power belongs to the *user*, not the agent — `spec/13-human-commands.md`). Each is a `pi.registerCommand` handler; output goes to `ctx.ui.notify` (the TUI), never into the model's context.
+
+- **`/mulligan_checkpoint <name>`** — set a named checkpoint at the current position. Until revoked, the agent may `mulligan_rewind` across your subsequent prompts back to this point (the `last_turn` granularity never wipes your latest message, but a `checkpoint` rewind may). A checkpoint auto-expires once a rewind targets it. `name` must match `/^[a-z0-9_-]{1,40}$/`.
+- **`/mulligan_checkpoint_revoke <name>`** — revoke a checkpoint so the agent can no longer rewind to it.
+- **`/mulligan_audit`** — run the same context-bloat diagnostic the agent's `mulligan_audit` tool runs, surfaced to you only (never injected into the model's context).
+- **Active-checkpoint banner** — while any checkpoint is active, a persistent above-editor line reminds you: `⚠ Mulligan checkpoint active: "<name>" (you set it). The agent may rewind across your subsequent prompts back to this point. Revoke: /mulligan_checkpoint_revoke <name>`. Disable the banner without disabling checkpoints via `ui.activeCheckpointBanner: false`.
 
 ---
 
@@ -222,10 +227,10 @@ Both rewind and shrink markers are **retractable**: `mulligan_cancel` retires a 
 **Ride-along nudges & signals (zero extra model requests):**
 
 1. **Bloated-result reminder** (`spec/07-preventive-and-nudges.md` §1) — a `tool_result` hook appends a single-line reminder to any result exceeding the per-tool bloat threshold (`bash` and unlisted tools: the 16 KB global default; `read`: 24 KB). The reminder is appended, not replacing (the agent may still need the data) and costs ~20 tokens, once, only when the threshold is crossed.
-2. **Per-turn drift nudge** (`spec/07-preventive-and-nudges.md` §2/§5) — at `turn_end` Mulligan records the token delta; on the *next* inference it injects a single-line annotation (e.g. ``Previous turn added ~4.2k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.``). The delta is **windowed** (§5.1): smoothed over a rolling window of the last `nudges.driftWindowTurns` turns (default 3) before the threshold, so a single heavy turn (reading several source files, a pasted reference doc) does **not** fire it, but *sustained* growth across consecutive turns does. The nudge fires on **delta-only**: a single big result is already covered by Nudge A above, so the cross-turn nudge no longer re-announces bloat the agent already addressed — it stays quiet unless there is no baseline yet (first turn / post-reload). The `mulligan:nudge` annotation is **never persisted**.
+2. **Per-turn drift nudge** (`spec/07-preventive-and-nudges.md` §2/§5) — at `turn_end` Mulligan records the **agent-attributable** token delta (your prompts are exempt, so a large paste you made does not trip the nudge); on the *next* inference it injects a single-line annotation (e.g. ``Previous turn added ~4.2k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.``). The delta is **windowed** (§5.1): smoothed over a rolling window of the last `nudges.driftWindowTurns` turns (default 3) before the threshold, so a single heavy turn (reading several source files, a pasted reference doc) does **not** fire it, but *sustained* growth across consecutive turns does. The nudge fires on **delta-only**: a single big result is already covered by Nudge A above, so the cross-turn nudge no longer re-announces bloat the agent already addressed — it stays quiet unless there is no baseline yet (first turn / post-reload). The `mulligan:nudge` annotation is **never persisted**.
 3. **High-water signal** (`spec/07-preventive-and-nudges.md` §5.2) — a one-time annotation (`[mulligan] Context is at ~70% of the window. Consider mulligan_shrink or mulligan_rewind to reclaim space.`) the first time the *filtered* context crosses `nudges.highWaterFraction` of the window (default 0.7). It is **edge-triggered** — it fires once on the upward crossing and stays quiet until the total drops back below the fraction, so it never nags. This catches slow, steady accumulation that no single-turn delta nudge sees.
 
-**`/tree` is the audit trail.** Every rewind, shrink, and checkpoint is a persisted entry — the human can inspect the full un-filtered history (including every hidden span) via Pi's native `/tree`. Mulligan adds no human-facing command of its own, because `/tree` already serves that need.
+**`/tree` is the audit trail.** Every rewind, shrink, and checkpoint is a persisted entry — the human can inspect the full un-filtered history (including every hidden span) via Pi's native `/tree`. Mulligan adds three narrow human commands — checkpoint set/revoke (the destructive cross-prompt power belongs to the user) and audit (the bloat diagnostic a human monitors); `/tree` remains the audit trail.
 
 See `spec/SPEC.md` §1, §4 and `spec/06-context-filter.md` for the full architecture.
 
@@ -248,15 +253,14 @@ Mulligan is deliberately minimal. These are the four things it deliberately does
 - **No hard retry / replay (`spec/SPEC.md` §9 D1).** Mulligan supports *soft* retry only (rewind + note + re-plan). Hidden tool calls' **side effects persist on disk** (files written, commands run); replaying them would compound those effects (a duplicate commit, a double `mkdir`). The mutation warning and the note's `true_current_state` / auto-appended file ledger are the safeguards.
 - **Markers accumulate (`spec/08-edge-cases.md` E15).** v1 does no marker garbage-collection — markers persist intentionally (they are the audit trail). `rewind.maxDepth=5` bounds simultaneous *active* rewind markers; the only cost is disk growth (markers are control state, not in context). The filter is cheap in practice (few markers × messages bounded by compaction). Two hard backstops guard against runaway same-prompt retry loops (`spec/08-edge-cases.md` E22): a per-prompt retry budget (`rewind.maxRetriesPerPrompt`) and a context-fraction stop (`rewind.abortContextFraction`) that refuse a rewind *before* it can drive the context to a provider 'Prompt too long' rejection.
 
-### Resolved bugs (BUG-001–BUG-006)
+### Resolved bugs (BUG-001–BUG-005)
 
-A post-v1.0 validation pass found and fixed six edge-case bugs (1 Major, 5 Minor; 0 Critical, 0 data-loss). These are **resolved** corrections to shipped behavior, listed separately from the ongoing limitations above. All six have regression tests; see VERIFICATION.md "Bug-fix remediation pass" for the full engineering record (root cause, fix, test) and the post-fix test count.
+A post-v1.0 validation pass found and fixed five edge-case bugs (1 Major, 4 Minor; 0 Critical, 0 data-loss). These are **resolved** corrections to shipped behavior, listed separately from the ongoing limitations above. All five have regression tests; see VERIFICATION.md "Bug-fix remediation pass" for the full engineering record (root cause, fix, test) and the post-fix test count.
 
-- **BUG-001 (Major)** — `mulligan_checkpoint` consumption now clears **all** concurrently-labeled targets (previously cleared only the first).
+- **BUG-001 (Major)** — consuming a checkpoint via `mulligan_rewind` now clears **all** concurrently-labeled targets (previously cleared only the first).
 - **BUG-002 / BUG-003 (Minor)** — config integer validation now floors fractional knobs (`driftWindowTurns`, `shrink.maxActive`, `shrink.staleAfterFires`) to a minimum of 1.
 - **BUG-004 (Minor)** — `mulligan_shrink` `by_content_includes` with an empty substring now matches nothing (returns null).
 - **BUG-005 (Minor)** — `mulligan_audit` now refuses when `enabled: false` (stays read-only).
-- **BUG-006 (Minor)** — `mulligan_rewind` `to_previous_prompt` now refuses when there is no prior user message (would cross the protected first user message).
 
 ---
 
@@ -270,7 +274,8 @@ A post-v1.0 validation pass found and fixed six edge-case bugs (1 Major, 5 Minor
 
 The `spec/` directory is the deep-detail reference. Start with `spec/SPEC.md` (the master document: PRD + architecture), then the companion sections:
 
-- `spec/05-tools.md` — the five tools' full specification.
+- `spec/05-tools.md` — the four agent tools' full specification.
 - `spec/06-context-filter.md` — the context-event view transform.
 - `spec/09-configuration.md` — the configuration surface + coercion rules.
 - `spec/08-edge-cases.md` — edge cases (E7 compaction leak, E14 master switch, E15 markers).
+- `spec/13-human-commands.md` — the three human commands + active-checkpoint banner.

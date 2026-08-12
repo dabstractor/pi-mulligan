@@ -445,28 +445,28 @@
       "type": "Phase",
       "id": "P3",
       "title": "Sync changeset-level documentation (Mode B)",
-      "status": "Researching",
+      "status": "Complete",
       "description": "The README has cross-cutting references to the v1.0 surface that this delta invalidates. One sweep. The spec files spec/01-13 are already at v1.1 from commit 57a5e1f9 — no spec edits needed. Depends on all of Phases 1 + 2.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P3.M1",
           "title": "README sweep",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Update README.md to reflect v1.1: 4 tools (not 5), 3 human commands, the active-checkpoint banner, the guardrail, and the removal of to_previous_prompt.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M1.T1",
               "title": "Update README to v1.1",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Sweep README.md for all v1.0 references invalidated by this delta. Update tool count (5→4), remove to_previous_prompt, add human commands section, update the disabled section, add guardrail note, update the 'no human-facing command' sentence.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T1.S1",
                   "title": "README.md v1.1 sweep",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S4",
@@ -513,7 +513,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T1.S1",
                   "title": "edge-cases.test.ts E19: assert applyShrink is non-mutating (input array's original survives unchanged)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: spec/08 E19 (selector h2.100) gained a 'hard invariant' bullet (commit d5701c8f): shrink is a view substitution; the user's actual message stays on disk and is recoverable via /tree. The existing E19 tests live in test/edge-cases.test.ts:1029-1060 (describe 'E19 — Shrink target is a non-toolResult message (role preserved)'). They assert role preservation + content replacement in the RETURNED array, but do NOT assert non-mutation of the INPUT. applyShrink is implemented at src/transforms.ts:963 — it returns messages.map(...) (a NEW array) and builds each replacement via { ...orig, content: newContent } (spread clone); the input array and its message objects are never assigned to / mutated. This non-mutation IS the in-code proof of 'the original survives'. Verified by reading the function body. The test builders user()/asstText() and helpers applyShrink/stampShrink are already imported in edge-cases.test.ts.\n2. INPUT: No prior dependency (first subtask in this phase). Pure helpers + test builders already imported.\n3. LOGIC: Add tests under the existing 'E19' describe block (test/edge-cases.test.ts:1032). (a) 'applyShrink does NOT mutate its input array (original survives — the hard invariant)': const msgs = [user('hello world')]; const snapshot = JSON.parse(JSON.stringify(msgs)); const out = applyShrink(msgs, { target:{ by_content_includes:'hello' }, replacement:'X' }); assert JSON.stringify(msgs) === JSON.stringify(snapshot) (input byte-identical — the original user content is UNCHANGED in msgs). (b) 'applyShrink on a USER message: the input array still holds the original content; only the returned copy is replaced': after the call, assert the input msgs[0] content text === 'hello world' (NOT stampShrink('X')); assert out[0] content text === stampShrink('X'). This is the pure-helper analog of 'original stays on disk'. (c) Optional: a multi-message input non-mutation test (applyShrink at index i leaves every other index's original intact in the input). PURE tests — no Pi. All green.\n4. OUTPUT: E19's 'original is never lost' invariant is explicitly asserted at the pure-helper level; applyShrink's non-mutation is locked in against future regressions. Consumed by P4.M1.T1.S2 (integration proof) and P4.M1.T1.S3 (README note can cite the test).\n5. DOCS: [Mode A] none — test-only. The spec bullet is already landed (commit d5701c8f updated spec/08); no spec edit is part of this task.",
