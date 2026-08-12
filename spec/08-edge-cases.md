@@ -15,9 +15,12 @@
 - **Behavior:** by construction, `resolveLastToolCallGroup` excludes the rewind's own `toolCallId`, and `resolveLastTurn` keeps the rewind's own unit + tail notes. So the rewind always resolves to **completed** turns strictly before the current one. No special case needed; the exclusions handle it. Document for the agent: "rewind targets completed work, not the call you're making right now."
 
 ## E3. Rewinding across a protected message
-- **Situation:** a `last_turn`/`to_previous_prompt`/checkpoint rewind would remove the first user message or the latest user message.
-- **Risk:** catastrophic amnesia (lose the original task or the current ask).
-- **Behavior:** the tool refuses before persisting (returns a refusal text). The filter also enforces `min(remove) > iFirstUser` as defense-in-depth (no-op + warn log). See `@06-context-filter.md` §8.
+- **Situation:** a rewind would hide the first user message, or a `user` message that the user has not consented to expose.
+- **Risk:** catastrophic amnesia (lose the original task) or silent deletion of the user's steering.
+- **Behavior (v1.1 guardrail — `@13` §1):**
+  - **`first:user` (the original task) is unconditionally protected** — no consent, no checkpoint, no config can override it. By construction checkpoints sit at/after it and `remove` is strictly `> iTarget`; `protectedOk` (`@06` §8/§12) blocks any rewind whose `min(remove) <= iFirstUser` as defense-in-depth (no-op + warn log).
+  - **Other `user` messages** are protected by the guardrail (`@05` §1 step 3b): `last_tool_call_group` and `last_turn` never hide a `user` message (they remove only the agent's own output). A `checkpoint` rewind may hide subsequent user messages, because the user opted in by setting the checkpoint.
+  - `last_tool_call_group` and `last_turn` default never hide a `user` message, so they are unaffected.
 
 ## E4. Max rewind depth exceeded
 - **Situation:** the agent has created `config.rewind.maxDepth` (default 5) active rewind markers and calls another.
@@ -52,7 +55,7 @@
 
 ## E10. Checkpoint name invalid or not found
 - **Situation:** `granularity:"checkpoint"` with a name that doesn't match `/^[a-z0-9_-]{1,40}$/` or no such labeled entry exists on the branch.
-- **Behavior:** refuse with the reason. `mulligan_checkpoint` validates the name format at creation; `mulligan_rewind` validates existence.
+- **Behavior:** refuse with the reason. The `/mulligan_checkpoint` command validates the name format at creation (v1.1); `mulligan_rewind` validates existence.
 
 ## E11. Session reload / `/resume` mid-task
 - **Situation:** the session is reloaded (manual `/resume`, restart) after markers were created.
@@ -107,7 +110,7 @@
 
 ## E22. Same-prompt rewind retry loop — runaway growth (REQUIRED; hard backstop)
 
-- **Situation:** the agent calls `mulligan_rewind` and re-lands at the *same* user prompt, then produces work that again triggers a rewind — frequently because it is dutifully following a **self-authored note** whose `next` field re-instructs the very action that caused the previous rewind, or because the re-attempt re-reads the same huge files / re-runs the same broad `grep` (re-bloating between rewinds). A **retry** = any `mulligan_rewind` whose resumed turn lands back at the most recent user message: every `last_turn` (and `to_previous_prompt`), plus a `last_tool_call_group` or `checkpoint` rewind whose resolved target is at/after that user message. Each iteration appends a new `mulligan:rewind` marker + `mulligan:note` + `mulligan:turn-metric` to the on-disk session. Hidden-from-view spans do **not** shrink the on-disk session, and the notes themselves are context, so the session (and the resulting prompt) grows without bound. (Distinct from the **turn-replay** bug in `FIX_TURN_REPLAY_LOOP.md`, which is a *filter* defect fixed by the `turnHasAdvanced` gate — not a marker/retry problem; do not conflate.)
+- **Situation:** the agent calls `mulligan_rewind` and re-lands at the *same* user prompt, then produces work that again triggers a rewind — frequently because it is dutifully following a **self-authored note** whose `next` field re-instructs the very action that caused the previous rewind, or because the re-attempt re-reads the same huge files / re-runs the same broad `grep` (re-bloating between rewinds). A **retry** = any `mulligan_rewind` whose resumed turn lands back at the most recent user message: every `last_turn`, plus a `last_tool_call_group` or `checkpoint` rewind whose resolved target is at/after that user message. Each iteration appends a new `mulligan:rewind` marker + `mulligan:note` + `mulligan:turn-metric` to the on-disk session. Hidden-from-view spans do **not** shrink the on-disk session, and the notes themselves are context, so the session (and the resulting prompt) grows without bound. (Distinct from the **turn-replay** bug in `FIX_TURN_REPLAY_LOOP.md`, which is a *filter* defect fixed by the `turnHasAdvanced` gate — not a marker/retry problem; do not conflate.)
 - **Risk (observed in live use):** a single "update the spec" prompt left the agent retrying the same turn for **hours**, each loop enlarging the session, until the provider rejected the next request as **"Prompt too long"** — at which point the human could not even send a new message to break the loop. This is the most severe Mulligan failure mode: resource runaway ending in an unrecoverable hard stop.
 - **Required behavior — per-prompt retry budget:** the rewind tool MUST track, per branch, how many rewinds re-land at the **same latest user message** (count every such rewind created since that prompt and not yet advanced past it). When that count reaches `config.rewind.maxRetriesPerPrompt` (**default 5**), the tool MUST refuse *before persisting* and return: `"Mulligan: refused — hit the per-prompt retry budget (<N>/<max> rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again."` This is distinct from E4's total `maxDepth` cap (which bounds *all* active rewind markers): E22 specifically bounds **revisiting one prompt**, which is the runaway signature. `mulligan_shrink`, `mulligan_audit`, `mulligan_checkpoint`, `mulligan_cancel`, and ordinary non-rewind tool work do **not** consume retry budget.
 - **Why the note cannot be trusted to self-correct:** the note is written by the same process that is about to loop, so it can encode the loop's cause as an instruction (`next: "set a checkpoint"` → resumes → sets checkpoint → nudge → rewind → note → …). The budget is therefore a *hard* backstop, not advisory.
@@ -116,11 +119,10 @@
 - **Acceptance:** (a) the first `maxRetriesPerPrompt−1` rewinds re-landing at a given prompt succeed; the Nth (== budget) refuses with the budget text; (b) advancing to a new user prompt resets the budget and the next rewind succeeds; (c) a **zero-hide rewind** (`nothing matched to hide`) still consumes budget — it is the canonical loop vector; (d) `mulligan_shrink`/`audit`/`checkpoint`/`cancel` remain callable after the budget is hit (only prompt-re-landing rewinds are gated); (e) a rewind requested while filtered context ≥ `abortContextFraction` of the window is refused even if budget remains; (f) reaching the budget never throws (E13) and never prevents a normal text reply; (g) unit test: drive a loop that rewinds `last_turn` at the same prompt repeatedly and assert the call refuses exactly at the budget with the named text, and that a subsequent new user prompt restores the budget.
 - **Config:** add `config.rewind.maxRetriesPerPrompt` (integer ≥ 1, default 5) and `config.rewind.abortContextFraction` (number in (0,1], default 0.9) to `@09-configuration.md`. Setting `maxRetriesPerPrompt` very high restores old (loop-prone) behavior; setting it to 1 effectively disables same-prompt re-rewinds.
 
-## E23. `mulligan_checkpoint` — exposed to the wrong actor (DESIGN NOTE; not a v1 blocker)
+## E23. `mulligan_checkpoint` — exposed to the wrong actor (RESOLVED in v1.1)
 
-- **Situation:** `mulligan_checkpoint` is a *pre-commitment* tool — it only pays off if invoked *before* a mistake, i.e. it requires anticipating a mistake that has not happened yet.
-- **Risk:** agents anticipate mistakes poorly (they recognize them only in hindsight), so an agent has almost no native reason to set one. The tool therefore effectively needs the *user's* foresight but is exposed only to the agent → near-zero spontaneous adoption.
-- **Behavior (design tension, unresolved):** v1 ships the tool as-is, documents the low expected adoption, and relies on the E22 retry budget + context-fraction stop as the backstop that makes proactive checkpointing less critical. A future version should take one of two paths: (a) surface a **user-facing** way to set a checkpoint before delegating risky work, or (b) fold checkpoint *use* into the **nudge channel** (`@07-preventive-and-nudges.md`) — have the system suggest setting a checkpoint at risky moments, the same way the bloat reminder already nudges shrink/rewind. Either change moves the trigger from "agent foresight" (unreliable) to "external prompt" (the pattern that already works for the reactive tools).
+- **Situation (v1):** `mulligan_checkpoint` was an *agent* tool, but a checkpoint only pays off when set *before* a mistake — which requires anticipating it. Agents anticipate mistakes poorly (hindsight-only), so spontaneous adoption was near-zero; the tool needed the *user's* foresight but was exposed to the agent.
+- **Resolution (v1.1):** checkpoint moved to a **human slash command** `/mulligan_checkpoint` (`@13-human-facing-surface.md` §2); the agent tool is **removed** (`@05` §3). The actor with the foresight (the user) now sets checkpoints; the agent retains `mulligan_rewind(granularity:"checkpoint")` to rewind *to* them. This is path (a) of the original recommendation. The forgetting risk introduced by a long-lived user-set checkpoint is mitigated by the **active-checkpoint banner** (E26). E23 is **closed**.
 
 ## E24. Pinned hide no-ops under compaction (KNOWN LIMITATION; leak, not replay)
 
@@ -138,6 +140,13 @@
 - **Acceptance:** (a) a single shrink's rendered content is wrapped in exactly one `<context-shrunk>…</context-shrunk>`; (b) the stored `replacement` is the raw model text (assert unchanged after `applyShrink`); (c) two seq-ordered shrinks on the same target produce exactly one stamp (never nested).
 
 ---
+
+## E26. Active-checkpoint banner — the user forgets they armed destructive power (v1.1)
+
+- **Situation:** a user-set checkpoint grants the agent cross-prompt rewind power for the checkpoint's lifetime, which may span many turns. A one-time set-time warning is insufficient — beyond a certain point the user forgets the checkpoint is active and the power silently remains armed.
+- **Risk:** the user loses track that their subsequent prompts are subject to deletion by the agent; the consent that legitimized the power becomes stale-but-still-armed.
+- **Behavior (REQUIRED, v1.1 — `@13` §5):** Mulligan maintains a **persistent above-prompt-box banner** via `ctx.ui.setWidget("mulligan:active-checkpoint", [lines], { placement:"aboveEditor" })` while ≥1 active checkpoint exists, cleared (`setWidget(key, undefined)`) when none remain. Each line names a checkpoint and states the agent may rewind across subsequent prompts back to it, with the revoke command. Refreshed on: checkpoint set, checkpoint revoke, checkpoint consumption (a rewind retires its label), `session_start` (so `/resume` restores it), and — defense-in-depth — every `context` fire (the filter already scans checkpoints; reconcile the banner from the active set). Guarded by `ctx.hasUI` (no-op in print/json); disablable via `config.ui.activeCheckpointBanner` (default `true`).
+- **Acceptance:** (a) after `/mulligan_checkpoint x`, the banner is visible above the prompt box and persists across turns; (b) after `/mulligan_checkpoint_revoke x` (or consumption), it updates/clears within one fire; (c) `/resume` of a session with an active checkpoint shows the banner on the first inference; (d) the banner is **never** injected into `event.messages` (UI-only — zero model-context cost).
 
 ## Cross-references
 - Filter algorithms that implement these behaviors → `@06-context-filter.md`

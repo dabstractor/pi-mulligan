@@ -1,6 +1,6 @@
 # 05 — Tools (the agent-callable API)
 
-> Exact contracts for the five tools Mulligan registers. Each section gives: purpose, the typebox parameter schema (copy-pasteable), the return shape, step-by-step behavior, validation rules, error handling, and a usage example. Implement verbatim — the LLM's reliable use depends on stable names, descriptions, and parameter shapes.
+> Exact contracts for the **four** agent-callable tools Mulligan registers (`mulligan_rewind`, `mulligan_shrink`, `mulligan_audit`, `mulligan_cancel`). v1.1: `mulligan_checkpoint` is **removed** as an agent tool (§3) and is now a human slash command — see `@13-human-facing-surface.md` for the three commands' contracts. Each section gives: purpose, the typebox parameter schema (copy-pasteable), the return shape, step-by-step behavior, validation rules, error handling, and a usage example. Implement verbatim — the LLM's reliable use depends on stable names, descriptions, and parameter shapes.
 
 **Shared tool conventions:**
 - Every tool's `execute(toolCallId, params, signal, onUpdate, ctx)` wraps its body in try/catch; on error it returns a text result describing the failure (never throws — a thrown tool error is noisy and can confuse the loop).
@@ -42,11 +42,8 @@ const RewindParams = Type.Object({
     "last_turn = hide all your work after the most recent user message, landing back at that prompt to re-attempt the turn. " +
     "checkpoint = hide back to a named checkpoint you set earlier (requires `checkpoint`)." }),
 
-  to_previous_prompt: Type.Optional(Type.Boolean({ description:
-    "Only for granularity=last_turn. If true, also discard the most recent user message (nuclear: you abandon the current ask entirely). Default false." })),
-
   checkpoint: Type.Optional(Type.String({ description:
-    "Required when granularity=checkpoint. The name of a checkpoint set via mulligan_checkpoint." })),
+    "Required when granularity=checkpoint. The name of a checkpoint set via the /mulligan_checkpoint command." })),
 });
 ```
 
@@ -66,14 +63,15 @@ const RewindParams = Type.Object({
 3. **Validate granularity/target:**
    - `last_tool_call_group` / `last_turn`: always valid (the filter resolves them; if there is nothing to rewind, the filter no-ops and the tool still reports success but with K=0 — see step 7).
    - `checkpoint`: the named checkpoint MUST exist on the current branch (scan `getEntries()` for a label `mulligan:checkpoint:<name>`). Else refuse.
+3b. **Guardrail — no rewind wipes user input (v1.1 — `@13` §1):** a rewind may hide the agent's own output (tool calls, results, reasoning) but must **never** hide a `user` message. The single exception is `granularity:"checkpoint"` — because checkpoints can be created **only** by the human (`/mulligan_checkpoint` — the agent tool is removed, §3), the user's act of setting one is consent for the agent to rewind across their *subsequent* prompts back to that point. No runtime consent gate is needed: there is no agent path that can create a checkpoint, so a checkpoint's existence IS the consent. `first:user` is unconditionally protected regardless (`protectedOk`, `@06` §8). (v1's `to_previous_prompt` option is **removed** — it discarded the latest user message, violating this guardrail; the checkpoint mechanism is the consented way to rewind further.)
 4. **Depth guard:** count active `mulligan:rewind` markers on the branch; if `>= config.rewind.maxDepth`, refuse with a message suggesting `mulligan_shrink` or just continuing. (Prevents runaway marker accumulation.)
-   - **Per-prompt retry budget (REQUIRED; spec/08 E22):** additionally count rewinds that re-land at the **same latest user message** — every `last_turn`/`to_previous_prompt` rewind issued since that prompt and not yet advanced past it (a `last_tool_call_group`/`checkpoint` rewind whose resolved target is at/after that user message counts too). If that count is `>= config.rewind.maxRetriesPerPrompt` (default **5**), refuse *before persisting*: `"Mulligan: refused — hit the per-prompt retry budget (<N>/<max> rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again."` This is the hard backstop against same-prompt retry loops: a self-authored note can otherwise re-instruct the resumed self to repeat the exact action that triggered the rewind, so the note's `next` field alone cannot be trusted to break the loop. Distinct from the total-depth cap — it specifically bounds revisiting one prompt. Advancing to a new user prompt resets the budget. A **zero-hide rewind** (`nothing matched to hide`) still counts toward this budget — it is the canonical loop vector.
+   - **Per-prompt retry budget (REQUIRED; spec/08 E22):** additionally count rewinds that re-land at the **same latest user message** — every `last_turn` rewind issued since that prompt and not yet advanced past it (a `last_tool_call_group`/`checkpoint` rewind whose resolved target is at/after that user message counts too). If that count is `>= config.rewind.maxRetriesPerPrompt` (default **5**), refuse *before persisting*: `"Mulligan: refused — hit the per-prompt retry budget (<N>/<max> rewinds re-landing at this prompt). Commit to the current state, ask the human, or use mulligan_shrink instead of rewinding again."` This is the hard backstop against same-prompt retry loops: a self-authored note can otherwise re-instruct the resumed self to repeat the exact action that triggered the rewind, so the note's `next` field alone cannot be trusted to break the loop. Distinct from the total-depth cap — it specifically bounds revisiting one prompt. Advancing to a new user prompt resets the budget. A **zero-hide rewind** (`nothing matched to hide`) still counts toward this budget — it is the canonical loop vector.
    - **Out-of-band context-fraction stop (REQUIRED; spec/08 E22):** independent of the marker counts above, before persisting compute the filtered-context total (the same estimate `mulligan_audit` produces, §4) and the model's context window. If it is `>= config.rewind.abortContextFraction` (default **0.9**) of the window, refuse with `"Mulligan: refused — context is at <P>% of the window; rewinding will not help. Run mulligan_audit and shrink the largest result."` This catches the **zero-marker loop vector** — a spin that persists no rewind yet re-bloats each turn (e.g. re-reading the same large files because a bloat nudge keeps re-firing) — which the marker-counting budget cannot see. All three guards (`maxDepth`, `maxRetriesPerPrompt`, `abortContextFraction`) apply independently.
 5. **Compose ledger + note:**
    - Resolve the *target span preview* read-only to extract the file ledger. (The tool MAY do a read-only resolution using the same pure helpers the filter uses, operating on a snapshot from `ctx.sessionManager.buildContextEntries()` converted to messages. This is the one place a tool reads entries — but it does not transform the live context; it only extracts the ledger.) If resolution is ambiguous (e.g. before compaction settles), extract over the available span best-effort; the ledger is advisory.
    - `renderNote(note, ledger, granularity)` → the note string.
 6. **Persist:**
-   - `pi.appendEntry("mulligan:rewind", { schema, v:1, kind:"rewind", id, granularity, options:{ to_previous_prompt, protect }, excludeToolCallId: toolCallId, seq, note, ledger, ts })`.
+   - `pi.appendEntry("mulligan:rewind", { schema, v:1, kind:"rewind", id, granularity, options:{ protect }, excludeToolCallId: toolCallId, seq, note, ledger, ts })`.
    - Immediately capture the marker's entry id: `const markerEntryId = ctx.sessionManager.getLeafId()`.
    - `pi.sendMessage({ customType:"mulligan:note", content: renderedNote, display:true, details:{ schema:"pi-mulligan", v:1, kind:"note", rewindId: id } })`. **(`display:true` is deliberate — it surfaces the note to the operator as well, so the human can see exactly what the model told its resumed self. This is the rewind counterpart of shrink's replacement echo: every self-directed payload is operator-visible.)**
    - Increment the in-memory `seq`.
@@ -152,33 +150,16 @@ The filter applies shrinks **after** rewinds and substitutes content in place, p
 
 ---
 
-## 3. `mulligan_checkpoint`
+## 3. `mulligan_checkpoint` — REMOVED as an agent tool (v1.1)
 
-### Purpose
-Tag the current position with a name so a later `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` can target it precisely. Use before embarking on a speculative/experimental sub-task you might want to undo in one shot.
+> **Moved to a human slash command** — see `@13-human-facing-surface.md` §2. Per E23 (`@08`) a checkpoint only pays off when set *before* a mistake, which needs *foresight* the agent lacks; the actor with the foresight is the **user**. The agent tool is therefore removed. There is **no** agent-callable way to create a checkpoint.
+>
+> What is **retained**:
+> - The agent's `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` (§1) — the agent may rewind *to* a user-set checkpoint.
+> - The checkpoint label mechanism (`pi.setLabel(leafId, "mulligan:checkpoint:<name>"`) and **auto-expiry on consumption** (a checkpoint rewound-to is retired so it stops lingering in the active list).
 
-### Parameter schema
-
-```ts
-const CheckpointParams = Type.Object({
-  name: Type.String({ description:
-    "Checkpoint name. lowercase, digits, hyphen, underscore only; max 40 chars. e.g. 'before-refactor-experiment'." }),
-});
-```
-
-### Return shape
-```ts
-{ content: [{ type:"text", text: "Mulligan: checkpoint '<name>' set at entry <id>. Rewind to it with mulligan_rewind(granularity:'checkpoint', checkpoint:'<name>')." }] }
-```
-
-### Behavior
-1. Validate `name` matches `/^[a-z0-9_-]{1,40}$/`. Else refuse.
-2. `const leafId = ctx.sessionManager.getLeafId();`
-3. `pi.setLabel(leafId, \`mulligan:checkpoint:${name}\`);` (overwrites a prior checkpoint of the same name — labels are unique-per-target; setting the same label on a new target moves it. Acceptable.)
-4. Return text with the entry id.
-5. **Auto-expiry on consumption (REQUIRED):** a checkpoint exists to be rewound *to*. Once a `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` successfully targets it, the checkpoint is **consumed** and MUST be retired — its label cleared (or suppressed via a `mulligan:checkpoint-cancel` entry) so it no longer appears active in `mulligan_audit`. Rationale (live use): a used checkpoint has no further purpose, and unconsumed throwaway checkpoints otherwise linger in the active-marker list indefinitely. Re-creating a checkpoint of the same name after consumption is allowed (sets a fresh label). A checkpoint that is never consumed persists, as today.
-
-**Design note — exposed to the wrong actor (spec/08 E23):** a checkpoint only pays off if set *before* a mistake, which requires anticipating it. Agents anticipate mistakes poorly (they recognize them only in hindsight), so spontaneous checkpoint adoption will be near-zero; the tool effectively needs the *user's* foresight but is exposed only to the agent. v1 therefore relies on the per-prompt retry budget (E22) as the real backstop and does **not** depend on checkpoints for correctness. A future version should either surface checkpoint to the user directly, or fold its use into the nudge channel (suggest a checkpoint at risky moments, the way the bloat reminder already nudges shrink/rewind).
+>
+> The **guardrail**: a rewind never wipes user input; the one exception is `checkpoint` (the user opted in by setting it). `first:user` stays unconditionally protected. See `@13` §1 and the rewind behavior (§1 step 3b).
 
 ---
 
@@ -309,21 +290,29 @@ mulligan_cancel({ markerId: "entry-sh-1" })
 ## 6. Tool registration summary (for `index.ts`)
 
 ```ts
+// 4 agent-callable tools (v1.1: checkpoint removed — now a human command)
 pi.registerTool({ name:"mulligan_rewind", label:"Mulligan Rewind", description: RWIND_DESC, parameters: RewindParams, execute: rewindExecute });
 pi.registerTool({ name:"mulligan_shrink", label:"Mulligan Shrink",  description: SHRINK_DESC, parameters: ShrinkParams, execute: shrinkExecute });
-pi.registerTool({ name:"mulligan_checkpoint", label:"Mulligan Checkpoint", description: CKPT_DESC, parameters: CheckpointParams, execute: checkpointExecute });
 pi.registerTool({ name:"mulligan_audit", label:"Mulligan Audit", description: AUDIT_DESC, parameters: AuditParams, execute: auditExecute });
 pi.registerTool({ name:"mulligan_cancel", label:"Mulligan Cancel", description: CANCEL_DESC, parameters: CancelParams, execute: cancelExecute });
+
+// 3 human slash commands (v1.1 — handlers receive ExtensionCommandContext; capture `pi` via closure)
+pi.registerCommand("mulligan_checkpoint",        { description: "Set a named checkpoint. Until revoked, the agent may rewind across your subsequent prompts back to this point.", handler: checkpointCommand });
+pi.registerCommand("mulligan_checkpoint_revoke", { description: "Revoke a checkpoint; the agent can no longer rewind to it.", handler: checkpointRevokeCommand });
+pi.registerCommand("mulligan_audit",             { description: "Show a token/bloat breakdown of the current context.", handler: auditCommand });
 ```
 
-Each `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the four factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCheckpointTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. The summary block above shows the equivalent object-literal form for readability.
+Each tool `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the three tool factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. (v1.1: `makeCheckpointTool` is removed — checkpoint is now a human command.) The summary block above shows the equivalent object-literal form for readability.
+
+The three `registerCommand` handlers are `(args: string, ctx: ExtensionCommandContext) => Promise<void>`; they capture `pi` via closure at registration. They are **write-only w.r.t. the model's context** — none injects into `event.messages`. Full command contracts: `@13-human-facing-surface.md`.
 
 ### Description strings (craft carefully — they drive LLM usage)
-- **Rewind:** `"Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message."`
+- **Rewind:** `"Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. granularity 'checkpoint' rewinds back to a checkpoint a user set — and may hide the user's prompts after it (they consented by setting it)."`
 - **Shrink:** `"Replace a specific past tool result with a compact summary you provide, in your view, going forward. Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in context (just with your summary as its result)."`
-- **Checkpoint:** `"Name the current position so a later mulligan_rewind can jump straight back to it. Use before a speculative sub-task you might want to undo in one shot."`
 - **Audit:** `"Show a token breakdown of the context you're currently carrying (what the model actually sees), flag the biggest contributors, and list active Mulligan markers. Use this to decide whether to rewind or shrink."`
 - **Cancel:** `"Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken transform would apply on every turn for the rest of the session. Identify the marker by \`target\` (same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — the most recent marker affecting that content is retired; or pass an explicit \`markerId\` if you have one. The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). Cancelling a non-existent or already-cancelled marker is a safe no-op."`
+
+> (v1.1: the Checkpoint description is removed — checkpoint is now `/mulligan_checkpoint`, a human command described in `@13` §2.)
 
 ## 7. Cross-references
 - Persisted shapes written by these tools → `@04-data-model.md`

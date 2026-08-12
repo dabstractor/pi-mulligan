@@ -1,6 +1,12 @@
 # pi-mulligan — Specification
 
-**Status:** Draft 1.0 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
+**Status:** Draft 1.1 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
+
+> **v1.1 amendment (human-facing surface + consent model).** Live use surfaced two design defects that this amendment corrects (full spec in `@13-human-facing-surface.md`):
+> 1. **Checkpoint is exposed to the wrong actor** (`@08` E23). A checkpoint only pays off when set *before* a mistake — which needs *foresight* the agent lacks. v1.1 moves checkpoint to a **user slash command** and removes the agent tool. The agent *keeps* the rewind-to-checkpoint power, now **legitimized by the user's opt-in**: a user-set checkpoint grants the agent, for the checkpoint's lifetime, the power to rewind across the user's subsequent prompts back to that point.
+> 2. **`mulligan_audit` is human-facing.** Its context-bloat diagnostic is the thing a person watching the window wants on demand; `/tree` serves only the audit-*trail*. v1.1 adds `/mulligan_audit`.
+> 3. **Drift nudge counted user prompts as bloat.** The rewind/shrink-prescribing nudge now measures **agent-attributable** growth only (user messages excluded).
+> Net: agent tools drop 5→4 (checkpoint removed); 3 human slash commands added (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`); a persistent **active-checkpoint banner** above the prompt box prevents the user from forgetting they have granted destructive power. `first:user` (the original task) remains unconditionally protected.
 
 ---
 
@@ -20,7 +26,7 @@ Throughout, **MUST / SHOULD / MAY** are used in the RFC 2119 sense.
 
 The core insight, established empirically during the feasibility spike (see `@reference/HANDOFF.md`), is that Pi's conversation is an **append-only tree** that an agent *cannot* structurally mutate from a tool, but the agent **can** drop persisted "view instructions" that the `context` event honors on every subsequent inference. Mulligan exploits this: a rewind is not a deletion — it is a **permanent soft-delete**: a persisted instruction that hides a span of messages from every future copy sent to the model, while the originals remain on disk and visible in `/tree` as an audit trail.
 
-The extension is deliberately minimal. It adds **one mechanism** (persisted markers driving a `context`-event view transform) and **two operations** on top of it (*rewind* = remove a span; *shrink* = replace a message's content), plus two cheap, ride-along *nudges* that help the agent notice when it should use them. It does **not** add any human-facing command, any session-tree mutation, or any new model request — all of which were evaluated and rejected as redundant with Pi's existing `/tree`, `/compact`, and `/fork`.
+The extension is deliberately minimal. It adds **one mechanism** (persisted markers driving a `context`-event view transform) and **two operations** on top of it (*rewind* = remove a span; *shrink* = replace a message's content), plus two cheap, ride-along *nudges* that help the agent notice when it should use them. It adds **no session-tree mutation and no new model request** — both were evaluated and rejected. v1.1 introduces a **narrow human-facing surface** (three slash commands + a persistent banner) for exactly the operations whose power or foresight-requirement put them on the human's side: checkpoint (destructive cross-prompt rewind) and audit (the bloat diagnostic a human monitors). See `@13-human-facing-surface.md`. Everything else stays agent-owned.
 
 ---
 
@@ -44,13 +50,18 @@ Pi already has powerful context machinery: auto-compaction, manual `/compact`, `
 
 ### 2.3 What we build
 
-Mulligan gives the agent that missing primitive. Concretely, the agent gains the ability to:
+Mulligan gives the agent that missing primitive, and gives the human a narrow surface for the two operations that belong to them. **Agent-owned** (the agent gains the ability to):
 
-- **Rewind** — hide either its *last tool-call group* or its *last full turn*, and leave itself a structured note so the resumed attempt is better-informed.
+- **Rewind** — hide either its *last tool-call group* or its *last full turn*, and leave itself a structured note so the resumed attempt is better-informed. The agent **also** retains `granularity:"checkpoint"` to rewind back to a checkpoint — but checkpoints are now **user-set** (see human-owned below), so this power fires only where the user has opted in.
 - **Shrink** — replace a specific past tool result (or message) with a compact summary, persistently, in the view.
-- **Checkpoint** — tag the current position with a name, so a later rewind can target it precisely (auto-retired once rewound to, so consumed checkpoints don't accumulate).
 - **Audit** — see a token breakdown of its own context (computed from the *filtered* view, not Pi's bookkeeping), so its rewind decisions are informed.
-- **Be nudged** — automatically, at near-zero token cost, when a tool result is bloated or a turn grew sharply.
+- **Be nudged** — automatically, at near-zero token cost, when a tool result is bloated or **agent-attributable** turn growth is sustained (user messages excluded from the drift delta — v1.1).
+
+**Human-owned** (v1.1; the human gains the ability to):
+
+- **`/mulligan_checkpoint <name>`** — set a named checkpoint (the only way to create one — the agent tool is removed). Setting it grants the agent the power to rewind across the user's subsequent prompts back to that point, for the checkpoint's lifetime. Auto-retired once rewound to.
+- **`/mulligan_checkpoint_revoke <name>`** — withdraw that grant; the agent can no longer rewind to it.
+- **`/mulligan_audit`** — run the same bloat diagnostic the agent's audit produces, on demand, without asking the agent.
 
 ### 2.4 Target users
 
@@ -71,7 +82,7 @@ Mulligan gives the agent that missing primitive. Concretely, the agent gains the
 - **Real tree branching** from an agent tool. Proven impossible (and redundant with `/tree`); see `@02-proven-constraints.md`.
 - **Hard retry / replay** of prior tool calls. Mulligan supports *soft* retry only (rewind + note + re-plan). Replaying tool calls is dangerous because hidden tool calls' **side effects persist on disk** (files written, commands run) and replay would compound them. See `@08-edge-cases.md`.
 - **Undo / un-rewind.** Agent-initiated rewinds are permanent. (A human who wants to explore hidden content uses Pi's native `/tree`.) See decision log in `@reference/HANDOFF.md`.
-- **Human-facing commands.** None. The human side is fully served by `/tree` + `/compact` + `/fork`; a Mulligan command would duplicate built-ins.
+- **Human-facing commands.** **Narrow v1.1 surface only** (see `@13-human-facing-surface.md`): `/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`, plus a persistent active-checkpoint banner. These are added precisely because two operations (destructive cross-prompt checkpoint rewind, and the audit bloat diagnostic) are human-owned by nature. The audit *trail* remains served by `/tree`; a general-purpose Mulligan command surface is still out of scope.
 - **Cross-session or cross-project rewind.** Mulligan operates within a single session only.
 - **Auto-summarization of content via a model call.** Mulligan's notes are agent-authored and its file-ledger is extracted deterministically. It does not spend a model request to summarize. (Optional model-summarization of *very large* rewinds is left as a documented future extension, not v1.)
 
@@ -85,6 +96,8 @@ Mulligan gives the agent that missing primitive. Concretely, the agent gains the
 4. **Fail open.** Every handler is wrapped so that an exception becomes a logged no-op, never a broken agent turn.
 5. **The agent is the user.** Tool names, descriptions, and note contracts are optimized for the LLM's reliable use, not for human ergonomics.
 6. **Honest bookkeeping.** Token accounting reported to the agent reflects the *filtered* view (what the model actually sees), never Pi's raw `getContextUsage()` which counts hidden tokens.
+7. **No rewind wipes user input (except an opted-in checkpoint).** A rewind may hide the agent's own output freely, but must never hide a `user` message. The one exception is a checkpoint rewind — checkpoints can be created only by the human (`/mulligan_checkpoint`), so setting one is consent to rewind across subsequent prompts back to that point. `first:user` is never wiped. (v1's `to_previous_prompt` option is removed — it discarded the latest user message. v1.1 — `@13` §1.)
+8. **Shed-nudges target agent-attributable bloat, not user input.** A nudge that prescribes rewind/shrink measures only content the *agent* produced; user prompts are intentional ground-truth and are exempt. (v1.1 — `@07-preventive-and-nudges.md` §2.)
 
 ---
 
@@ -92,9 +105,11 @@ Mulligan gives the agent that missing primitive. Concretely, the agent gains the
 
 Mulligan is a single Pi extension (one entry file, possibly split into internal modules) that registers:
 
-- **4 agent-callable tools:** `mulligan_rewind`, `mulligan_shrink`, `mulligan_checkpoint`, `mulligan_audit`.
+- **4 agent-callable tools:** `mulligan_rewind`, `mulligan_shrink`, `mulligan_audit`, `mulligan_cancel`. (Checkpoint is **no longer** an agent tool — v1.1; it is a human slash command. `mulligan_rewind(granularity:"checkpoint")` is retained so the agent can rewind to user-set checkpoints.)
+- **3 human slash commands (v1.1):** `/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit` — registered via `pi.registerCommand`, each human-invoked, each write-only w.r.t. the model's context.
+- **1 persistent UI banner (v1.1):** an active-checkpoint reminder rendered via `ctx.ui.setWidget(placement:"aboveEditor")`, reconciled every `context` fire.
 - **1 event-driven context filter:** a `context` handler that is the heart of the extension — it reads persisted *markers* and rewrites the message copy sent to the model.
-- **2 preventive hooks:** a `tool_result` annotator (bloated-result reminder) and a `turn_end`→`context` per-turn nudge.
+- **2 preventive hooks:** a `tool_result` annotator (bloated-result reminder) and a `turn_end`→`context` per-turn nudge (the drift delta is **agent-attributable** — user messages excluded).
 
 All persistent state is stored as **Pi `CustomEntry`s** (via `pi.appendEntry`) — these do *not* participate in LLM context, which is exactly what we want for control state. The agent's self-authored notes are stored as **`CustomMessage`s** (via `pi.sendMessage`) — these *do* participate in context, which is what we want for the note the resumed model must read.
 
@@ -132,7 +147,7 @@ The architecture is fully detailed in `@03-architecture.md`.
 
 - **Rewind** — the "mulligan." The agent hides a recent span and leaves itself a note. Two granularities:
   - **`last_tool_call_group`** — hide the most recent assistant message that issued tool calls, *together with* its tool-result messages. Surgical: keeps the agent's surrounding reasoning, sheds only the bad tool interaction and its output.
-  - **`last_turn`** — hide all agent work (assistant + tool-result messages) produced *after* the most recent user message, leaving that user message in place. The model lands back at the current user prompt, ready to re-attempt the turn with the note. (An option, `to_previous_prompt`, discards the most recent user message too, for the nuclear case.)
+  - **`last_turn`** — hide all agent work (assistant + tool-result messages) produced *after* the most recent user message, leaving that user message in place. The model lands back at the current user prompt, ready to re-attempt the turn with the note. (v1's `to_previous_prompt` option — which also discarded that user message — is **removed** in v1.1: it violated the "no rewind wipes user input" guardrail. The checkpoint mechanism is now the consented way to rewind further.)
 - **Shrink** — replace the content of one specific past message (typically a bloated `toolResult`) with a compact replacement, in the view. The replacement persists for as long as the marker exists (permanent soft substitution).
 
 Both are **permanent until... nothing** — there is no undo. They persist across reload and `/resume`.
@@ -144,7 +159,7 @@ Both are **permanent until... nothing** — there is no undo. They persist acros
 > Full detail: `@07-preventive-and-nudges.md`.
 
 - **Bloated-result reminder.** A `tool_result` hook measures each result; if it exceeds a configurable threshold, the hook appends a short reminder to that result's content telling the agent a rewind is available. The threshold is resolved **per tool** — each tool may carry its own override, falling back to a global default (e.g. `read` gets 24 KB; `bash` uses the 16 KB global because it is the primary bloat surface). This rides the result itself — no extra request.
-- **Per-turn drift nudge.** At `turn_end`, Mulligan records how much the context grew that turn and whether it crossed a drift threshold. On the *next* inference, the `context` handler injects a one-line annotation into the message copy (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). This rides the inference that was already going to happen — **zero extra requests**, ~20 tokens when it fires.
+- **Per-turn drift nudge.** At `turn_end`, Mulligan records how much **agent-attributable** context grew that turn (assistant messages + tool results the agent produced — **user messages excluded**, v1.1: a user's prompt is intentional ground-truth, never bloat to shed) and whether it crossed a drift threshold. On the *next* inference, the `context` handler injects a one-line annotation into the message copy (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). This rides the inference that was already going to happen — **zero extra requests**, ~20 tokens when it fires.
 
 ---
 
@@ -178,8 +193,12 @@ The full reasoning lives in `@reference/HANDOFF.md`. The locked decisions:
 | D6 | No undo; agent rewinds are permanent; human uses `/tree` | Simplicity; `/tree` already serves human recovery |
 | D7 | Relative targeting for the two granularities | Robust across compaction (which renumbers entries) |
 | D8 | No human command; no session-tree mutation | Redundant with Pi's built-in `/tree`/`/compact`/`/fork` |
+| D9 | Checkpoint is user-owned; agent keeps rewind-to-checkpoint, legitimized by user opt-in (v1.1) | Checkpoint needs *foresight* only the user has (E23); moving the trigger to the user puts destructive cross-prompt power behind explicit consent (`@13` §1) |
+| D10 | Drift/shed-nudges measure agent-attributable growth only; user prompts exempt (v1.1) | A nudge that prescribes rewind/shrink must target content the agent can legitimately shed; user input is ground-truth, and nudging toward deleting it is both wrong and misaligned with the consent model (`@07` §2, principle 8) |
 
 > **D6 — amended (marker retraction):** agent `mulligan:rewind`/`mulligan:shrink` markers are **retractable**. Per `@08-edge-cases.md` E21, an agent MAY cancel any marker via `mulligan_cancel`, identifying it **by target** (the same hint shape `mulligan_shrink` uses — `by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`, resolved live each turn, robust to compaction) or by explicit `markerId`; the filter then skips it. This softens D6's "permanent" contract — a mistaken marker is no longer irrevocable. Retraction suppresses the marker going forward only; it does NOT undo on-disk side effects (D1/E5) or replay hidden content.
+>
+> **D8 — amended (v1.1 human-facing surface):** the blanket "no human command" stance is replaced by a **narrow, deliberate** surface: three slash commands (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`) and a persistent active-checkpoint banner. These are registered via `pi.registerCommand` + `ctx.ui.setWidget` (both verified in the installed Pi `0.84.x` types) and are legitimate precisely because they are **human-invoked** — `@02` C2 only forbids an *agent tool* reaching command context via `pi.sendUserMessage`, not a human typing a registered command. Session-tree mutation remains forbidden. Full spec: `@13-human-facing-surface.md`.
 
 ---
 
@@ -205,6 +224,7 @@ Read in order for a complete specification. The omnibus = this master + every li
 10. Testing & verification — @10-testing.md
 11. File layout & build order — @11-build-order.md
 12. Glossary & references — @12-glossary.md
+13. Human-facing surface — slash commands, consent model, active-checkpoint banner (v1.1) — @13-human-facing-surface.md
 
 Reference artifacts (not part of the narrative, but proven and authoritative):
 

@@ -106,16 +106,16 @@ Definitions (per Pi): a **turn** = a user message plus everything after it up to
 
 ```ts
 function resolveLastTurn(
-  messages: AgentMessage[], opts: { toPreviousPrompt?: boolean }, excludeToolCallId?: string
+  messages: AgentMessage[], excludeToolCallId?: string
 ): { remove: number[] }
 ```
 
 Algorithm:
 1. Find `iLastUser` = index of the last message with `role:"user"`. If none, return `{ remove: [] }` (nothing to rewind — protected).
-2. Default (`to_previous_prompt === false`): **keep** the user message; remove all messages after `iLastUser` **except** the rewind's own unit (the assistant message containing `excludeToolCallId` and its result) and any `mulligan:note`/`mulligan:` custom messages at the tail (the note must survive). Concretely:
+2. **Keep** the user message; remove all messages after `iLastUser` **except** the rewind's own unit (the assistant message containing `excludeToolCallId` and its result) and any `mulligan:note`/`mulligan:` custom messages at the tail (the note must survive). Concretely:
    - `remove = indices j where j > iLastUser AND j not in rewindOwnUnit AND messages[j] is not a mulligan:* custom message`.
    - The surviving tail = `[user message] + [mulligan:note] + [rewind assistant + result]`, so the model resumes at the user's prompt with the note immediately available.
-3. Nuclear (`to_previous_prompt === true`): also remove the user message at `iLastUser` (and everything after, same exclusions). The model resumes at the *previous* user prompt. Refuse if `iLastUser` is the **first** user message and `protectedRoles` would be crossed (see §8 protected messages).
+   - (v1.1: the user message is **always kept** — `last_turn` never wipes user input, per the guardrail `@13` §1. v1's `to_previous_prompt` option, which removed it, is gone; a checkpoint is the consented way to rewind across prompts.)
 4. **Pairing:** because removal operates on `partitionIntoUnits`, any assistant+results removed together stay paired. But the "keep the rewind's own unit" exclusion interacts with pairing: the rewind's assistant message might share a unit with sibling tool calls from the same inference (parallel tools). In parallel-tool mode, one assistant message can carry `mulligan_rewind` AND sibling tool calls. Hiding the siblings but keeping the rewind requires **surgical** handling — see §9 (parallel tools). Default: treat the whole assistant message as the rewind's unit only if ALL its toolCalls are `mulligan_rewind`; otherwise fall back to "keep the entire assistant message + all its results" (safe, less surgical).
 
 **`applyRewind` for `last_turn`** = remove `remove` indices (gap-closed), unit-aware.
@@ -237,11 +237,18 @@ interface SessionRuntime {
 
 ## 8. Protected messages
 
-The filter and tools enforce `config.rewind.protectedRoles`. Defaults: the **system** (not in messages anyway), the **first user message** (the original task), and the **latest user message** (the current ask). Concretely, a rewind that would remove a message at or before the first user message, or that would remove the latest user message (unless `to_previous_prompt` explicitly and it isn't the first), is **refused** (the tool refuses before persisting; the filter double-checks and no-ops as defense-in-depth).
+The filter and tools enforce `config.rewind.protectedRoles`. Defaults: the **first user message** (the original task) and the **latest user message** (the current ask).
 
-Implementation: compute `iFirstUser` and `iLatestUser` in `messages`. A rewind's `remove` set MUST satisfy `min(remove) > iFirstUser`. For `last_turn` default, `iLatestUser` is kept by construction (we only remove after it). For `to_previous_prompt`, refuse if `iLatestUser === iFirstUser`.
+**v1.1 guardrail (`@13-human-facing-surface.md` §1):** a rewind never wipes user input; the only exception is a `checkpoint` rewind (the user opted in by setting it). Protection therefore splits by granularity:
 
-Protected roles are **configurable**: `config.rewind.protectedRoles` is a list of selectors. Minimal v1 supports `["first:user", "latest:user"]` semantics; a future version may allow arbitrary role rules. Keep v1 simple.
+- `last_tool_call_group` / `last_turn`: never hide a `user` message (they remove only the agent's own output; `last_turn` keeps the latest user message by construction). Safe under the guardrail — no checkpoint needed.
+- `checkpoint`: may hide user messages after the checkpoint → **legitimized by the user setting the checkpoint** (the only way to create one). `latest:user` protection is intentionally **waived** within the checkpoint's granted scope.
+
+**`first:user` is unconditional and cannot be consented away** (the original task). By construction checkpoints are set at the leaf (always at/after the first user message) and `remove` is strictly `> iTarget`, so the first user message is never in the removal set; `protectedOk` additionally blocks it as defense-in-depth.
+
+Implementation: compute `iFirstUser` in `messages`. A rewind's `remove` set MUST satisfy `min(remove) > iFirstUser` (`protectedOk`, §12). `protectedOk` enforces only `first:user`; it does **not** enforce `latest:user`, because (a) `last_tool_call_group` and `last_turn` keep it by construction (the guardrail), and (b) `checkpoint` rewinds waive it **by design** (the user opted in). v1.1 makes this explicit: `latest:user` is governed by the guardrail + checkpoint opt-in, not by the filter's backstop.
+
+Protected roles are **configurable**: `config.rewind.protectedRoles` is a list of selectors. v1.1 supports `["first:user", "latest:user"]` semantics.
 
 ---
 

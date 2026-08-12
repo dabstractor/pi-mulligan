@@ -51,6 +51,10 @@
       "estimateConfidence": "medium"  // "low"|"medium"|"high" — reported with token estimates
     },
 
+    "ui": {
+      "activeCheckpointBanner": true  // v1.1: persistent above-prompt-box banner while a user-set checkpoint is active (`@13` §5)
+    },
+
     "log": {
       "file": null                    // null = off. Absolute path to append-only JSONL log for debugging.
     }
@@ -82,6 +86,7 @@
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered). Catches slow steady accumulation the delta nudge misses. |
 | `audit.estimateConfidence` | `"medium"` | Honest default; token estimates are approximate. |
 | `log.file` | `null` | Off by default (no disk chatter). Enable for debugging/testing. |
+| `ui.activeCheckpointBanner` | `true` | v1.1: shows the persistent above-prompt-box banner (`ctx.ui.setWidget(placement:"aboveEditor")`) while ≥1 user-set checkpoint is active, so the user does not forget they have armed destructive cross-prompt rewind power (`@08` E26, `@13` §5). Disablable without disabling checkpoints. |
 
 ## 4. Validation rules (in `config.ts`)
 
@@ -91,6 +96,7 @@
 - `bloatThresholdBytesByTool`: if present, must be an object mapping tool-name strings to finite numbers `> 0`. Non-object → discard entirely (use global only). Any non-numeric or `<= 0` value in the map is dropped with a warn (the rest of the map is kept). Unknown tool names are permitted (forward-compat — the map is only consulted when a matching `event.toolName` arrives).
 - `estimateConfidence`: must be one of `"low"|"medium"|"high"`; else default.
 - `log.file`: if set, must be a string; opening is deferred to first write (and wrapped — a bad path must not crash the extension).
+- `ui.activeCheckpointBanner`: boolean (coerce with `!!`); invalid → default `true`.
 - `rewind.maxRetriesPerPrompt`: integer ≥ 1; non-integer or `<1` → default.
 - `rewind.abortContextFraction`: number in (0,1]; out of range or non-number → default.
 - On any per-field validation failure: log a warn naming the field and the value, use the default, continue. **Never throw.**

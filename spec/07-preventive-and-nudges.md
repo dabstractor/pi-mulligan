@@ -87,9 +87,12 @@ pi.on("turn_end", async (event, ctx) => {
     if (!config.enabled || !config.nudges.perTurnDrift) return;
     const rt = runtime(ctx);
 
-    // Estimate current context tokens from the filtered view if available, else from getContextUsage.
-    const now = rt.lastFiltered ? estimateTokens(rt.lastFiltered).tokens
-                                : (ctx.getContextUsage()?.tokens ?? 0);
+    // v1.1 (D10): measure AGENT-ATTRIBUTABLE tokens only — assistant + toolResult messages, EXCLUDING
+    // `user` messages. A user's prompt is intentional ground-truth, never bloat to shed, and the drift
+    // nudge prescribes rewind/shrink (which can only legitimately target agent output). estimateAgentTokens
+    // = sum of estimateTokens over messages whose role !== "user" (pure helper in tokens.ts).
+    const now = rt.lastFiltered ? estimateAgentTokens(rt.lastFiltered)
+                                : (agentTokensFromUsage(ctx) ?? 0);
     const baseline = rt.tokenBaseline;       // captured at previous turn_end (or session_start)
     const delta = baseline == null ? null : now - baseline;
     const bloat = rt.pendingBloatHits ?? []; // collected by Nudge A this turn
@@ -165,6 +168,8 @@ These refine Nudge B (§2) to cut false positives and catch slow accumulation. B
 
 ### 5.1 Windowed drift signaling (REQUIRED)
 `shouldNudge` MUST smooth the per-turn delta over a rolling window of the last `config.nudges.driftWindowTurns` turns (default 3) before comparing to `driftThresholdTokens` — fire when the *windowed* (moving-average, or M-of-N) delta crosses the threshold, NOT on a single turn's raw delta. Rationale (live use): a single heavy turn is routinely legitimate (reading several source files; the user pasting reference docs to read) — *sustained* growth over a window is the actionable signal. The turn metric (`@04-data-model.md` §5) carries the raw per-turn delta; the window is computed in the filter from the last N `mulligan:turn-metric` entries on the branch. The firing condition is **delta-only when delta data is available**: `avg(window.deltaTokens) > driftThresholdTokens`. The earlier `|| bloatHit` arm is **dropped** — it fired the drift nudge on any single large tool result, redundant with Nudge A (already co-located on that result) and a known stuck-turn-loop amplifier (it produced the live-observed `~0k tokens / N bloated results` self-contradiction). `bloatHit` remains a firing condition *only* in the no-delta fallback: a window with zero finite deltas fires iff any metric has `bloatHit` (first turn / post-reload). Acceptance: (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire; (c) a single large result (>threshold) with ~0 net growth does NOT fire the drift nudge even though it does trigger Nudge A.
+
+> **v1.1 note (D10 — `deltaTokens` is agent-attributable).** Because Phase 1 now excludes `user` messages from `now`, a large **user-supplied** input never inflates the drift delta. Concretely: the user pasting a 50k-token reference doc does NOT trip the drift nudge — it is ground-truth input, not agent bloat. The **high-water signal** (§5.2) still measures *total* filtered context and will still fire on such a paste (correctly — the window genuinely is filling), but its prescription is pure awareness, not rewind/shrink. This cleanly separates "the agent should shed something" (delta, agent-attributable) from "the window is getting full" (high-water, total).
 
 ### 5.2 Edge-triggered high-water signal (REQUIRED)
 In addition to the delta nudge, the filter MUST inject a one-line annotation the first time the **total filtered** context crosses a high-water fraction of the window (`config.nudges.highWaterFraction`, default 0.7), using the same filtered-total `mulligan_audit` computes (`@05-tools.md` §4). It MUST be **edge-triggered** — fire once on crossing, not every turn while above — by tracking `rt.aboveHighWater` (set true when the annotation fires, cleared only when the total drops back below the fraction) in the session runtime. This catches slow, steady accumulation that no single-turn delta nudge sees, without nagging.

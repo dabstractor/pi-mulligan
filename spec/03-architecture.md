@@ -18,7 +18,7 @@
 │  │  TOOLS (agent-callable)       │   │  EVENT HANDLERS              │ │
 │  │  • mulligan_rewind            │   │  • context  (the filter)     │ │
 │  │  • mulligan_shrink            │   │  • tool_result (bloat anno.) │ │
-│  │  • mulligan_checkpoint        │   │  • turn_end  (drift metric)  │ │
+│  │  • mulligan_cancel            │   │  • turn_end  (drift metric)  │ │
 │  │  • mulligan_audit             │   │  • session_start (init)      │ │
 │  └───────────┬──────────────────┘   └──────────────┬───────────────┘ │
 │              │ writes markers/notes via pi.*        │ reads markers   │
@@ -44,8 +44,10 @@ Four tools, each a thin wrapper: validate input → write the appropriate marker
 
 - `mulligan_rewind(note, granularity, options?)` — append a rewind marker + the note.
 - `mulligan_shrink(target, replacement)` — append a shrink marker.
-- `mulligan_checkpoint(name)` — label the current leaf.
 - `mulligan_audit()` — **read-only exception**: computes a token breakdown from the last-known filtered view and returns it as the tool result. (It does not persist anything; it reads markers + estimates tokens. See `@05-tools.md` §4.)
+- `mulligan_cancel(target|markerId)` — append a `mulligan:cancel` retraction marker.
+
+> **v1.1:** `mulligan_checkpoint` is **no longer an agent tool** — it is the human slash command `/mulligan_checkpoint` (`@13` §2). `mulligan_rewind(granularity:"checkpoint")` is retained so the agent can rewind *to* a user-set checkpoint. The three human commands (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`) and the active-checkpoint banner are specified in `@13-human-facing-surface.md`; they are thin handlers over the same `markers.ts` wrappers + pure helpers, write-only w.r.t. the model's context.
 
 ### 2.2 Event handlers
 
@@ -61,7 +63,7 @@ All transform logic is extracted into pure functions taking `(messages, marker, 
 Key helpers:
 - `findToolCallPairs(messages)` — maps every `toolCall` id to its `toolResult` index and vice versa, for pairing-aware hiding.
 - `resolveLastToolCallGroup(messages, excludeToolCallIds)` — returns the index range of the most recent assistant message containing tool calls + its result messages.
-- `resolveLastTurn(messages, { toPreviousPrompt })` — returns the index range of the most recent turn's agent work.
+- `resolveLastTurn(messages, excludeToolCallId?)` — returns the index range of the most recent turn's agent work (keeps the user message; v1.1: `to_previous_prompt` removed).
 - `applyRewind(messages, range)` — pairing-aware removal.
 - `applyShrink(messages, target, replacement)` — content substitution.
 - `extractFileLedger(messages, range)` — deterministic `readFiles`/`modifiedFiles` extraction over a span (for the note's state ledger).

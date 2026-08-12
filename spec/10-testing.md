@@ -20,9 +20,7 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 - No toolGroup at all → `null`.
 
 ### 1.3 `resolveLastTurn`
-- `[u0, a, r, u1, a, r]`, default → remove indices after `u1` (keep u1).
-- `to_previous_prompt:true` → also remove `u1`.
-- `u1` is the first user → `to_previous_prompt` refused by protected check.
+- `[u0, a, r, u1, a, r]` → remove indices after `u1` (keep `u1`; `last_turn` never wipes user input — v1.1 guardrail).
 
 ### 1.4 `applyRewind`
 - Removing a toolGroup unit keeps pairing intact (no orphan results/calls remain).
@@ -60,7 +58,7 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 - A zero-hide rewind (`nothing matched to hide`) still increments the per-prompt counter.
 - A `last_tool_call_group`/`checkpoint` rewind whose resolved target is at/after the latest user message counts toward the budget.
 - A new user message resets the counter; the next rewind succeeds.
-- `mulligan_shrink`/`mulligan_audit`/`mulligan_checkpoint`/`mulligan_cancel` remain callable after the budget is hit.
+- `mulligan_shrink`/`mulligan_audit`/`mulligan_cancel` remain callable after the budget is hit. (v1.1: `mulligan_checkpoint` is no longer an agent tool — it is a human command, unaffected by the agent retry budget.)
 - A rewind requested while filtered context ≥ `abortContextFraction` of the window is refused even if the budget remains.
 - All refusals return a reason and never throw (E13), and never block a normal text reply.
 
@@ -87,7 +85,7 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 | **F-shrink-persist** | prompt agent to call a tool returning a large canary result, then `mulligan_shrink` it | next inference's filtered view shows the replacement; session JSONL toolResult is the original (shrink is a view-substitution, not a JSONL rewrite — **assert the original is still on disk and the substitution appears in the filtered cache**) |
 | **F-shrink-preventive** | `tool_result` hook annotates a >16KB result | result content has the appended bloat reminder ("~… KB added to your context…"); `turn-metric` records `bloatHit:true` |
 | **F-nudge-drift** | sustained growth: 3 consecutive turns each adding ~4k tokens | after the 3rd turn the next inference's filtered view ends with a `mulligan:nudge` custom message (ephemeral; NOT in session JSONL). Negatives MUST also pass: a single ~8k-token turn amid small turns does NOT fire, and a single >threshold result with ~0 net growth does NOT fire the drift nudge (it only triggers Nudge A); and a turn that produces a >threshold result AND shrinks/rewinds it in the same turn does NOT fire the drift nudge next turn (§5.3 — Nudge A and B are non-overlapping) |
-| **F-protected** | attempt `mulligan_rewind(granularity:"last_turn", to_previous_prompt:true)` when it's the first user message | tool returns refusal text; no marker created |
+| **F-protected** | attempt a `checkpoint` rewind whose scope would reach the first user message | tool refuses / filter no-ops (`protectedOk` blocks `min(remove) <= iFirstUser`); the original task is never hidden |
 | **F-maxdepth** | create 5 rewinds, attempt a 6th | 6th refuses with depth message |
 | **F-checkpoint** | `mulligan_checkpoint("x")`, then `mulligan_rewind(granularity:"checkpoint", checkpoint:"x")` | label entry exists; rewind hides back to the labeled point (assert filtered message count drops to prefix); **checkpoint is consumed on use — `mulligan_audit` no longer lists it active and a second rewind to `"x"` refuses (not found) unless re-created (spec/05 §3 step 5)** |
 | **F-cancel** | create a `mulligan_shrink`, then `mulligan_cancel({target:{by_tool_name:"read", occurrence:"last"}})` | next `context` fire the originally-shrunk message reappears verbatim in the filtered view; session JSONL has both `mulligan:shrink` and `mulligan:cancel` entries (shrink is skipped, not deleted) |
@@ -95,6 +93,11 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 | **F-reload** | create a rewind, then re-open the session (`--session-id`) and run one more turn | filter still hides the canary (marker survived reload) |
 | **F-retrycap** | `maxRetriesPerPrompt: 2`; drive repeated `last_turn` rewinds at the same prompt | the 3rd rewind is refused with the budget text and persists nothing; a fresh user prompt restores the budget |
 | **F-abortfraction** | force filtered context ≥ `abortContextFraction`, then request a rewind | rewind refused with the context-fraction text even though budget remains; shrink/audit still callable |
+| **F-consent** (v1.1) | set a user checkpoint, send 2 more prompts, then agent `mulligan_rewind(granularity:"checkpoint")` | rewind succeeds and hides both subsequent user prompts (the user opted in by setting the checkpoint); `first:user` is never hidden. `last_turn`/`last_tool_call_group` never hide a `user` message (guardrail) |
+| **F-ckptcmd** (v1.1) | `/mulligan_checkpoint x`; `/mulligan_checkpoint_revoke x` | a `mulligan:checkpoint:x` label is set on the leaf (no extra control entry — checkpoints are user-owned by construction); on revoke the label clears; the agent `mulligan_checkpoint` tool does NOT exist |
+| **F-banner** (v1.1) | `/mulligan_checkpoint x` then several turns | `ctx.ui.setWidget("mulligan:active-checkpoint", …, {placement:"aboveEditor"})` is set and persists; clears within one `context` fire after revoke or consumption; restored on `/resume`; never injected into `event.messages` (assert 0 banner bytes in the filtered view) |
+| **F-useraudit** (v1.1) | `/mulligan_audit` (human) vs `mulligan_audit` (agent) | both render the same report via `renderAuditReport`; the command's output goes to the human/transcript and is NOT in `event.messages`; the tool result still reaches the model |
+| **F-drift-userexempt** (v1.1) | user pastes a ~50k-token doc; agent does ~0 work | the drift nudge does NOT fire (user content excluded from the agent-attributable delta); the high-water signal (§5.2) DOES fire on total context. Contrast: 3 turns of agent reads ~4k each DO fire the drift nudge |
 
 ### 2.2 Driving reliability
 - Use a deterministic, instruction-following model if available; otherwise phrase prompts to force the tool call (the spike used `glm-5.2` successfully with explicit instructions). Provide a fallback "deterministic command" path (`/mulligan_smoke <scenario>`) that invokes the tools/handlers directly for scenarios that don't need model judgment (F-shrink-persist, F-protected, F-maxdepth, F-checkpoint, F-failopen, F-reload).

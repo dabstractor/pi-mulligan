@@ -54,7 +54,7 @@ interface ExtensionContext {
 
 Extends `ExtensionContext` with session-control methods that are **unsafe to call from event handlers** (they can deadlock): `waitForIdle()`, `newSession()`, `fork()`, `navigateTree()`, `switchSession()`, `reload()`, `getSystemPromptOptions()`.
 
-**Mulligan registers no commands and never touches `ExtensionCommandContext`.** This is deliberate: the spike proved an agent tool cannot reach command context anyway (see `@02-proven-constraints.md`), and the human side is served by Pi's native `/tree`. Do not add a command "for completeness."
+**v1.1: Mulligan registers three human slash commands** (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`) via `pi.registerCommand` — see `@13-human-facing-surface.md`. Their handlers receive `ExtensionCommandContext`. This is **legitimate and does not contradict** the spike's C2 finding: C2 (`@02-proven-constraints.md`) proves an **agent tool** cannot reach command context via `pi.sendUserMessage` (extension-injected messages bypass command dispatch); it says nothing about a **human typing a registered command directly**, which is the normal, supported dispatch path. Session-tree mutation remains off-limits — Mulligan's commands read/write labels + control entries + UI only. v1's blanket "no commands" stance is superseded, but only by this narrow, human-invoked surface. (`@13` §0.)
 
 ## 3. `ExtensionAPI` (the `pi` object) — what tools can actually do
 
@@ -82,7 +82,7 @@ pi.registerTool<TParams, TDetails, TState>(tool: ToolDefinition<...>): void;
 pi.on<E extends keyof Events>(event: E, handler: EventHandler<E>): void;
 ```
 
-Methods Mulligan **does not** use, and why: `pi.sendUserMessage` (extension-injected messages bypass command dispatch — see `@02-proven-constraints.md` — and Mulligan has no command to dispatch); `pi.registerCommand` (no human commands); `pi.registerShortcut`/`registerFlag` (out of scope).
+Methods Mulligan **does not** use, and why: `pi.sendUserMessage` (extension-injected messages bypass command dispatch — see `@02-proven-constraints.md` C2 — and Mulligan still has no command an *agent* can dispatch). **v1.1: `pi.registerCommand` IS now used** to register the three human slash commands (`@13-human-facing-surface.md`) — their handlers receive `ExtensionCommandContext` because a **human** invokes them directly (C2 does not block this). `pi.registerShortcut`/`registerFlag` remain out of scope.
 
 ## 4. The session is an append-only tree; `sessionManager` is read-only
 

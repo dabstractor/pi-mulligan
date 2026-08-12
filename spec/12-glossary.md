@@ -35,6 +35,9 @@
 - **Unit (toolGroup)** — the pairing-aware grouping the filter removes atomically: an assistant message containing tool calls + all its result messages.
 - **View transform** — the rewriting of `event.messages` by the `context` handler (rewind removal, shrink substitution, nudge injection).
 - **`/tree`** — Pi's native interactive browser of the session tree; the human's view into everything Mulligan has hidden.
+- **Guardrail (v1.1)** — no rewind wipes user input; the only exception is a checkpoint rewind (the user opted in by setting it). `first:user` is never wiped. (`@13` §1.)
+- **Active-checkpoint banner (v1.1)** — the persistent above-prompt-box reminder (`ctx.ui.setWidget(placement:"aboveEditor")`) shown while a user-set checkpoint is armed, so the user does not forget they granted destructive cross-prompt rewind power. (`@13` §5, `@08` E26.)
+- **Agent-attributable delta (v1.1)** — the drift nudge's measured token growth excluding `user` messages; only content the agent produced counts as sheddable bloat. (D10, `@07` §2.)
 
 ## References
 
@@ -64,10 +67,12 @@
 - **D3** Advisory preventive reminders (never auto-shrink).
 - **D4** Per-turn nudge rides the `context` event (zero extra requests).
 - **D5** Audit tokens from the filtered view, never `getContextUsage()`.
-- **D6** No undo; agent rewinds permanent; human recovery via native `/tree`.
+- **D6** No undo; agent rewinds permanent; human recovery via native `/tree`. *(Amended by E21: markers are retractable via `mulligan_cancel`.)*
 - **D7** Relative targeting for the two granularities (compaction-robust).
-- **D8** No human command; no session-tree mutation (redundant with `/tree`/`/compact`/`/fork`).
+- **D8** No human command; no session-tree mutation. *(v1.1: amended — a narrow human slash-command surface + banner are added; session-tree mutation stays forbidden. Full spec `@13`.)*
+- **D9** (v1.1) Checkpoint is user-owned; the agent keeps rewind-to-checkpoint, legitimized by the user's opt-in. Checkpoint needs foresight only the user has (E23).
+- **D10** (v1.1) Drift/shed-nudges measure agent-attributable growth only; user prompts are exempt (ground-truth, never sheddable bloat).
 
 ---
 
-*End of specification. The omnibus document is `SPEC.md` + files `01`–`12` in index order, plus `reference/HANDOFF.md` and `reference/looper-smoke.proto.ts` as proven artifacts.*
+*End of specification. The omnibus document is `SPEC.md` + files `01`–`13` in index order, plus `reference/HANDOFF.md` and `reference/looper-smoke.proto.ts` as proven artifacts. (File `13` and the v1.1 amendments across `01`–`12` introduce the human-facing surface, consent model, active-checkpoint banner, and agent-attributable drift delta.)*

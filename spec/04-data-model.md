@@ -114,7 +114,6 @@ interface RewindMarker extends MulliganEnvelope {
   id: string;                 // mulligan-internal uuid; also used to correlate with the note
   granularity: "last_tool_call_group" | "last_turn";
   options: {
-    to_previous_prompt?: boolean;   // only meaningful for "last_turn"; default false
     protect?: string[];             // role list that must not be crossed (default from config)
   };
   /** toolCallId of THIS rewind's own tool call, so the filter can exclude the
@@ -200,7 +199,7 @@ interface TurnMetric extends MulliganEnvelope {
   kind: "turn-metric";
   seq: number;
   ts: number;
-  deltaTokens: number;        // signed estimate of how much context grew this turn
+  deltaTokens: number;        // signed estimate of AGENT-ATTRIBUTABLE context growth this turn (user msgs EXCLUDED; v1.1/D10)
   bloatHit: boolean;          // any tool_result this turn exceeded bloatThreshold
   bloatHits: { toolName: string; approxTokens: number }[];
   grewOverThreshold: boolean; // deltaTokens > driftThresholdTokens
@@ -209,7 +208,7 @@ interface TurnMetric extends MulliganEnvelope {
 }
 ```
 
-Because `turn_end` does not receive the message list, `deltaTokens` is computed from the **in-memory token baseline** (captured at `turn_start`/previous `turn_end`) compared to an estimate at `turn_end`. This is inherently approximate; the nudge is advisory, so approximation is acceptable. The baseline is keyed per-session in a module-scoped map, reset on `session_start`. If the baseline is missing (e.g. first turn, or post-reload), `deltaTokens` is `null` and the nudge falls back to `bloatHit`-only signaling.
+Because `turn_end` does not receive the message list, `deltaTokens` is computed from the **in-memory token baseline** (captured at `turn_start`/previous `turn_end`) compared to an estimate at `turn_end`. **v1.1 (D10): the estimate is AGENT-ATTRIBUTABLE only** — it sums `estimateTokens` over messages whose `role !== "user"`, so a user's prompt never inflates the delta. The drift nudge prescribes rewind/shrink, which can only legitimately target agent output; user input is ground-truth (`@07-preventive-and-nudges.md` §2, principle 8). This is inherently approximate; the nudge is advisory, so approximation is acceptable. The baseline is keyed per-session in a module-scoped map, reset on `session_start`. If the baseline is missing (e.g. first turn, or post-reload), `deltaTokens` is `null` and the nudge falls back to `bloatHit`-only signaling.
 
 ## 5½. Marker: cancel (marker retraction)
 
@@ -235,6 +234,12 @@ interface CancelMarker extends MulliganEnvelope {
 ## 6. Checkpoint
 
 A checkpoint is **not** a `CustomEntry`; it is a Pi `LabelEntry` created by `pi.setLabel(leafId, "mulligan:checkpoint:<name>")`. Names MUST match `/^[a-z0-9_-]{1,40}$/`. The `mulligan:checkpoint:` prefix distinguishes Mulligan checkpoints from user/bookmark labels.
+
+**v1.1: checkpoints are set ONLY by the human** via `/mulligan_checkpoint` (`@13` §2); the agent `mulligan_checkpoint` tool is removed (`@05` §3). The agent retains `mulligan_rewind(granularity:"checkpoint")` to rewind *to* a user-set checkpoint.
+
+**No provenance control entry.** A checkpoint is just the label (`pi.setLabel`). Since only `/mulligan_checkpoint` creates checkpoints, every checkpoint is user-owned by construction — no sibling control entry is needed.
+
+**Consent (v1.1):** a checkpoint rewind may hide `user` messages after the checkpoint because the user opted in by setting it; `first:user` stays unconditionally protected (`@06` §8).
 
 ```ts
 // To set:    pi.setLabel(currentLeafId, `mulligan:checkpoint:${name}`);

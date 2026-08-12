@@ -113,9 +113,14 @@ pi-mulligan/
 - Wire the `context` handler: read markers, call `filterPipeline`, cache `lastFiltered`, inject nudge, fail-open.
 - **Verify (integration):** the F-rewind-core scenario — inject a canary, drive a rewind, assert the canary drops on the next `context.fire` and a second assistant message is produced. This is the spike's central proof, reproduced.
 
-### Step 6 — Tools: `tools/rewind.ts`, `shrink.ts`, `checkpoint.ts`, `audit.ts` (2 h)
-- Implement per `@05-tools.md`. Rewind composes ledger + note, persists marker + note, returns confirmation/warnings. Shrink validates + persists. Checkpoint labels the leaf. Audit reads `lastFiltered` and renders.
+### Step 6 — Tools: `tools/rewind.ts`, `shrink.ts`, `audit.ts`, `cancel.ts` (2 h)
+- Implement per `@05-tools.md`. Rewind composes ledger + note, persists marker + note, returns confirmation/warnings (v1.1: honors the §1 step-3b **guardrail** — no rewind wipes user input except a user-set checkpoint; `to_previous_prompt` is removed). Shrink validates + persists. Audit reads `lastFiltered` and renders. (v1.1: **`tools/checkpoint.ts` is removed** — checkpoint is now a human command; `mulligan_rewind`'s `granularity:"checkpoint"` is retained.)
 - **Verify (integration):** F-shrink-persist, F-protected, F-maxdepth, F-checkpoint, F-failopen scenarios pass.
+
+### Step 6b — Human commands + active-checkpoint banner (v1.1; ~1 h)
+- Register three `pi.registerCommand` handlers: `/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit` (`@13` §2–§4). Each captures `pi` via closure, receives `(args, ctx: ExtensionCommandContext)`, writes labels + `ctx.ui.notify`. `/mulligan_audit` reuses `renderAuditReport` (`src/tools/audit.ts`) and writes to the transcript (never `event.messages`).
+- Implement the **active-checkpoint banner** (`@13` §5): a `reconcileBanner(ctx)` helper that calls `ctx.ui.setWidget("mulligan:active-checkpoint", lines|undefined, {placement:"aboveEditor"})` from the active-checkpoint set; invoke it from the command handlers, `session_start`, and (defense-in-depth) at the tail of the `context` handler. Guard with `ctx.hasUI`; honor `config.ui.activeCheckpointBanner`.
+- **Verify (integration):** F-ckptcmd, F-banner, F-useraudit, F-consent scenarios pass (`@10` §2.1).
 
 ### Step 7 — `nudges.ts` (1 h)
 - `tool_result` annotator (bloat reminder) + `turn_end` metric + the `context` nudge injection path.
