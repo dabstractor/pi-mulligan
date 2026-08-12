@@ -23,8 +23,20 @@
  * it). It NEVER calls setWidget. So we vi.mock("../src/banner.js") and assert the
  * `vi.mocked(reconcileBanner)` SPY — we NEVER assert on `widgets`. This is robust to P2.M3.T1.S2.
  */
-import { describe, it, expect, expectTypeOf, beforeEach, afterEach, vi } from "vitest";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+  describe,
+  it,
+  expect,
+  expectTypeOf,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import type { Mock } from "vitest"; // type-only — for fakeStore capture spy casts (step 4b)
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
 // vi.mock is HOISTED to the top of the file (before the imports below) and is FILE-SCOPED — it replaces
 // banner.js for every test in this file. This mirrors the settings.js/log.js module-mock idiom in
@@ -41,6 +53,7 @@ import {
 import { reconcileBanner } from "../src/banner.js"; // the MOCKED binding (the spy target)
 import { getConfig, setConfig } from "../src/config.js"; // disabled-gate control (+ getConfig to re-derive the expected report)
 import { clearAll, getRuntime } from "../src/runtime.js"; // module-scoped runtime reset (+ getRuntime to seed rt.lastFiltered)
+import type { SnapshotStore } from "../src/snapshot/store.js"; // type-only (erased) — for step-4b fakeStore cast
 import {
   renderAuditReport,
   listCheckpoints,
@@ -79,15 +92,17 @@ afterEach(() => {
  */
 function makePi(opts: { throwOnSetLabel?: boolean } = {}) {
   const labels: { entryId: string; label: string | undefined }[] = [];
-  const appended: boolean[] = [];
+  // step-4b (P3.M2.T1.S1) records the control-entry payload: { customType, data }. The existing audit
+  // case-(c) test asserts `appended.toHaveLength(0)` — still holds (shape change is internal).
+  const appended: { customType: string; data: unknown }[] = [];
   const sent: boolean[] = [];
   const pi = {
     setLabel(entryId: string, label: string | undefined) {
       if (opts.throwOnSetLabel) throw new Error("setLabel boom");
       labels.push({ entryId, label });
     },
-    appendEntry() {
-      appended.push(true);
+    appendEntry(customType: string, data: unknown) {
+      appended.push({ customType, data });
     },
     sendMessage() {
       sent.push(true);
@@ -104,23 +119,35 @@ function makePi(opts: { throwOnSetLabel?: boolean } = {}) {
  *
  * `widgets` is captured (defensive) but NEVER asserted — GOTCHA #1 (reconcileBanner is a stub).
  */
-function makeCtx(opts: {
-  hasUI?: boolean;
-  branch?: unknown[];
-  entries?: unknown[];
-  labelMap?: Record<string, string | undefined>;
-  throwOnGetBranch?: boolean;
-  throwOnGetEntries?: boolean;
-  sessionId?: string;
-  contextEntries?: unknown[];
-  throwOnGetSessionId?: boolean;
-  throwOnBuildContext?: boolean;
-} = {}) {
+function makeCtx(
+  opts: {
+    hasUI?: boolean;
+    branch?: unknown[];
+    entries?: unknown[];
+    labelMap?: Record<string, string | undefined>;
+    throwOnGetBranch?: boolean;
+    throwOnGetEntries?: boolean;
+    sessionId?: string;
+    contextEntries?: unknown[];
+    throwOnGetSessionId?: boolean;
+    throwOnBuildContext?: boolean;
+  } = {},
+) {
   const notifies: { msg: string; type: string }[] = [];
   const widgets: { key: string; content: unknown; options?: unknown }[] = [];
   const branch = opts.branch ?? [
-    { type: "message", id: "u1", parentId: null, message: { role: "user", content: [] } },
-    { type: "message", id: "leaf-1", parentId: "u1", message: { role: "assistant", content: [] } },
+    {
+      type: "message",
+      id: "u1",
+      parentId: null,
+      message: { role: "user", content: [] },
+    },
+    {
+      type: "message",
+      id: "leaf-1",
+      parentId: "u1",
+      message: { role: "assistant", content: [] },
+    },
   ];
   const entries = opts.entries ?? [];
   const labelMap = opts.labelMap ?? {};
@@ -155,7 +182,8 @@ function makeCtx(opts: {
         return opts.sessionId ?? "s1";
       },
       buildContextEntries() {
-        if (opts.throwOnBuildContext) throw new Error("buildContextEntries boom");
+        if (opts.throwOnBuildContext)
+          throw new Error("buildContextEntries boom");
         return contextEntries;
       },
     },
@@ -171,16 +199,34 @@ function makeCtx(opts: {
  */
 function branchEndingInMsg(leafMsgId: string): unknown[] {
   return [
-    { type: "message", id: "u1", parentId: null, message: { role: "user", content: [] } },
-    { type: "message", id: leafMsgId, parentId: "u1", message: { role: "assistant", content: [] } },
+    {
+      type: "message",
+      id: "u1",
+      parentId: null,
+      message: { role: "user", content: [] },
+    },
+    {
+      type: "message",
+      id: leafMsgId,
+      parentId: "u1",
+      message: { role: "assistant", content: [] },
+    },
   ];
 }
 
 /** The testable seam: call the factory's handler directly (no real Pi). */
-async function runSet(pi: ExtensionAPI, ctx: ExtensionCommandContext, name: string) {
+async function runSet(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  name: string,
+) {
   await makeCheckpointCommand(pi).handler(name, ctx);
 }
-async function runRevoke(pi: ExtensionAPI, ctx: ExtensionCommandContext, name: string) {
+async function runRevoke(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  name: string,
+) {
   await makeCheckpointRevokeCommand(pi).handler(name, ctx);
 }
 
@@ -196,7 +242,9 @@ describe("/mulligan_checkpoint (set) — VALID (spec/13 §2 step 5)", () => {
     const { labels, pi } = makePi();
     const { notifies, ctx } = makeCtx({ branch: branchEndingInMsg("leaf-9") });
     await runSet(pi, ctx, "before-refactor");
-    expect(labels).toEqual([{ entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" }]);
+    expect(labels).toEqual([
+      { entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" },
+    ]);
     expect(notifies).toHaveLength(1);
     expect(notifies[0].type).toBe("warning");
     // spec/13 §2 step 5 verbatim (the "(your prompts after here can be hidden)" parenthetical + the
@@ -214,7 +262,10 @@ describe("/mulligan_checkpoint (set) — VALID (spec/13 §2 step 5)", () => {
     const { labels, pi } = makePi();
     const { notifies, ctx } = makeCtx({ branch: branchEndingInMsg("leaf-42") });
     await runSet(pi, ctx, "pre-experiment");
-    expect(labels[0]).toEqual({ entryId: "leaf-42", label: "mulligan:checkpoint:pre-experiment" });
+    expect(labels[0]).toEqual({
+      entryId: "leaf-42",
+      label: "mulligan:checkpoint:pre-experiment",
+    });
     expect(notifies[0].msg).toContain("'pre-experiment'");
     expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
   });
@@ -232,19 +283,24 @@ describe("/mulligan_checkpoint (set) — INVALID name (spec/13 §2 step 1)", () 
     ["contains a dot", "dot.dot"],
     ["contains '!' special char", "name!"],
     ["41-char name (boundary-invalid)", FORTY_ONE],
-  ])("rejects %s → verbatim 'invalid' warning notify; no setLabel; no reconcileBanner", async (_label, name) => {
-    const { labels, pi } = makePi();
-    const { notifies, ctx } = makeCtx({ branch: branchEndingInMsg("leaf-9") });
-    await runSet(pi, ctx, name);
-    expect(labels).toHaveLength(0);
-    expect(vi.mocked(reconcileBanner)).not.toHaveBeenCalled();
-    expect(notifies).toHaveLength(1);
-    expect(notifies[0].type).toBe("warning");
-    // spec/13 §2 step 1 verbatim (echoes the offending name + the regex constraint).
-    expect(notifies[0].msg).toBe(
-      `Mulligan: invalid checkpoint name '${name}' (lowercase, digits, hyphen, underscore; max 40)`,
-    );
-  });
+  ])(
+    "rejects %s → verbatim 'invalid' warning notify; no setLabel; no reconcileBanner",
+    async (_label, name) => {
+      const { labels, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, name);
+      expect(labels).toHaveLength(0);
+      expect(vi.mocked(reconcileBanner)).not.toHaveBeenCalled();
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      // spec/13 §2 step 1 verbatim (echoes the offending name + the regex constraint).
+      expect(notifies[0].msg).toBe(
+        `Mulligan: invalid checkpoint name '${name}' (lowercase, digits, hyphen, underscore; max 40)`,
+      );
+    },
+  );
 
   // ACCEPT parity with the tool's validCheckpointName (proves the command shares the regex).
   it.each([
@@ -253,16 +309,24 @@ describe("/mulligan_checkpoint (set) — INVALID name (spec/13 §2 step 1)", () 
     ["40-char name (boundary-valid)", FORTY],
     ["hyphen-only '---'", "---"],
     ["digits '123'", "123"],
-  ])("accepts %s → setLabel once + verbatim warning notify + reconcileBanner", async (_label, name) => {
-    const { labels, pi } = makePi();
-    const { notifies, ctx } = makeCtx({ branch: branchEndingInMsg("leaf-1") });
-    await runSet(pi, ctx, name);
-    expect(labels).toHaveLength(1);
-    expect(labels[0]).toEqual({ entryId: "leaf-1", label: `mulligan:checkpoint:${name}` });
-    expect(notifies[0].type).toBe("warning");
-    expect(notifies[0].msg).toContain(`'${name}' set.`);
-    expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
-  });
+  ])(
+    "accepts %s → setLabel once + verbatim warning notify + reconcileBanner",
+    async (_label, name) => {
+      const { labels, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-1"),
+      });
+      await runSet(pi, ctx, name);
+      expect(labels).toHaveLength(1);
+      expect(labels[0]).toEqual({
+        entryId: "leaf-1",
+        label: `mulligan:checkpoint:${name}`,
+      });
+      expect(notifies[0].type).toBe("warning");
+      expect(notifies[0].msg).toContain(`'${name}' set.`);
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    },
+  );
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -304,7 +368,13 @@ describe("/mulligan_checkpoint_revoke — EXISTING (spec/13 §3 step 5)", () => 
   it("clears the label (setLabel(id, undefined)), notifies verbatim (info), and calls reconcileBanner", async () => {
     const { labels, pi } = makePi();
     const { notifies, ctx } = makeCtx({
-      entries: [{ type: "label", label: "mulligan:checkpoint:before-refactor", targetId: "leaf-9" }],
+      entries: [
+        {
+          type: "label",
+          label: "mulligan:checkpoint:before-refactor",
+          targetId: "leaf-9",
+        },
+      ],
       labelMap: { "leaf-9": "mulligan:checkpoint:before-refactor" }, // getLabel === needle → ACTIVE
     });
     await runRevoke(pi, ctx, "before-refactor");
@@ -333,7 +403,9 @@ describe("/mulligan_checkpoint_revoke — MISSING (spec/13 §3 step 2)", () => {
     expect(notifies).toHaveLength(1);
     expect(notifies[0].type).toBe("info");
     // spec/13 §3 step 2 verbatim (closing apostrophe on <name>).
-    expect(notifies[0].msg).toBe("Mulligan: no active checkpoint named 'nope'.");
+    expect(notifies[0].msg).toBe(
+      "Mulligan: no active checkpoint named 'nope'.",
+    );
   });
 
   it("revoke when disabled → 'Mulligan is disabled'; no setLabel; clearCheckpointByName NOT reached", async () => {
@@ -341,7 +413,9 @@ describe("/mulligan_checkpoint_revoke — MISSING (spec/13 §3 step 2)", () => {
     try {
       const { labels, pi } = makePi();
       const { notifies, ctx } = makeCtx({
-        entries: [{ type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" }],
+        entries: [
+          { type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" },
+        ],
         labelMap: { "leaf-1": "mulligan:checkpoint:x" },
       });
       await runRevoke(pi, ctx, "x");
@@ -371,7 +445,9 @@ describe("clearCheckpointByName — unit (two-phase discover+confirm)", () => {
   it("existing/active name → true; setLabel(id, undefined)", () => {
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({
-      entries: [{ type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" }],
+      entries: [
+        { type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" },
+      ],
       labelMap: { "leaf-1": "mulligan:checkpoint:x" }, // ACTIVE (getLabel === needle)
     });
     expect(clearCheckpointByName(pi, ctx, "x")).toBe(true);
@@ -385,7 +461,9 @@ describe("clearCheckpointByName — unit (two-phase discover+confirm)", () => {
   it("stale label (entries has the SET but getLabel→undefined) → false; no setLabel (two-phase confirm)", () => {
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({
-      entries: [{ type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" }], // historical SET present
+      entries: [
+        { type: "label", label: "mulligan:checkpoint:x", targetId: "leaf-1" },
+      ], // historical SET present
       labelMap: { "leaf-1": undefined }, // but already cleared (latest-wins → undefined)
     });
     expect(clearCheckpointByName(pi, ctx, "x")).toBe(false);
@@ -408,18 +486,26 @@ describe("clearCheckpointByName — unit (two-phase discover+confirm)", () => {
 describe("hasUI guard (GOTCHA #6 — the guard is on the notify, NOT the label mutation)", () => {
   it("hasUI=false + valid set → no notify, but setLabel STILL runs + reconcileBanner still called", async () => {
     const { labels, pi } = makePi();
-    const { notifies, ctx } = makeCtx({ hasUI: false, branch: branchEndingInMsg("leaf-9") });
+    const { notifies, ctx } = makeCtx({
+      hasUI: false,
+      branch: branchEndingInMsg("leaf-9"),
+    });
     await runSet(pi, ctx, "before-refactor");
     expect(notifies).toHaveLength(0); // notify is hasUI-guarded
     // label mutation runs regardless of hasUI:
-    expect(labels).toEqual([{ entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" }]);
+    expect(labels).toEqual([
+      { entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" },
+    ]);
     // banner refresh is hasUI-independent (the command always mutates → always refreshes):
     expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
   });
 
   it("hasUI=false + invalid name → no notify (the invalid-name notify is guarded too)", async () => {
     const { labels, pi } = makePi();
-    const { notifies, ctx } = makeCtx({ hasUI: false, branch: branchEndingInMsg("leaf-9") });
+    const { notifies, ctx } = makeCtx({
+      hasUI: false,
+      branch: branchEndingInMsg("leaf-9"),
+    });
     await runSet(pi, ctx, "BAD NAME!");
     expect(notifies).toHaveLength(0);
     expect(labels).toHaveLength(0); // invalid → still no setLabel (validation precedes mutation)
@@ -457,7 +543,9 @@ describe("never throws (command handlers wrap the body in try/catch)", () => {
     await expect(runRevoke(pi, ctx, "nope")).resolves.toBeUndefined();
     expect(notifies).toHaveLength(1);
     expect(notifies[0].type).toBe("info");
-    expect(notifies[0].msg).toBe("Mulligan: no active checkpoint named 'nope'.");
+    expect(notifies[0].msg).toBe(
+      "Mulligan: no active checkpoint named 'nope'.",
+    );
   });
 });
 
@@ -470,7 +558,9 @@ describe("types", () => {
     const { pi } = makePi();
     const cmd = makeCheckpointCommand(pi);
     expectTypeOf(cmd.description).toEqualTypeOf<string>();
-    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<[string, ExtensionCommandContext]>();
+    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<
+      [string, ExtensionCommandContext]
+    >();
     expectTypeOf(cmd.handler).returns.toEqualTypeOf<Promise<void>>();
   });
 
@@ -478,7 +568,9 @@ describe("types", () => {
     const { pi } = makePi();
     const cmd = makeCheckpointRevokeCommand(pi);
     expectTypeOf(cmd.description).toEqualTypeOf<string>();
-    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<[string, ExtensionCommandContext]>();
+    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<
+      [string, ExtensionCommandContext]
+    >();
     expectTypeOf(cmd.handler).returns.toEqualTypeOf<Promise<void>>();
   });
 
@@ -502,8 +594,17 @@ function userMsg(text: string): Record<string, unknown> {
 }
 
 /** toolResult — a minimal tool-result message fixture (copied from test/tools/audit.test.ts; not exported there). */
-function toolResult(id: string, name: string, text: string): Record<string, unknown> {
-  return { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }] };
+function toolResult(
+  id: string,
+  name: string,
+  text: string,
+): Record<string, unknown> {
+  return {
+    role: "toolResult",
+    toolCallId: id,
+    toolName: name,
+    content: [{ type: "text", text }],
+  };
 }
 
 /**
@@ -513,17 +614,26 @@ function toolResult(id: string, name: string, text: string): Record<string, unkn
  * so any divergence between the command path and a direct renderAuditReport call surfaces as an exact-string
  * failure in case (a). PURE: derives ONLY from its args (seeds nothing; the caller seeds rt.lastFiltered).
  */
-function buildExpectedReport(filtered: Record<string, unknown>[], ctx: ExtensionCommandContext): string {
+function buildExpectedReport(
+  filtered: Record<string, unknown>[],
+  ctx: ExtensionCommandContext,
+): string {
   const config = getConfig();
-  const totalTokens = estimateTokens(filtered as unknown as Parameters<typeof estimateTokens>[0]).tokens;
+  const totalTokens = estimateTokens(
+    filtered as unknown as Parameters<typeof estimateTokens>[0],
+  ).tokens;
   const callLookup = buildCallLookup(filtered);
   type TM = Parameters<typeof estimateTokens>[0];
   const rows: AuditRow[] = filtered
-    .map((m) => ({ tokens: estimateTokens([m] as unknown as TM).tokens, msg: m }))
+    .map((m) => ({
+      tokens: estimateTokens([m] as unknown as TM).tokens,
+      msg: m,
+    }))
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, 8)
     .map(({ tokens, msg }) => {
-      const toolName = typeof msg.toolName === "string" ? msg.toolName : undefined;
+      const toolName =
+        typeof msg.toolName === "string" ? msg.toolName : undefined;
       const rowThreshold = bloatThresholdFor(toolName, config);
       return {
         tokens,
@@ -534,7 +644,9 @@ function buildExpectedReport(filtered: Record<string, unknown>[], ctx: Extension
       };
     });
   const markers = readMarkers(ctx);
-  const checkpointNames = listCheckpoints((ctx.sessionManager.getEntries() as unknown as unknown[]) ?? []);
+  const checkpointNames = listCheckpoints(
+    (ctx.sessionManager.getEntries() as unknown as unknown[]) ?? [],
+  );
   return renderAuditReport({
     totalTokens,
     confidence: config.audit.estimateConfidence,
@@ -549,7 +661,11 @@ function buildExpectedReport(filtered: Record<string, unknown>[], ctx: Extension
 }
 
 /** The testable seam: call the audit factory's handler directly (no real Pi). */
-async function runAudit(pi: ExtensionAPI, ctx: ExtensionCommandContext, args = "") {
+async function runAudit(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  args = "",
+) {
   await makeAuditCommand(pi).handler(args, ctx);
 }
 
@@ -557,7 +673,10 @@ async function runAudit(pi: ExtensionAPI, ctx: ExtensionCommandContext, args = "
 
 describe("/mulligan_audit — case (a) renders the same report as renderAuditReport (cached path)", () => {
   it("notify msg === renderAuditReport re-derived from the same filtered+ctx (exact string equality)", async () => {
-    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    const filtered = [
+      userMsg("hello world"),
+      toolResult("c1", "read", "big file body"),
+    ];
     getRuntime("s1").lastFiltered = filtered; // PRIMARY path seed (confidence = config.audit.estimateConfidence)
     const { pi } = makePi();
     const { notifies, ctx } = makeCtx({ entries: [] }); // no markers, no checkpoints
@@ -572,7 +691,10 @@ describe("/mulligan_audit — case (a) renders the same report as renderAuditRep
 
 describe("/mulligan_audit — case (b) report delivered to the human sink (info notify)", () => {
   it("notifies length 1, type 'info', and msg contains the report", async () => {
-    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    const filtered = [
+      userMsg("hello world"),
+      toolResult("c1", "read", "big file body"),
+    ];
     getRuntime("s1").lastFiltered = filtered;
     const { pi } = makePi();
     const { notifies, ctx } = makeCtx({ entries: [] });
@@ -588,7 +710,10 @@ describe("/mulligan_audit — case (b) report delivered to the human sink (info 
 
 describe("/mulligan_audit — case (c) ZERO writes (the report never enters event.messages)", () => {
   it("after a successful run, pi.appendEntry and pi.sendMessage were each called 0 times", async () => {
-    getRuntime("s1").lastFiltered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    getRuntime("s1").lastFiltered = [
+      userMsg("hello world"),
+      toolResult("c1", "read", "big file body"),
+    ];
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx({ entries: [] });
     await runAudit(pi, ctx);
@@ -645,7 +770,10 @@ describe("/mulligan_audit — bonus (f) never throws", () => {
 
 describe("/mulligan_audit — bonus (g) args ignored (reserved for future top override)", () => {
   it("passing '20' runs normally and still emits the report === renderAuditReport output", async () => {
-    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    const filtered = [
+      userMsg("hello world"),
+      toolResult("c1", "read", "big file body"),
+    ];
     getRuntime("s1").lastFiltered = filtered;
     const { pi } = makePi();
     const { notifies, ctx } = makeCtx({ entries: [] });
@@ -663,7 +791,275 @@ describe("/mulligan_audit — bonus (h) types", () => {
     const { pi } = makePi();
     const cmd = makeAuditCommand(pi);
     expectTypeOf(cmd.description).toEqualTypeOf<string>();
-    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<[string, ExtensionCommandContext]>();
+    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<
+      [string, ExtensionCommandContext]
+    >();
     expectTypeOf(cmd.handler).returns.toEqualTypeOf<Promise<void>>();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// step 4b — checkpoint snapshot capture (P3.M2.T1.S1 / @spec/13 §2 step 4b + @14 §5)
+// ════════════════════════════════════════════════════════════════════════════
+// The v1.2 working-tree-revert capture half of /mulligan_checkpoint. When config.revert.enabled is ON
+// and rt.store is a real backend, step 4b captures("ckpt:<name>") → sets rt.snapshots + appends a
+// mulligan:revert-checkpoint control entry. BEST-EFFORT: the checkpoint label + fair-warning notify +
+// reconcileBanner ALWAYS fire regardless of the capture outcome (the block is gated + own-try-catch +
+// no early return). Eight cases: happy path, revert-OFF (v1.1 parity), store-undefined, none-backend,
+// capture-null, capture-reject, cas-backend, hasUI=false.
+
+/**
+ * fakeStore — a recording SnapshotStore for step-4b tests. describe().backend + capture()'s resolved
+ * ref are configurable. The other SnapshotStore methods are unused by step 4b and omitted (the cast
+ * via `as unknown as SnapshotStore` satisfies the structural need). cast `capture` to Mock to assert
+ * the call arg / override the return.
+ */
+function fakeStore(
+  opts: { backend?: "git" | "cas" | "none"; ref?: string | null } = {},
+): SnapshotStore {
+  return {
+    describe: () => ({ backend: opts.backend ?? "git" }),
+    capture: vi
+      .fn()
+      .mockResolvedValue(opts.ref === undefined ? "sha-abc" : opts.ref),
+  } as unknown as SnapshotStore;
+}
+
+/**
+ * setRevertOn — turn the v1.2 working-tree-revert feature ON for a step-4b capture test. DEFAULT_CONFIG
+ * has it OFF (v1.1 parity). Reset with setConfig(undefined) in a `finally` (mirrors the audit disabled-test
+ * try/finally pattern) so the ON state never leaks past the it().
+ */
+function setRevertOn() {
+  setConfig({
+    revert: {
+      enabled: true,
+      allowDeleteCreatedFiles: false,
+      nonGitMode: "cas",
+      storageDir: null,
+      maxFileBytes: 262144,
+      maxTotalBytes: 33554432,
+      maxSnapshotsPerTurn: 64,
+      excludeGlobs: [".git", "node_modules"],
+    },
+  });
+}
+
+describe("step 4b checkpoint snapshot capture (P3.M2.T1.S1)", () => {
+  // ── happy path: revert ON + git store → capture + snapshots.set + appendEntry ────────────────
+  it("captures ckpt:<name> + sets rt.snapshots + appends mulligan:revert-checkpoint (revert ON + git store)", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore({ backend: "git", ref: "sha-abc" });
+      getRuntime("s1").store = store;
+      const { labels, appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, "before-refactor");
+      // capture called with the checkpoint namespace key "ckpt:<name>" (NOT "checkpoint:"):
+      expect(
+        vi.mocked(store.capture as unknown as Mock).mock.calls[0]![0],
+      ).toBe("ckpt:before-refactor");
+      // rt.snapshots now holds the RevertCheckpoint (turnIndex:-1 sentinel; no afterRef):
+      const ckpt = getRuntime("s1").snapshots?.get("ckpt:before-refactor");
+      expect(ckpt).toMatchObject({
+        label: "ckpt:before-refactor",
+        backend: "git",
+        beforeRef: "sha-abc",
+        turnIndex: -1,
+      });
+      expect(ckpt?.afterRef).toBeUndefined();
+      // the control entry was appended with { label, ref, backend }:
+      expect(appended).toEqual([
+        {
+          customType: "mulligan:revert-checkpoint",
+          data: {
+            label: "ckpt:before-refactor",
+            ref: "sha-abc",
+            backend: "git",
+          },
+        },
+      ]);
+      // step 4b did NOT block the checkpoint label + fair-warning notify + reconcileBanner:
+      expect(labels).toEqual([
+        { entryId: "leaf-9", label: "mulligan:checkpoint:before-refactor" },
+      ]);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(notifies[0].msg).toContain("'before-refactor' set.");
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined); // reset to DEFAULT_CONFIG (revert OFF) so it doesn't leak
+    }
+  });
+
+  // ── revert OFF (DEFAULT) → step 4b is a complete no-op (v1.1 parity) ─────────────────────────
+  it("revert.enabled === false (DEFAULT) → NO capture / snapshots.set / appendEntry; checkpoint+notify+banner fire (v1.1 parity)", async () => {
+    // NO setRevertOn() — DEFAULT_CONFIG has revert OFF
+    const store = fakeStore();
+    getRuntime("s1").store = store;
+    const { labels, appended, pi } = makePi();
+    const { notifies, ctx } = makeCtx({ branch: branchEndingInMsg("leaf-9") });
+    await runSet(pi, ctx, "x");
+    expect(store.capture).not.toHaveBeenCalled(); // the gate skipped before any capture access
+    expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(false);
+    expect(appended).toHaveLength(0); // NO control entry
+    // checkpoint + notify + banner STILL fire (behaves EXACTLY as v1.1):
+    expect(labels).toEqual([
+      { entryId: "leaf-9", label: "mulligan:checkpoint:x" },
+    ]);
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].type).toBe("warning");
+    expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+  });
+
+  // ── store undefined (P3.M1.T2.S1 not wired) → graceful skip ────────────────────────────────
+  it("store undefined (not wired) → graceful skip; checkpoint+notify+banner fire", async () => {
+    setRevertOn();
+    try {
+      // do NOT seed rt.store → undefined (the runtime's default)
+      const { labels, appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, "x");
+      expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(false);
+      expect(appended).toHaveLength(0);
+      // checkpoint + notify + banner STILL fire (the if(rt.store) guard skipped cleanly):
+      expect(labels).toEqual([
+        { entryId: "leaf-9", label: "mulligan:checkpoint:x" },
+      ]);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined);
+    }
+  });
+
+  // ── backend === 'none' (NoOpStore) → skip capture ──────────────────────────────────────────
+  it("backend === 'none' (NoOpStore) → NO capture / snapshots.set / appendEntry; checkpoint+notify+banner fire", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore({ backend: "none" });
+      getRuntime("s1").store = store;
+      const { labels, appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, "x");
+      expect(store.capture).not.toHaveBeenCalled(); // the !=="none" guard skipped
+      expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(false);
+      expect(appended).toHaveLength(0);
+      // checkpoint + notify + banner STILL fire:
+      expect(labels).toEqual([
+        { entryId: "leaf-9", label: "mulligan:checkpoint:x" },
+      ]);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined);
+    }
+  });
+
+  // ── capture returns null (caps exceeded) → skip snapshots.set + appendEntry ────────────────
+  it("capture returns null (caps exceeded) → NO snapshots.set / appendEntry; checkpoint+notify+banner fire", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore({ ref: null });
+      getRuntime("s1").store = store;
+      const { labels, appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, "x");
+      expect(store.capture).toHaveBeenCalledWith("ckpt:x"); // capture WAS called (backend is git) → null
+      expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(false); // but the null ref skipped the set
+      expect(appended).toHaveLength(0); // and skipped the control entry
+      // checkpoint + notify + banner STILL fire:
+      expect(labels).toEqual([
+        { entryId: "leaf-9", label: "mulligan:checkpoint:x" },
+      ]);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined);
+    }
+  });
+
+  // ── capture REJECTS → step-4b swallows; checkpoint STILL sets (best-effort, E27) ────────────
+  it("capture REJECTS → step-4b swallows; checkpoint STILL sets + notify + banner fire (best-effort, E27)", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore();
+      vi.mocked(store.capture as unknown as Mock).mockRejectedValue(
+        new Error("boom"),
+      );
+      getRuntime("s1").store = store;
+      const { labels, appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await expect(runSet(pi, ctx, "x")).resolves.toBeUndefined(); // the handler NEVER throws
+      expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(false); // capture threw → no set
+      expect(appended).toHaveLength(0); // and no control entry
+      // checkpoint + fair-warning notify + banner STILL fire (the catch did NOT block the rest):
+      expect(labels).toEqual([
+        { entryId: "leaf-9", label: "mulligan:checkpoint:x" },
+      ]);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(notifies[0].msg).toContain("'x' set.");
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined);
+    }
+  });
+
+  // ── cas backend → snapshots.backend === 'cas' + control-entry backend 'cas' ─────────────────
+  it("cas backend → snapshots.backend === 'cas' + control-entry backend 'cas'", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore({ backend: "cas", ref: "manifest-xyz" });
+      getRuntime("s1").store = store;
+      const { appended, pi } = makePi();
+      const { ctx } = makeCtx({ branch: branchEndingInMsg("leaf-9") });
+      await runSet(pi, ctx, "exp1");
+      expect(getRuntime("s1").snapshots?.get("ckpt:exp1")?.backend).toBe("cas");
+      expect(appended[0]).toEqual({
+        customType: "mulligan:revert-checkpoint",
+        data: { label: "ckpt:exp1", ref: "manifest-xyz", backend: "cas" },
+      });
+    } finally {
+      setConfig(undefined);
+    }
+  });
+
+  // ── hasUI=false → capture STILL runs (hasUI-independent) ───────────────────────────────────
+  it("hasUI=false → capture STILL runs (hasUI-independent); no notify but snapshots.set + appendEntry happen", async () => {
+    setRevertOn();
+    try {
+      const store = fakeStore();
+      getRuntime("s1").store = store;
+      const { appended, pi } = makePi();
+      const { notifies, ctx } = makeCtx({
+        hasUI: false,
+        branch: branchEndingInMsg("leaf-9"),
+      });
+      await runSet(pi, ctx, "x");
+      // capture is NOT hasUI-guarded (only the notify is) → it ran:
+      expect(store.capture).toHaveBeenCalledWith("ckpt:x");
+      expect(getRuntime("s1").snapshots?.has("ckpt:x")).toBe(true);
+      expect(appended).toHaveLength(1);
+      // notify IS hasUI-guarded → none fired:
+      expect(notifies).toHaveLength(0);
+      // banner refresh is hasUI-independent too (still called):
+      expect(vi.mocked(reconcileBanner)).toHaveBeenCalledWith(ctx);
+    } finally {
+      setConfig(undefined);
+    }
   });
 });

@@ -303,7 +303,7 @@
       "type": "Phase",
       "id": "P3",
       "title": "Capture lifecycle — event hooks + checkpoint integration + store wiring + teardown",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Wire the SnapshotStore into Pi events: turn_start (prompt-boundary GC + before-capture), agent_end (after-capture for drift detection), /mulligan_checkpoint step 4b (checkpoint capture), session_shutdown (teardown). Depends on P2 (backends) + P1.M2.T2.S2 (runtime field).",
       "milestones": [
         {
@@ -387,21 +387,21 @@
           "type": "Milestone",
           "id": "P3.M2",
           "title": "Checkpoint revert integration (/mulligan_checkpoint step 4b)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Add step 4b to the existing /mulligan_checkpoint command: when config.revert.enabled, capture a ckpt:<name> snapshot so a later checkpoint-granularity rewind can restore to it.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M2.T1",
               "title": "Add step 4b to makeCheckpointCommand (capture ckpt:<name>)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "After setCheckpoint succeeds and before reconcileBanner, when config.revert.enabled, capture a ckpt:<name> snapshot. Persist the ref in a mulligan:revert-checkpoint control entry so it survives reload (E32). Best-effort — capture failure is logged and never blocks checkpoint creation.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M2.T1.S1",
                   "title": "/mulligan_checkpoint step 4b (checkpoint snapshot capture)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T2.S1"
@@ -430,21 +430,21 @@
           "type": "Milestone",
           "id": "P4.M1",
           "title": "Tool schema + description (R5a + R5d)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Add the two new optional boolean params to RewindParams and update REWIND_DESC to advertise the feature.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M1.T1",
               "title": "Add revert_file_changes + delete_created_files params + update REWIND_DESC",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Schema-only change: two new Type.Optional(Type.Boolean(...)) fields on RewindParams + one appended sentence on REWIND_DESC.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M1.T1.S1",
                   "title": "RewindParams schema additions + REWIND_DESC update",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: RewindParams is a Type.Object({...}) in src/tools/rewind.ts. REWIND_DESC is a const string. The descriptions for the new params are VERBATIM in spec/05 §1 (lines 49-52). The description string update is VERBATIM in spec/05 §6 (line 320). See plan/008_c36fd26768ae/architecture/codebase_patterns.md §4.\n2. INPUT: The existing RewindParams Type.Object and REWIND_DESC const string in src/tools/rewind.ts.\n3. LOGIC: Add to RewindParams Type.Object:\n   `revert_file_changes: Type.Optional(Type.Boolean({ description: \"v1.2 OPT-IN. When true (granularity last_turn/checkpoint), restore the working-tree files you modified in the rewound span to their pre-span state, so you need not re-read them on resume. Best-effort; failures are logged and never block the rewind. Requires revert to be enabled in config. Ignored at last_tool_call_group granularity (noticed in the result).\" }))`\n   `delete_created_files: Type.Optional(Type.Boolean({ description: \"v1.2 OPT-IN, DESTRUCTIVE. When true, DELETE working-tree files the rewound span newly created (files that did not exist before the span). Requires BOTH this flag AND config.revert.allowDeleteCreatedFiles. Best-effort.\" }))`\n   Append to REWIND_DESC: ` Set revert_file_changes to also restore the working-tree files you modified, so you need not re-read them on resume (v1.2, opt-in, last_turn/checkpoint only).`\n   Write tests: RewindArgs type includes the new optional fields; schema accepts {note, granularity} without the new fields (backward-compat).\n4. OUTPUT: RewindParams has the two new optional fields. REWIND_DESC advertises revert_file_changes. RewindArgs type includes them. Consumed by step 6b (P4.M2.T1).\n5. DOCS: [Mode A] The param descriptions ARE the LLM-facing docs (spec/05 §1). Rides WITH the work.",
@@ -478,7 +478,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S1",
                   "title": "Step 6b decision tree + checkpoint resolution + dirty guard",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T1.S1",

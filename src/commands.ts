@@ -45,7 +45,11 @@ import {
 /** notify — the hasUI-guarded ctx.ui.notify wrapper. Centralizes the `if (ctx.hasUI)` guard every handler
  *  notify needs (spec/13 §2 step 5: guard per call; ctx.hasUI is true whenever a human types a slash command,
  *  but guard anyway). Module-local (not exported). */
-function notify(ctx: ExtensionCommandContext, msg: string, type: "info" | "warning" | "error"): void {
+function notify(
+  ctx: ExtensionCommandContext,
+  msg: string,
+  type: "info" | "warning" | "error",
+): void {
   if (ctx.hasUI) ctx.ui.notify(msg, type);
 }
 
@@ -58,7 +62,9 @@ function notify(ctx: ExtensionCommandContext, msg: string, type: "info" | "warni
  * effect is already baked into the buildContextEntries() list). Defensive (never throws — a throwing entry
  * contributes [], matching spec/06 §7's "best-effort; flag confidence low"). Module-local (not exported).
  */
-function auditEntriesToMessages(entries: SessionEntry[]): Record<string, unknown>[] {
+function auditEntriesToMessages(
+  entries: SessionEntry[],
+): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   for (const entry of entries) {
     try {
@@ -103,7 +109,11 @@ function auditEntriesToMessages(entries: SessionEntry[]): Record<string, unknown
  * @param name the checkpoint name (the suffix after `mulligan:checkpoint:`)
  * @returns true iff at least one active `mulligan:checkpoint:<name>` label was cleared
  */
-export function clearCheckpointByName(pi: ExtensionAPI, ctx: ExtensionContext, name: string): boolean {
+export function clearCheckpointByName(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  name: string,
+): boolean {
   const needle = `mulligan:checkpoint:${name}`;
   // DISCOVERY phase: collect candidate targetIds from raw label entries whose label string === needle.
   const candidates = new Set<string>();
@@ -118,7 +128,12 @@ export function clearCheckpointByName(pi: ExtensionAPI, ctx: ExtensionContext, n
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
       const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
-      if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+      if (
+        ee.type === "label" &&
+        ee.label === needle &&
+        typeof ee.targetId === "string" &&
+        ee.targetId.length > 0
+      ) {
         candidates.add(ee.targetId);
       }
     } catch {
@@ -161,7 +176,8 @@ export function makeCheckpointCommand(pi: ExtensionAPI): {
   handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 } {
   return {
-    description: "Set a Mulligan checkpoint — the agent may rewind across your subsequent prompts back to this point",
+    description:
+      "Set a Mulligan checkpoint — the agent may rewind across your subsequent prompts back to this point",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
         const name = (args ?? "").trim();
@@ -179,6 +195,46 @@ export function makeCheckpointCommand(pi: ExtensionAPI): {
         }
         const res = setCheckpoint(pi, ctx, name);
         if ("entryId" in res) {
+          // [P3.M2.T1.S1 / @spec/13 §2 step 4b + @14 §5] v1.2 working-tree revert: capture a checkpoint
+          // snapshot so a later mulligan_rewind(granularity:"checkpoint", revert_file_changes:true) can
+          // restore files to this point. BEST-EFFORT: a capture failure is swallowed and NEVER blocks the
+          // checkpoint (the label was already set by setCheckpoint above) — the fair-warning notify +
+          // reconcileBanner below ALWAYS run. The mulligan:revert-checkpoint control entry lets a reloaded
+          // session restore rt.snapshots (E32). The "ckpt:" namespace is exempt from prompt-boundary GC
+          // (git refForLabel → checkpoint/<name>; CAS mark-sweep exempts "ckpt" manifests; gcTurnSnapshots
+          // only clears keys starting with "turn"). NO return/throw inside this block — control falls
+          // through to the notify + reconcileBanner (nested `if` guards only).
+          if (getConfig().revert.enabled) {
+            try {
+              const sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); same pattern as makeAuditCommand
+              const rt = getRuntime(sessionId);
+              if (rt.store) {
+                const backend = rt.store.describe().backend;
+                if (backend !== "none") {
+                  // narrowed to "git"|"cas" (const stays narrowed across the await) — NoOpStore skipped
+                  const ckptRef = await rt.store.capture("ckpt:" + name);
+                  if (ckptRef) {
+                    rt.snapshots?.set("ckpt:" + name, {
+                      label: "ckpt:" + name,
+                      backend,
+                      beforeRef: ckptRef,
+                      turnIndex: -1, // sentinel: checkpoint, not turn-bound (rewind resolves by label)
+                      ts: Date.now(),
+                    });
+                    // persist for cross-reload (E32): session_start re-reads mulligan:revert-checkpoint
+                    // entries to rebuild rt.snapshots. { label, ref, backend } is the minimal restore set.
+                    pi.appendEntry("mulligan:revert-checkpoint", {
+                      label: "ckpt:" + name,
+                      ref: ckptRef,
+                      backend,
+                    });
+                  }
+                }
+              }
+            } catch {
+              /* best-effort — never blocks checkpoint creation (@14 §5 / E27) */
+            }
+          }
           notify(
             ctx,
             `Mulligan: checkpoint '${name}' set. Until you revoke it, the agent may rewind across your subsequent prompts back to this point (your prompts after here can be hidden). Revoke with /mulligan_checkpoint_revoke ${name}.`,
@@ -187,10 +243,18 @@ export function makeCheckpointCommand(pi: ExtensionAPI): {
           reconcileBanner(ctx); // refresh the banner only on a SUCCESSFUL mutation (spec/13 §2 step 6)
         } else {
           // "error" in res — discriminated-union narrowing (GOTCHA #9)
-          notify(ctx, `Mulligan: could not set checkpoint: ${res.error}`, "warning");
+          notify(
+            ctx,
+            `Mulligan: could not set checkpoint: ${res.error}`,
+            "warning",
+          );
         }
       } catch (e) {
-        notify(ctx, `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`, "warning");
+        notify(
+          ctx,
+          `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`,
+          "warning",
+        );
       }
     },
   };
@@ -223,7 +287,11 @@ export function makeCheckpointRevokeCommand(pi: ExtensionAPI): {
         }
         const cleared = clearCheckpointByName(pi, ctx, name);
         if (!cleared) {
-          notify(ctx, `Mulligan: no active checkpoint named '${name}'.`, "info"); // spec/13 §3 step 2 verbatim (closing apostrophe on <name>)
+          notify(
+            ctx,
+            `Mulligan: no active checkpoint named '${name}'.`,
+            "info",
+          ); // spec/13 §3 step 2 verbatim (closing apostrophe on <name>)
         } else {
           reconcileBanner(ctx); // refresh the banner only when state actually changed (spec/13 §3 step 4)
           notify(
@@ -233,7 +301,11 @@ export function makeCheckpointRevokeCommand(pi: ExtensionAPI): {
           ); // spec/13 §3 step 5
         }
       } catch (e) {
-        notify(ctx, `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`, "warning");
+        notify(
+          ctx,
+          `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`,
+          "warning",
+        );
       }
     },
   };
@@ -267,7 +339,8 @@ export function makeAuditCommand(pi: ExtensionAPI): {
   handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 } {
   return {
-    description: "Run the Mulligan context-bloat diagnostic — see what the model is carrying",
+    description:
+      "Run the Mulligan context-bloat diagnostic — see what the model is carrying",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       // args reserved for a future `top` override (/mulligan_audit 20); ignored for now (spec/13 §4).
       try {
@@ -295,7 +368,9 @@ export function makeAuditCommand(pi: ExtensionAPI): {
           // E16 fallback (spec/06 §7): entries → messages → re-run the SAME pipeline. The ONLY place
           // filterPipeline is re-run intentionally. filterPipeline's 4th arg is branchEntries (getBranch),
           // NOT ctx (transforms.ts signature) — copy the verbatim cast from audit.ts (GOTCHA #2/#11).
-          const base = auditEntriesToMessages(ctx.sessionManager.buildContextEntries());
+          const base = auditEntriesToMessages(
+            ctx.sessionManager.buildContextEntries(),
+          );
           const branch = ctx.sessionManager.getBranch();
           filtered = filterPipeline(
             base,
@@ -315,12 +390,16 @@ export function makeAuditCommand(pi: ExtensionAPI): {
         const top = 8;
         const callLookup = buildCallLookup(filtered);
         const rows: AuditRow[] = filtered
-          .map((m) => ({ tokens: estimateTokens([m] as unknown as TM).tokens, msg: m })) // verbatim cast (GOTCHA #2)
+          .map((m) => ({
+            tokens: estimateTokens([m] as unknown as TM).tokens,
+            msg: m,
+          })) // verbatim cast (GOTCHA #2)
           .sort((a, b) => b.tokens - a.tokens)
           .slice(0, top)
           .map(({ tokens, msg }) => {
             // GOTCHA #3: no module-private readStr here — use clean inline guards (no `as any`).
-            const toolName = typeof msg.toolName === "string" ? msg.toolName : undefined;
+            const toolName =
+              typeof msg.toolName === "string" ? msg.toolName : undefined;
             const rowThreshold = bloatThresholdFor(toolName, config);
             return {
               tokens,
@@ -334,7 +413,9 @@ export function makeAuditCommand(pi: ExtensionAPI): {
         // Active markers (readMarkers) + checkpoints (scanned separately — readMarkers returns only custom-entry
         // markers; checkpoints are LabelEntries). Verbatim from auditExecute step 3.
         const markers = readMarkers(ctx);
-        const checkpointNames = listCheckpoints(ctx.sessionManager.getEntries() as unknown as unknown[]);
+        const checkpointNames = listCheckpoints(
+          ctx.sessionManager.getEntries() as unknown as unknown[],
+        );
 
         // Render the report — IDENTICAL call to the agent tool's renderAuditReport (spec/13 §4 step 2: "same renderer").
         const report = renderAuditReport({
@@ -353,7 +434,11 @@ export function makeAuditCommand(pi: ExtensionAPI): {
         // tree, so the report never enters event.messages. NEVER pi.sendMessage/pi.appendEntry.
         notify(ctx, report, "info");
       } catch (e) {
-        notify(ctx, `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`, "warning");
+        notify(
+          ctx,
+          `Mulligan: unexpected error: ${e instanceof Error ? e.message : String(e)}`,
+          "warning",
+        );
       }
     },
   };
