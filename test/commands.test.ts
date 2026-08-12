@@ -32,10 +32,27 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 // counts don't leak across tests.
 vi.mock("../src/banner.js", () => ({ reconcileBanner: vi.fn() }));
 
-import { makeCheckpointCommand, makeCheckpointRevokeCommand, clearCheckpointByName } from "../src/commands.js";
+import {
+  makeCheckpointCommand,
+  makeCheckpointRevokeCommand,
+  clearCheckpointByName,
+  makeAuditCommand,
+} from "../src/commands.js";
 import { reconcileBanner } from "../src/banner.js"; // the MOCKED binding (the spy target)
-import { setConfig } from "../src/config.js"; // disabled-gate control
-import { clearAll } from "../src/runtime.js"; // module-scoped runtime reset
+import { getConfig, setConfig } from "../src/config.js"; // disabled-gate control (+ getConfig to re-derive the expected report)
+import { clearAll, getRuntime } from "../src/runtime.js"; // module-scoped runtime reset (+ getRuntime to seed rt.lastFiltered)
+import {
+  renderAuditReport,
+  listCheckpoints,
+  describeMessage,
+  messageBytes,
+  buildCallLookup,
+  type AuditRow,
+} from "../src/tools/audit.js"; // the EXPORTED audit renderer + label helpers (parity re-derivation for case (a))
+import { estimateTokens } from "../src/tokens.js"; // total + per-message token estimates
+import { readMarkers } from "../src/filter.js"; // active markers (rewinds/shrinks/cancelledIds)
+import { bloatThresholdFor } from "../src/nudges.js"; // per-tool bloat threshold (Nudge A)
+import type { RewindMarker, ShrinkMarker } from "../src/markers.js"; // type-only (the audit writes nothing)
 
 // ── reset (mirror checkpoint.test.ts) ───────────────────────────────────────
 // clearAll() + setConfig(undefined) → DEFAULT_CONFIG (enabled:true) so a prior disabled test never
@@ -55,16 +72,28 @@ afterEach(() => {
 /**
  * A minimal fake ExtensionAPI capturing setLabel calls. `label` is `string | undefined` because the
  * revoke path passes `undefined` (a CLEAR). Set `throwOnSetLabel` to exercise the never-throw guard.
+ *
+ * The audit section extends this with `appendEntry`/`sendMessage` no-op spies (the F-useraudit invariant —
+ * case (c): the handler NEVER calls them, so `appended`/`sent` MUST stay length 0). Returned as extra keys
+ * that existing checkpoint tests ignore (they destructure only `{ labels, pi }` — NON-BREAKING).
  */
 function makePi(opts: { throwOnSetLabel?: boolean } = {}) {
   const labels: { entryId: string; label: string | undefined }[] = [];
+  const appended: boolean[] = [];
+  const sent: boolean[] = [];
   const pi = {
     setLabel(entryId: string, label: string | undefined) {
       if (opts.throwOnSetLabel) throw new Error("setLabel boom");
       labels.push({ entryId, label });
     },
+    appendEntry() {
+      appended.push(true);
+    },
+    sendMessage() {
+      sent.push(true);
+    },
   };
-  return { labels, pi: pi as unknown as ExtensionAPI };
+  return { labels, appended, sent, pi: pi as unknown as ExtensionAPI };
 }
 
 /**
@@ -82,6 +111,10 @@ function makeCtx(opts: {
   labelMap?: Record<string, string | undefined>;
   throwOnGetBranch?: boolean;
   throwOnGetEntries?: boolean;
+  sessionId?: string;
+  contextEntries?: unknown[];
+  throwOnGetSessionId?: boolean;
+  throwOnBuildContext?: boolean;
 } = {}) {
   const notifies: { msg: string; type: string }[] = [];
   const widgets: { key: string; content: unknown; options?: unknown }[] = [];
@@ -91,6 +124,7 @@ function makeCtx(opts: {
   ];
   const entries = opts.entries ?? [];
   const labelMap = opts.labelMap ?? {};
+  const contextEntries = opts.contextEntries ?? [];
   const ctx = {
     hasUI: opts.hasUI ?? true,
     ui: {
@@ -115,6 +149,14 @@ function makeCtx(opts: {
       },
       getLeafId() {
         return "leaf-1";
+      },
+      getSessionId() {
+        if (opts.throwOnGetSessionId) throw new Error("getSessionId boom");
+        return opts.sessionId ?? "s1";
+      },
+      buildContextEntries() {
+        if (opts.throwOnBuildContext) throw new Error("buildContextEntries boom");
+        return contextEntries;
       },
     },
   };
@@ -444,5 +486,184 @@ describe("types", () => {
     const { pi } = makePi();
     const { ctx } = makeCtx();
     expectTypeOf(clearCheckpointByName(pi, ctx, "x")).toEqualTypeOf<boolean>();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// /mulligan_audit — the v1.1 HUMAN-facing diagnostic command (spec/13 §4 / F-useraudit)
+// ════════════════════════════════════════════════════════════════════════════
+// The audit command renders the SAME report as the agent's `mulligan_audit` tool and surfaces it to the
+// HUMAN via ctx.ui.notify ONLY — the report NEVER enters event.messages (a human command must not bloat
+// the model's context; spec/13 §4 step 2). Four contract cases + bonuses, mirroring the checkpoint idiom.
+
+/** userMsg — a minimal user message fixture (copied from test/tools/audit.test.ts; not exported there). */
+function userMsg(text: string): Record<string, unknown> {
+  return { role: "user", content: text };
+}
+
+/** toolResult — a minimal tool-result message fixture (copied from test/tools/audit.test.ts; not exported there). */
+function toolResult(id: string, name: string, text: string): Record<string, unknown> {
+  return { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }] };
+}
+
+/**
+ * buildExpectedReport — re-derive the report string from the SAME `filtered` + `ctx` the handler consumed,
+ * using the SAME pure helpers the production handler (src/commands.ts makeAuditCommand) calls. The row loop
+ * is a BYTE-IDENTICAL replica of the handler's step-6 top-N ranking (map→sort b-a→slice 0,8→map AuditRow),
+ * so any divergence between the command path and a direct renderAuditReport call surfaces as an exact-string
+ * failure in case (a). PURE: derives ONLY from its args (seeds nothing; the caller seeds rt.lastFiltered).
+ */
+function buildExpectedReport(filtered: Record<string, unknown>[], ctx: ExtensionCommandContext): string {
+  const config = getConfig();
+  const totalTokens = estimateTokens(filtered as unknown as Parameters<typeof estimateTokens>[0]).tokens;
+  const callLookup = buildCallLookup(filtered);
+  type TM = Parameters<typeof estimateTokens>[0];
+  const rows: AuditRow[] = filtered
+    .map((m) => ({ tokens: estimateTokens([m] as unknown as TM).tokens, msg: m }))
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 8)
+    .map(({ tokens, msg }) => {
+      const toolName = typeof msg.toolName === "string" ? msg.toolName : undefined;
+      const rowThreshold = bloatThresholdFor(toolName, config);
+      return {
+        tokens,
+        role: typeof msg.role === "string" ? msg.role : "?",
+        label: describeMessage(msg, callLookup),
+        bloaty: messageBytes(msg) > rowThreshold,
+        thresholdBytes: rowThreshold,
+      };
+    });
+  const markers = readMarkers(ctx);
+  const checkpointNames = listCheckpoints((ctx.sessionManager.getEntries() as unknown as unknown[]) ?? []);
+  return renderAuditReport({
+    totalTokens,
+    confidence: config.audit.estimateConfidence,
+    rewinds: markers.rewinds as RewindMarker[],
+    shrinks: markers.shrinks as ShrinkMarker[],
+    checkpointNames,
+    protectedRoles: config.rewind.protectedRoles,
+    rows,
+    filtered,
+    cancelledCount: markers.cancelledIds.size,
+  });
+}
+
+/** The testable seam: call the audit factory's handler directly (no real Pi). */
+async function runAudit(pi: ExtensionAPI, ctx: ExtensionCommandContext, args = "") {
+  await makeAuditCommand(pi).handler(args, ctx);
+}
+
+// ── case (a) — renders the SAME string as renderAuditReport (PRIMARY / cached path) ───────────
+
+describe("/mulligan_audit — case (a) renders the same report as renderAuditReport (cached path)", () => {
+  it("notify msg === renderAuditReport re-derived from the same filtered+ctx (exact string equality)", async () => {
+    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    getRuntime("s1").lastFiltered = filtered; // PRIMARY path seed (confidence = config.audit.estimateConfidence)
+    const { pi } = makePi();
+    const { notifies, ctx } = makeCtx({ entries: [] }); // no markers, no checkpoints
+    await runAudit(pi, ctx);
+    const expected = buildExpectedReport(filtered, ctx);
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].msg).toBe(expected); // EXACT string equality (the renderer-parity assertion)
+  });
+});
+
+// ── case (b) — report delivered to the HUMAN sink (info notify) ──────────────────────────────
+
+describe("/mulligan_audit — case (b) report delivered to the human sink (info notify)", () => {
+  it("notifies length 1, type 'info', and msg contains the report", async () => {
+    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    getRuntime("s1").lastFiltered = filtered;
+    const { pi } = makePi();
+    const { notifies, ctx } = makeCtx({ entries: [] });
+    await runAudit(pi, ctx);
+    const expected = buildExpectedReport(filtered, ctx);
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].type).toBe("info");
+    expect(notifies[0].msg).toContain(expected); // "contains the report" (== holds; toContain is robust)
+  });
+});
+
+// ── case (c) — ZERO writes that could enter event.messages (F-useraudit invariant) ────────────
+
+describe("/mulligan_audit — case (c) ZERO writes (the report never enters event.messages)", () => {
+  it("after a successful run, pi.appendEntry and pi.sendMessage were each called 0 times", async () => {
+    getRuntime("s1").lastFiltered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    const { appended, sent, pi } = makePi();
+    const { ctx } = makeCtx({ entries: [] });
+    await runAudit(pi, ctx);
+    expect(appended).toHaveLength(0); // no pi.appendEntry
+    expect(sent).toHaveLength(0); // no pi.sendMessage
+  });
+});
+
+// ── case (d) — config.enabled=false → 'Mulligan is disabled' (fires FIRST) ────────────────────
+
+describe("/mulligan_audit — case (d) disabled gate fires FIRST (spec/08 E14)", () => {
+  it("setConfig({enabled:false}) → one warning notify, msg EXACTLY 'Mulligan is disabled' (no prefix)", async () => {
+    setConfig({ enabled: false });
+    try {
+      const { pi } = makePi();
+      const { notifies, ctx } = makeCtx();
+      await runAudit(pi, ctx);
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].type).toBe("warning");
+      expect(notifies[0].msg).toBe("Mulligan is disabled"); // NO "Mulligan: " prefix
+    } finally {
+      setConfig(undefined); // reset so the disabled state doesn't leak past this it()
+    }
+  });
+});
+
+// ── bonus (e) — enabled + hasUI=false → silent early return (no notify, no throw) ────────────
+
+describe("/mulligan_audit — bonus (e) hasUI=false silent early return", () => {
+  it("enabled + hasUI=false → resolves with no notify (the expensive pipeline is skipped)", async () => {
+    getRuntime("s1").lastFiltered = [userMsg("x")];
+    const { pi } = makePi();
+    const { notifies, ctx } = makeCtx({ hasUI: false });
+    await expect(runAudit(pi, ctx)).resolves.toBeUndefined();
+    expect(notifies).toHaveLength(0);
+  });
+});
+
+// ── bonus (f) — never throws (shared command convention) ─────────────────────────────────────
+
+describe("/mulligan_audit — bonus (f) never throws", () => {
+  it("a throwing getSessionId → caught → 'Mulligan: unexpected error: …' warning notify; no throw", async () => {
+    getRuntime("s1").lastFiltered = [userMsg("x")];
+    const { pi } = makePi();
+    const { notifies, ctx } = makeCtx({ throwOnGetSessionId: true });
+    await expect(runAudit(pi, ctx)).resolves.toBeUndefined();
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].type).toBe("warning");
+    expect(notifies[0].msg).toContain("Mulligan: unexpected error:");
+  });
+});
+
+// ── bonus (g) — args IGNORED (reserved for a future `top` override) ──────────────────────────
+
+describe("/mulligan_audit — bonus (g) args ignored (reserved for future top override)", () => {
+  it("passing '20' runs normally and still emits the report === renderAuditReport output", async () => {
+    const filtered = [userMsg("hello world"), toolResult("c1", "read", "big file body")];
+    getRuntime("s1").lastFiltered = filtered;
+    const { pi } = makePi();
+    const { notifies, ctx } = makeCtx({ entries: [] });
+    await runAudit(pi, ctx, "20"); // args ignored — top still hardcoded to 8
+    const expected = buildExpectedReport(filtered, ctx);
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].msg).toBe(expected);
+  });
+});
+
+// ── bonus (h) — types (mirror the checkpoint expectTypeOf block) ─────────────────────────────
+
+describe("/mulligan_audit — bonus (h) types", () => {
+  it("makeAuditCommand returns { description: string; handler: (args, ctx) => Promise<void> }", () => {
+    const { pi } = makePi();
+    const cmd = makeAuditCommand(pi);
+    expectTypeOf(cmd.description).toEqualTypeOf<string>();
+    expectTypeOf(cmd.handler).parameters.toEqualTypeOf<[string, ExtensionCommandContext]>();
+    expectTypeOf(cmd.handler).returns.toEqualTypeOf<Promise<void>>();
   });
 });
