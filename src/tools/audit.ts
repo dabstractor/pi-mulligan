@@ -446,12 +446,18 @@ export function renderAuditReport(args: {
   const granularities = [...new Set(args.rewinds.map((r) => readStr(r, "granularity")).filter((g): g is string => !!g))];
   const gran = granularities.join(", ");
   const ckptNames = args.checkpointNames.length ? ` [${args.checkpointNames.join(", ")}]` : " []";
+  // BUG-003 / spec/13 §4 step 3: singularize the count (1 → "checkpoint") and append " (user-set)" when at
+  // least one checkpoint is armed (v1.1 E23 — checkpoints are user-owned destructive-power grants, so the
+  // human can see what they have armed). Omitted when 0 (nothing armed). The (user-set) annotation goes AFTER
+  // the names bracket and BEFORE the cancelledClause below.
+  const ckptWord = args.checkpointNames.length === 1 ? "checkpoint" : "checkpoints";
+  const ckptUserSet = args.checkpointNames.length > 0 ? " (user-set)" : "";
   // P3.M1.T4.S1 / E21 (c): append ", N cancelled (retired)" ONLY when there are retired markers. Omitted when 0
   // so the line stays clean AND the pre-existing exact-string active-markers assertions stay byte-identical.
   const cancelledClause = args.cancelledCount > 0 ? `, ${args.cancelledCount} cancelled (retired)` : "";
   L.push(
     `Active markers: ${args.rewinds.length} rewind${gran ? ` (${gran})` : ""}, ` +
-      `${args.shrinks.length} shrink, ${args.checkpointNames.length} checkpoints${ckptNames}${cancelledClause}`,
+      `${args.shrinks.length} shrink, ${args.checkpointNames.length} ${ckptWord}${ckptNames}${ckptUserSet}${cancelledClause}`,
   );
 
   L.push(`Protected: will not rewind past ${describeProtected(args.protectedRoles)}.`);

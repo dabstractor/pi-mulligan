@@ -20,7 +20,7 @@
  *   d) top param: {top:2} truncates the "Top messages" block to 2 rows; default (undefined) → 8.
  *   e) bloat flag: a toolResult with bytes > config.nudges.bloatThresholdBytes → "⚠ above bloat threshold (16 KB)" (the shipped default).
  *   f) active markers + checkpoints: getEntries() includes rewind/shrink custom entries + checkpoint labels →
- *      "Active markers: 1 rewind (last_tool_call_group), 1 shrink, 2 checkpoints [a, b]".
+ *      "Active markers: 1 rewind (last_tool_call_group), 1 shrink, 2 checkpoints [a, b] (user-set)".
  *   g) suggestion: names rows[0].label; empty filtered → no suggestion, "No messages in filtered view."
  *   h) never-persists: appended/sent/labels arrays all length 0.
  *   i) never-throws: a throwing getEntries()/buildContextEntries() → execute returns a text result (catch path).
@@ -547,7 +547,7 @@ describe("mulligan_audit — Active markers + checkpoints (GOTCHA #7)", () => {
     expect(res.details.nCheckpoints).toBe(2);
     const text = firstText(res);
     expect(text).toContain(
-      "Active markers: 1 rewind (last_tool_call_group), 1 shrink, 2 checkpoints [before-x, before-y]",
+      "Active markers: 1 rewind (last_tool_call_group), 1 shrink, 2 checkpoints [before-x, before-y] (user-set)",
     );
   });
 
@@ -926,7 +926,7 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
     expect(lines[0]).toBe("## Mulligan audit — context you are currently carrying");
     expect(lines[1]).toBe("Total (filtered): ~12340 tokens  (estimate, confidence: medium)");
     expect(lines[2]).toBe(
-      "Active markers: 1 rewind (last_tool_call_group), 0 shrink, 2 checkpoints [before-x, before-y]",
+      "Active markers: 1 rewind (last_tool_call_group), 0 shrink, 2 checkpoints [before-x, before-y] (user-set)",
     );
     expect(lines[3]).toBe("Protected: will not rewind past first:user/latest:user.");
     expect(lines[4]).toBe("");
@@ -938,6 +938,22 @@ describe("renderAuditReport — spec/05 §4 verbatim format", () => {
     expect(lines[10]).toBe(
       "Suggestion: the `read src/big.log` result is the largest contributor. Consider mulligan_shrink.",
     );
+  });
+
+  it("checkpointNames length 1 → singular '1 checkpoint' + '(user-set)' annotation (BUG-003)", () => {
+    const report = renderAuditReport({
+      totalTokens: 0,
+      confidence: "low",
+      rewinds: [],
+      shrinks: [],
+      checkpointNames: ["solo"],
+      protectedRoles: ["first:user", "latest:user"],
+      rows: [],
+      filtered: [], // the Active-markers line is pushed BEFORE the empty-filtered early-return
+      cancelledCount: 0,
+    });
+    expect(report).toContain("Active markers: 0 rewind, 0 shrink, 1 checkpoint [solo] (user-set)");
+    expect(report).not.toContain("1 checkpoints"); // singularized — never the plural with count 1
   });
 
   it("empty filtered → 'No messages in filtered view.' and no suggestion/top block", () => {
