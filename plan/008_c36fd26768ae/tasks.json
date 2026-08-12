@@ -423,7 +423,7 @@
       "type": "Phase",
       "id": "P4",
       "title": "Rewind integration — tool params + step 6b + warning reword + description",
-      "status": "Planned",
+      "status": "Ready",
       "description": "The user-visible behavior: new tool params (revert_file_changes, delete_created_files), the step 6b decision tree (resolve checkpoint → dirty guard → restore → fold results), the E5 mutation warning reword, and the REWIND_DESC advertisement. Depends on P2 (store) + P1.M2.T2.S1 (marker field) + P3 (capture lifecycle produces checkpoints).",
       "milestones": [
         {
@@ -464,14 +464,14 @@
           "type": "Milestone",
           "id": "P4.M2",
           "title": "rewindExecute step 6b + E5 warning reword (R5b + R5c)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "The core integration: step 6b decision tree (resolve checkpoint → dirty guard → restore → fold results), success text extension, marker.revert field population, and the conditional E5 mutation warning reword.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M2.T1",
               "title": "rewindExecute step 6b (revert execution)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add step 6b to rewindExecute: after marker persist, before mutation warning. Decision tree: neither flag → unchanged; flags but disabled → notice; flags at last_tool_call_group → mismatch notice; else → resolve RevertCheckpoint → dirty guard → store.restore → fold results into success text + marker.revert.",
               "subtasks": [
                 {
@@ -500,7 +500,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "store.restore + fold results into marker.revert + success text",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T1.S1"
@@ -519,14 +519,14 @@
               "type": "Task",
               "id": "P4.M2.T2",
               "title": "E5 mutation warning reword when files were reverted",
-              "status": "Planned",
+              "status": "Ready",
               "description": "When step 6b reverted files, the E5 MUTATION_WARNING is reworded to name ONLY non-filesystem effects (commits, dependency installs, network/DB, staged index, failed/refused files). The agent must NOT be told reverted files persist.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M2.T2.S1",
                   "title": "Conditional E5 mutation warning text for reverted spans",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M2.T1.S2"

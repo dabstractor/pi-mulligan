@@ -14,7 +14,14 @@
  *      (snapshot-throw → empty ledger + K=0 + still success — E13/E8).
  *   e) never-throws; result shape (details on every path — GOTCHA #4); types (ToolDefinition/AgentToolResult).
  */
-import { describe, it, expect, expectTypeOf, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  expectTypeOf,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import {
   makeRewindTool,
   RewindParams,
@@ -27,8 +34,16 @@ import { clearAll, getRuntime } from "../../src/runtime.js";
 import { setConfig } from "../../src/config.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js"; // P4.M1.T3.S1 test (d)/(e): shrink stays callable after the rewind budget/context-fraction refuse
 import { listCheckpoints } from "../../src/tools/audit.js"; // P1.M3.T1.S2: pure-fn assertions on the consumed-state entries
-import type { RewindMarker, RewindMarkerInput, RevertCheckpoint } from "../../src/markers.js";
-import type { SnapshotStore, RestoreResult, RestoreOpts } from "../../src/snapshot/store.js";
+import type {
+  RewindMarker,
+  RewindMarkerInput,
+  RevertCheckpoint,
+} from "../../src/markers.js";
+import type {
+  SnapshotStore,
+  RestoreResult,
+  RestoreOpts,
+} from "../../src/snapshot/store.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -61,11 +76,13 @@ const VALID_NOTE = {
 // ── fakes (the markers.test.ts makePi shape + a richer makeCtx that scripts getEntries/getBranch/buildContextEntries) ─
 
 /** A minimal fake ExtensionAPI capturing appendEntry + sendMessage + setLabel (hand-rolled, no vi.fn()). */
-function makePi(opts: {
-  throwOnAppend?: boolean;
-  throwOnSendMessage?: boolean;
-  throwOnSetLabel?: boolean;
-} = {}) {
+function makePi(
+  opts: {
+    throwOnAppend?: boolean;
+    throwOnSendMessage?: boolean;
+    throwOnSetLabel?: boolean;
+  } = {},
+) {
   const appended: { customType: string; data: unknown }[] = [];
   const sent: {
     customType: string;
@@ -81,7 +98,12 @@ function makePi(opts: {
       appended.push({ customType, data });
     },
     sendMessage(
-      message: { customType: string; content: unknown; display: boolean; details?: unknown },
+      message: {
+        customType: string;
+        content: unknown;
+        display: boolean;
+        details?: unknown;
+      },
       options?: unknown,
     ) {
       if (opts.throwOnSendMessage) throw new Error("sendMessage boom");
@@ -104,26 +126,29 @@ function makePi(opts: {
  *   - contextEntries (buildContextEntries — SessionEntry[] snapshot flattened to messages for the ledger/K preview)
  * Set throwOnGetEntries / throwOnBuildContext to simulate failures.
  */
-function makeCtx(opts: {
-  sessionId?: string;
-  leafId?: string | null;
-  entries?: unknown[];
-  branch?: unknown[];
-  contextEntries?: unknown[];
-  /** Script ctx.getContextUsage() so the (4c) context-fraction guard can read `.contextWindow`. ABSENT → the
-   *  method is NOT attached → computeFilteredTotal returns windowTokens:0 → (4c) SKIPPED (no regression). */
-  contextUsage?: { contextWindow: number };
-  /** Override the latest-wins label map that `getLabel(id)` returns, bypassing the derive-from-entries walk.
-   *  Keys are targetIds; values are label strings (or undefined for a consumed/cleared target). Lets a test
-   *  force the post-consumption state directly (validation issue 1b). */
-  labels?: Record<string, string | undefined>;
-  throwOnGetEntries?: boolean;
-  throwOnGetBranch?: boolean;
-  throwOnBuildContext?: boolean;
-  throwOnGetLeafId?: boolean;
-} = {}) {
+function makeCtx(
+  opts: {
+    sessionId?: string;
+    leafId?: string | null;
+    entries?: unknown[];
+    branch?: unknown[];
+    contextEntries?: unknown[];
+    /** Script ctx.getContextUsage() so the (4c) context-fraction guard can read `.contextWindow`. ABSENT → the
+     *  method is NOT attached → computeFilteredTotal returns windowTokens:0 → (4c) SKIPPED (no regression). */
+    contextUsage?: { contextWindow: number };
+    /** Override the latest-wins label map that `getLabel(id)` returns, bypassing the derive-from-entries walk.
+     *  Keys are targetIds; values are label strings (or undefined for a consumed/cleared target). Lets a test
+     *  force the post-consumption state directly (validation issue 1b). */
+    labels?: Record<string, string | undefined>;
+    throwOnGetEntries?: boolean;
+    throwOnGetBranch?: boolean;
+    throwOnBuildContext?: boolean;
+    throwOnGetLeafId?: boolean;
+  } = {},
+) {
   const sessionId = opts.sessionId ?? "s1";
-  const leafId: string | null = opts.leafId === undefined ? "leaf-1" : opts.leafId;
+  const leafId: string | null =
+    opts.leafId === undefined ? "leaf-1" : opts.leafId;
   const entries = opts.entries ?? [];
   const branch = opts.branch ?? [];
   const contextEntries = opts.contextEntries ?? [];
@@ -146,7 +171,10 @@ function makeCtx(opts: {
     // Optional `opts.labels` (a targetId→label override map) lets a test force the post-consumption state
     // directly without re-deriving from entries.
     getLabel(id: string) {
-      if (opts.labels && Object.prototype.hasOwnProperty.call(opts.labels, id)) {
+      if (
+        opts.labels &&
+        Object.prototype.hasOwnProperty.call(opts.labels, id)
+      ) {
         return opts.labels[id];
       }
       let current: string | undefined = undefined;
@@ -154,7 +182,11 @@ function makeCtx(opts: {
       for (const e of entries) {
         if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
         try {
-          const ee = e as { type?: unknown; targetId?: unknown; label?: unknown };
+          const ee = e as {
+            type?: unknown;
+            targetId?: unknown;
+            label?: unknown;
+          };
           if (ee.type === "label" && ee.targetId === id) {
             seen = true;
             current = typeof ee.label === "string" ? ee.label : undefined;
@@ -176,8 +208,12 @@ function makeCtx(opts: {
   };
   // Attach getContextUsage ONLY when explicitly opted in. computeFilteredTotal reads `ctx.getContextUsage?.()`
   // (NOT sessionManager's) → undefined when absent → windowTokens:0 → the (4c) guard is skipped (no regression).
-  const ctx: { sessionManager: typeof sessionManager; getContextUsage?: () => unknown } = { sessionManager };
-  if (opts.contextUsage !== undefined) ctx.getContextUsage = () => opts.contextUsage!;
+  const ctx: {
+    sessionManager: typeof sessionManager;
+    getContextUsage?: () => unknown;
+  } = { sessionManager };
+  if (opts.contextUsage !== undefined)
+    ctx.getContextUsage = () => opts.contextUsage!;
   return { ctx: ctx as unknown as ExtensionContext };
 }
 
@@ -199,39 +235,84 @@ async function run(
 function firstText(res: AgentToolResult<RewindDetails>): string {
   const block = res.content[0];
   if (!block || block.type !== "text") {
-    throw new Error(`expected a text content block, got ${block?.type ?? "none"}`);
+    throw new Error(
+      `expected a text content block, got ${block?.type ?? "none"}`,
+    );
   }
   return block.text;
 }
 
 /** A rewind marker entry (customType "mulligan:rewind") for the depth guard. */
-function rewindEntry(seq = 1): { type: "custom"; customType: "mulligan:rewind"; data: { seq: number } } {
+function rewindEntry(seq = 1): {
+  type: "custom";
+  customType: "mulligan:rewind";
+  data: { seq: number };
+} {
   return { type: "custom", customType: "mulligan:rewind", data: { seq } };
 }
 
 /** A rewind marker entry WITH a data.id (for BUG-005 cancel-exclusion tests: cancellation targets data.id). */
-function rewindEntryWithId(seq: number, id: string): { type: "custom"; customType: "mulligan:rewind"; data: { seq: number; id: string; kind: string } } {
-  return { type: "custom", customType: "mulligan:rewind", data: { seq, id, kind: "rewind" } };
+function rewindEntryWithId(
+  seq: number,
+  id: string,
+): {
+  type: "custom";
+  customType: "mulligan:rewind";
+  data: { seq: number; id: string; kind: string };
+} {
+  return {
+    type: "custom",
+    customType: "mulligan:rewind",
+    data: { seq, id, kind: "rewind" },
+  };
 }
 
 /** A cancel marker entry (customType "mulligan:cancel"); targetId is the retired marker's data.id (BUG-005). */
-function cancelEntry(targetId: string): { type: "custom"; customType: "mulligan:cancel"; data: { kind: string; targetId: string } } {
-  return { type: "custom", customType: "mulligan:cancel", data: { kind: "cancel", targetId } };
+function cancelEntry(targetId: string): {
+  type: "custom";
+  customType: "mulligan:cancel";
+  data: { kind: string; targetId: string };
+} {
+  return {
+    type: "custom",
+    customType: "mulligan:cancel",
+    data: { kind: "cancel", targetId },
+  };
 }
 
 /** A turn-metric marker entry (customType "mulligan:turn-metric") with the given turnIndex + seq, for the
  *  P4.M1.T2.S3 refused-rewind flag tests (rewind.ts reads readMarkers(ctx).metric?.turnIndex). */
-function metricEntry(turnIndex: number, seq = turnIndex): { type: "custom"; customType: "mulligan:turn-metric"; data: Record<string, unknown> } {
+function metricEntry(
+  turnIndex: number,
+  seq = turnIndex,
+): {
+  type: "custom";
+  customType: "mulligan:turn-metric";
+  data: Record<string, unknown>;
+} {
   return {
     type: "custom",
     customType: "mulligan:turn-metric",
-    data: { schema: "pi-mulligan", v: 1, kind: "turn-metric", seq, ts: 1, turnIndex, deltaTokens: 100,
-      bloatHit: false, bloatHits: [], grewOverThreshold: false },
+    data: {
+      schema: "pi-mulligan",
+      v: 1,
+      kind: "turn-metric",
+      seq,
+      ts: 1,
+      turnIndex,
+      deltaTokens: 100,
+      bloatHit: false,
+      bloatHits: [],
+      grewOverThreshold: false,
+    },
   };
 }
 
 /** A checkpoint label entry. */
-function checkpointLabelEntry(name: string, targetId = "leaf-1"): {
+function checkpointLabelEntry(
+  name: string,
+  targetId = "leaf-1",
+): {
   type: "label";
   targetId: string;
   label: string;
@@ -242,15 +323,28 @@ function checkpointLabelEntry(name: string, targetId = "leaf-1"): {
 /** A single message-as-entry in the snapshot (buildContextEntries returns SessionEntry[]; we cast through unknown).
  *  For the ledger/K preview, the tool flattens via sessionEntryToContextMessages. We pass entries that the REAL
  *  sessionEntryToContextMessages converts: {type:"message", message:{role,content}} (verified Pi shape). */
-function msgEntry(message: Record<string, unknown>): { type: "message"; id: string; message: Record<string, unknown> } {
-  return { type: "message", id: `e-${Math.random().toString(36).slice(2)}`, message };
+function msgEntry(message: Record<string, unknown>): {
+  type: "message";
+  id: string;
+  message: Record<string, unknown>;
+} {
+  return {
+    type: "message",
+    id: `e-${Math.random().toString(36).slice(2)}`,
+    message,
+  };
 }
 
 /** Build an assistant message whose content is a list of toolCall blocks with the given ids (mirror transforms.test.ts). */
 function asst(...callIds: string[]): Record<string, unknown> {
   return {
     role: "assistant",
-    content: callIds.map((id) => ({ type: "toolCall", id, name: "tool", arguments: {} })),
+    content: callIds.map((id) => ({
+      type: "toolCall",
+      id,
+      name: "tool",
+      arguments: {},
+    })),
   };
 }
 
@@ -269,7 +363,9 @@ function result(toolCallId: string): Record<string, unknown> {
 function asstWrite(callId: string, file_path: string): Record<string, unknown> {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: callId, name: "write", arguments: { file_path } }],
+    content: [
+      { type: "toolCall", id: callId, name: "write", arguments: { file_path } },
+    ],
   };
 }
 
@@ -277,7 +373,9 @@ function asstWrite(callId: string, file_path: string): Record<string, unknown> {
 function asstBash(callId: string, command: string): Record<string, unknown> {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command } }],
+    content: [
+      { type: "toolCall", id: callId, name: "bash", arguments: { command } },
+    ],
   };
 }
 
@@ -317,7 +415,10 @@ describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
     setConfig({ rewind: { enabled: false } });
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toBe("Mulligan: refused — rewind is disabled.");
     expect(appended).toHaveLength(0); // no marker
     expect(sent).toHaveLength(0); // no note
@@ -328,7 +429,10 @@ describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
     setConfig({ rewind: { enabled: false } });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "" },
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toBe("Mulligan: refused — rewind is disabled.");
     expect(appended).toHaveLength(0);
     expect(res.details).toEqual({ granularity: "last_turn" });
@@ -340,18 +444,29 @@ describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
 describe("mulligan_rewind — refusal: invalid note (step 2; E9)", () => {
   it.each([
     ["empty what_happened", { ...VALID_NOTE, what_happened: "" }],
-    ["whitespace-only true_current_state", { ...VALID_NOTE, true_current_state: "   " }],
+    [
+      "whitespace-only true_current_state",
+      { ...VALID_NOTE, true_current_state: "   " },
+    ],
     ["empty next", { ...VALID_NOTE, next: "" }],
     ["whitespace-only what_happened", { ...VALID_NOTE, what_happened: "\t\n" }],
-  ])("rejects %s → NOTE_INVALID_REASON refusal; no persistence", async (_label, note) => {
-    const { appended, sent, pi } = makePi();
-    const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note, granularity: "last_tool_call_group" });
-    expect(firstText(res)).toBe(`Mulligan: refused — ${NOTE_INVALID_REASON}.`);
-    expect(appended).toHaveLength(0);
-    expect(sent).toHaveLength(0);
-    expect(res.details).toEqual({ granularity: "last_tool_call_group" });
-  });
+  ])(
+    "rejects %s → NOTE_INVALID_REASON refusal; no persistence",
+    async (_label, note) => {
+      const { appended, sent, pi } = makePi();
+      const { ctx } = makeCtx();
+      const res = await run(pi, ctx, {
+        note,
+        granularity: "last_tool_call_group",
+      });
+      expect(firstText(res)).toBe(
+        `Mulligan: refused — ${NOTE_INVALID_REASON}.`,
+      );
+      expect(appended).toHaveLength(0);
+      expect(sent).toHaveLength(0);
+      expect(res.details).toEqual({ granularity: "last_tool_call_group" });
+    },
+  );
 });
 
 // ── refusal path 3: checkpoint granularity existence (step 3; E10) ──────────
@@ -360,7 +475,10 @@ describe("mulligan_rewind — refusal: checkpoint existence (step 3; E10)", () =
   it("granularity 'checkpoint' with NO checkpoint name → refusal", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+    });
     expect(firstText(res)).toBe(
       "Mulligan: refused — checkpoint granularity requires a checkpoint name.",
     );
@@ -371,7 +489,11 @@ describe("mulligan_rewind — refusal: checkpoint existence (step 3; E10)", () =
   it("granularity 'checkpoint', name 'nope', NO matching label → refusal", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ entries: [] }); // no labels
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "nope" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "nope",
+    });
     expect(firstText(res)).toBe(
       "Mulligan: refused — checkpoint 'nope' not found on this branch.",
     );
@@ -385,7 +507,11 @@ describe("mulligan_rewind — refusal: checkpoint existence (step 3; E10)", () =
       entries: [checkpointLabelEntry("anchor")],
       contextEntries: [], // no messages → resolveCheckpoint remove=[] → K=0, empty ledger (still success)
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint.");
     expect(appended).toHaveLength(1); // marker persisted (existence passed)
   });
@@ -393,7 +519,10 @@ describe("mulligan_rewind — refusal: checkpoint existence (step 3; E10)", () =
   it("last_tool_call_group / last_turn are ALWAYS valid (no checkpoint scan)", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ entries: [] }); // no labels — irrelevant for relative granularity
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound last_turn.");
     expect(appended).toHaveLength(1);
   });
@@ -405,9 +534,18 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
   it("exactly maxDepth (5) active rewind markers → refusal naming the count + suggesting shrink/continue", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
-      entries: [rewindEntry(1), rewindEntry(2), rewindEntry(3), rewindEntry(4), rewindEntry(5)],
+      entries: [
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+        rewindEntry(4),
+        rewindEntry(5),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: refused —");
     expect(firstText(res)).toContain("max rewind depth (5) reached");
     expect(firstText(res)).toContain("5 active rewind marker(s)");
@@ -422,7 +560,10 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
       entries: [rewindEntry(1), rewindEntry(2), rewindEntry(3), rewindEntry(4)],
       contextEntries: [],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound");
     expect(appended).toHaveLength(1);
   });
@@ -431,7 +572,10 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
     setConfig({ rewind: { maxDepth: 1 } });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ entries: [rewindEntry(1)] });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("max rewind depth (1) reached");
     expect(appended).toHaveLength(0);
   });
@@ -451,7 +595,10 @@ describe("mulligan_rewind — refusal latches rt.rewindRefusedTurnIndex (P4.M1.T
     // Trigger a refusal via an invalid note (E9 path). The latest turn-metric has turnIndex 7 → flag = 7.
     const { pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1", entries: [metricEntry(7)] });
-    const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "" },
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: refused —");
     expect(getRuntime("s1").rewindRefusedTurnIndex).toBe(7); // latched to the latest metric turnIndex
   });
@@ -469,7 +616,12 @@ describe("mulligan_rewind — refusal latches rt.rewindRefusedTurnIndex (P4.M1.T
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(firstText(res)).toContain("Mulligan: rewound"); // success
     expect(getRuntime("s1").rewindRefusedTurnIndex).toBeNull(); // success never sets the flag
   });
@@ -477,7 +629,10 @@ describe("mulligan_rewind — refusal latches rt.rewindRefusedTurnIndex (P4.M1.T
   it("a refusal when no turn-metric exists leaves the flag null and never throws (E13)", async () => {
     const { pi } = makePi();
     const { ctx } = makeCtx({ sessionId: "s1", entries: [] }); // NO metric entries → currentTurnIndex null
-    const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "" },
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: refused —");
     expect(getRuntime("s1").rewindRefusedTurnIndex).toBeNull(); // no metric → flag stays null
   });
@@ -499,7 +654,12 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
 
     // marker persisted exactly once
     expect(appended).toHaveLength(1);
@@ -540,7 +700,12 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(res.details.k).toBe(2);
     expect(firstText(res)).toContain("2 messages will be hidden");
   });
@@ -548,9 +713,18 @@ describe("mulligan_rewind — success path: the persisted marker contract (spec/
   it("excludeToolCallId === toolCallId regardless of the toolCallId value", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
-      contextEntries: [msgEntry(user("u")), msgEntry(asst("call-9")), msgEntry(result("call-9"))],
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("call-9")),
+        msgEntry(result("call-9")),
+      ],
     });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-9");
+    await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-9",
+    );
     expect((appended[0].data as RewindMarker).excludeToolCallId).toBe("call-9");
   });
 });
@@ -564,13 +738,19 @@ describe("mulligan_rewind — checkpoint success: data.checkpoint === name (gotc
       entries: [checkpointLabelEntry("anchor")],
       contextEntries: [msgEntry(user("u"))], // branch messages — resolveCheckpoint will no-op (no target walk match)
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint.");
     expect(appended).toHaveLength(1);
     // GOTCHA #1 — THE key assertion: the checkpoint name IS persisted (the filter reads rw.checkpoint).
     // (The frozen RewindMarker TYPE omits checkpoint — spec/04 §3 — so read through a widened record, the same way
     // the filter reads it via readOwn. The runtime spread in appendRewindMarker preserves the extra field.)
-    expect((appended[0].data as RewindMarker & { checkpoint?: string }).checkpoint).toBe("anchor");
+    expect(
+      (appended[0].data as RewindMarker & { checkpoint?: string }).checkpoint,
+    ).toBe("anchor");
     expect(res.details.granularity).toBe("checkpoint");
   });
 });
@@ -589,7 +769,10 @@ describe("mulligan_rewind — success text (K + K=0 honesty + Note left.)", () =
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toBe(
       "Mulligan: rewound last_tool_call_group. 2 messages will be hidden from your view starting next turn. Note left.",
     );
@@ -601,7 +784,10 @@ describe("mulligan_rewind — success text (K + K=0 honesty + Note left.)", () =
     const { ctx } = makeCtx({
       contextEntries: [msgEntry(asst("call-1")), msgEntry(result("call-1"))],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toBe(
       "Mulligan: rewound last_tool_call_group. 0 messages will be hidden from your view starting next turn (nothing matched to hide). Note left.",
     );
@@ -626,9 +812,14 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain(MUTATION_WARNING_PREFIX);
-    expect(firstText(res)).toContain("Those effects PERSIST on disk; do not blindly redo them.");
+    expect(firstText(res)).toContain(
+      "Those effects PERSIST on disk; do not blindly redo them.",
+    );
     expect(res.details.ledger?.modifiedFiles).toEqual(["src/a.ts"]);
   });
 
@@ -643,7 +834,10 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain(MUTATION_WARNING_PREFIX);
     expect(res.details.ledger?.bashSideEffects).toEqual(["mkdir -p build"]);
   });
@@ -660,7 +854,10 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).not.toContain(MUTATION_WARNING_PREFIX);
     expect(firstText(res)).toMatch(/Note left\.$/); // no trailing warning
   });
@@ -676,7 +873,10 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).not.toContain(MUTATION_WARNING_PREFIX);
     expect(firstText(res)).toMatch(/Note left\.$/);
   });
@@ -688,14 +888,21 @@ describe("mulligan_rewind — best-effort ledger (E8/E13: snapshot failure never
   it("a THROWING buildContextEntries → empty ledger + K=0 + STILL persists marker + note + success", async () => {
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx({ throwOnBuildContext: true });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     // success path (the preview failure is swallowed → empty ledger + K=0)
     expect(firstText(res)).toContain("Mulligan: rewound last_tool_call_group.");
     expect(firstText(res)).toContain("0 messages will be hidden");
     expect(appended).toHaveLength(1); // marker STILL persisted
     expect(sent).toHaveLength(1); // note STILL left
     expect(res.details.k).toBe(0);
-    expect(res.details.ledger).toEqual({ readFiles: [], modifiedFiles: [], bashSideEffects: [] });
+    expect(res.details.ledger).toEqual({
+      readFiles: [],
+      modifiedFiles: [],
+      bashSideEffects: [],
+    });
   });
 
   it("a THROWING getBranch (checkpoint granularity) → still success (preview swallowed)", async () => {
@@ -704,7 +911,11 @@ describe("mulligan_rewind — best-effort ledger (E8/E13: snapshot failure never
       entries: [checkpointLabelEntry("anchor")],
       throwOnGetBranch: true,
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint.");
     expect(appended).toHaveLength(1);
     expect(res.details.k).toBe(0);
@@ -717,15 +928,25 @@ describe("mulligan_rewind — leaveNote rewindId === marker entry id (GOTCHA #10
   it("note.details.rewindId === the captured marker entry id (getLeafId)", async () => {
     const { sent, pi } = makePi();
     const { ctx } = makeCtx({ leafId: "leaf-77", contextEntries: [] });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect((sent[0].details as { rewindId: string }).rewindId).toBe("leaf-77");
   });
 
   it("appendRewindMarker returns null (leafId null) → leaveNote rewindId falls back to toolCallId", async () => {
     const { sent, pi } = makePi();
     const { ctx } = makeCtx({ leafId: null, contextEntries: [] });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-fallback");
-    expect((sent[0].details as { rewindId: string }).rewindId).toBe("call-fallback");
+    await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-fallback",
+    );
+    expect((sent[0].details as { rewindId: string }).rewindId).toBe(
+      "call-fallback",
+    );
   });
 });
 
@@ -737,8 +958,13 @@ describe("mulligan_rewind — never throws (spec/05 shared tool convention; E13)
     const { ctx } = makeCtx({ throwOnGetEntries: true });
     // countRewindMarkers is defensive: a throwing getEntries → 0 markers (never propagates) → depth guard passes
     // → the rewind proceeds. The contract is "never rejects → text result", which holds either way.
-    await expect(run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" })).resolves.toBeDefined();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    await expect(
+      run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }),
+    ).resolves.toBeDefined();
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(res.content[0].type).toBe("text");
     expect(firstText(res)).toContain("Mulligan:"); // a text result (success) — never a rejection
   });
@@ -747,7 +973,10 @@ describe("mulligan_rewind — never throws (spec/05 shared tool convention; E13)
     const { sent, pi } = makePi({ throwOnAppend: true });
     const { ctx } = makeCtx({ contextEntries: [] });
     // appendRewindMarker swallows the throw → returns null → markerId=null → leaveNote(toolCallId). Still success.
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound");
     expect(firstText(res)).toContain("Note left.");
     expect(sent).toHaveLength(1); // note was still left (rewindId = toolCallId fallback)
@@ -761,9 +990,18 @@ describe("mulligan_rewind — result shape (CRITICAL GOTCHA #4: details on every
   it("success: content is [{type:'text', text:string}] AND details present (granularity, k, ledger, markerId)", async () => {
     const { pi } = makePi();
     const { ctx } = makeCtx({
-      contextEntries: [msgEntry(user("u")), msgEntry(asst("X")), msgEntry(result("X")), msgEntry(asst("call-1")), msgEntry(result("call-1"))],
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(Array.isArray(res.content)).toBe(true);
     expect(res.content).toHaveLength(1);
     expect(res.content[0].type).toBe("text");
@@ -779,7 +1017,10 @@ describe("mulligan_rewind — result shape (CRITICAL GOTCHA #4: details on every
     setConfig({ rewind: { enabled: false } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(res.content).toHaveLength(1);
     expect(res.content[0].type).toBe("text");
     expect("details" in res).toBe(true);
@@ -789,7 +1030,11 @@ describe("mulligan_rewind — result shape (CRITICAL GOTCHA #4: details on every
   it("refusal (invalid note): content is [{type:'text', text:string}] AND details present", async () => {
     const { pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: { ...VALID_NOTE, next: "" }, granularity: "checkpoint", checkpoint: "x" });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, next: "" },
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
     expect(res.content).toHaveLength(1);
     expect(res.content[0].type).toBe("text");
     expect("details" in res).toBe(true);
@@ -802,7 +1047,9 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
   it("makeRewindTool(...) is a ToolDefinition<typeof RewindParams, RewindDetails>", () => {
     const { pi } = makePi();
     const tool = makeRewindTool(pi);
-    expectTypeOf(tool).toEqualTypeOf<ToolDefinition<typeof RewindParams, RewindDetails>>();
+    expectTypeOf(tool).toEqualTypeOf<
+      ToolDefinition<typeof RewindParams, RewindDetails>
+    >();
     expectTypeOf(tool.parameters).toEqualTypeOf(RewindParams);
     expectTypeOf(tool.name).toEqualTypeOf<string>();
   });
@@ -814,7 +1061,9 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
       true_current_state: string;
       next: string;
     }>();
-    expectTypeOf(args.granularity).toEqualTypeOf<"last_tool_call_group" | "last_turn" | "checkpoint">();
+    expectTypeOf(args.granularity).toEqualTypeOf<
+      "last_tool_call_group" | "last_turn" | "checkpoint"
+    >();
     expectTypeOf(args.checkpoint).toEqualTypeOf<string | undefined>();
     // [P4.M1.T1.S1] v1.2 working-tree revert params — optional booleans (Type.Optional → boolean | undefined).
     expectTypeOf(args.revert_file_changes).toEqualTypeOf<boolean | undefined>();
@@ -826,7 +1075,10 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
   it("execute returns AgentToolResult<RewindDetails>", async () => {
     const { pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expectTypeOf(res).toEqualTypeOf<AgentToolResult<RewindDetails>>();
   });
 });
@@ -845,10 +1097,21 @@ describe("mulligan_rewind — the note left is renderNote(note, ledger, granular
         msgEntry(result("call-1")),
       ],
     });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     // reconstruct the expected ledger from the same snapshot (the non-excluded toolGroup [1,2] → write src/a.ts)
-    const expectedLedger = { readFiles: [], modifiedFiles: ["src/a.ts"], bashSideEffects: [] };
-    const expected = renderNote(VALID_NOTE, expectedLedger, "last_tool_call_group");
+    const expectedLedger = {
+      readFiles: [],
+      modifiedFiles: ["src/a.ts"],
+      bashSideEffects: [],
+    };
+    const expected = renderNote(
+      VALID_NOTE,
+      expectedLedger,
+      "last_tool_call_group",
+    );
     expect(sent[0].content).toBe(expected);
   });
 });
@@ -856,7 +1119,10 @@ describe("mulligan_rewind — the note left is renderNote(note, ledger, granular
 // ── hideEntryIds capture (fix_design.md §Change 2; PRODUCER half of permanent hiding — BUG-001/002) ──────
 
 /** Like msgEntry but with a DETERMINISTIC id (needed to assert which entry ids were captured). Mirrors msgEntry's shape. */
-function msgEntryId(id: string, message: Record<string, unknown>): { type: "message"; id: string; message: Record<string, unknown> } {
+function msgEntryId(
+  id: string,
+  message: Record<string, unknown>,
+): { type: "message"; id: string; message: Record<string, unknown> } {
   return { type: "message", id, message };
 }
 
@@ -874,7 +1140,12 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
         msgEntryId("e_rrw", result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(appended).toHaveLength(1);
     const entry = appended[0].data as RewindMarker;
     // the removed messages are at indices 1,2 → their entries are e_X, e_rX (the whole bad toolGroup)
@@ -900,7 +1171,12 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
         msgEntryId("e_rrw", result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn" },
+      "call-1",
+    );
     const entry = appended[0].data as RewindMarker;
     expect(entry.hideEntryIds).toEqual(["e_bad", "e_rbad"]);
     expect(entry.hideEntryIds).not.toContain("e_rw");
@@ -912,9 +1188,17 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
     const { appended, pi } = makePi();
     // snapshot: only the rewind's own group → resolveLastToolCallGroup returns null → remove=[] → K=0.
     const { ctx } = makeCtx({
-      contextEntries: [msgEntryId("e_rw", asst("call-1")), msgEntryId("e_rrw", result("call-1"))],
+      contextEntries: [
+        msgEntryId("e_rw", asst("call-1")),
+        msgEntryId("e_rrw", result("call-1")),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(res.details.k).toBe(0);
     const entry = appended[0].data as RewindMarker;
     expect(Array.isArray(entry.hideEntryIds)).toBe(true); // present (every new marker has it)
@@ -925,13 +1209,20 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
   it("snapshot failure (buildContextEntries throws) → catch → hideEntryIds === [] + marker STILL persisted", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ throwOnBuildContext: true });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound");
     expect(appended).toHaveLength(1); // marker persisted despite the preview failure
     const entry = appended[0].data as RewindMarker;
     expect(entry.hideEntryIds).toEqual([]); // best-effort: nothing captured
     expect(res.details.hideEntryIds).toEqual([]);
-    expect(res.details.ledger).toEqual({ readFiles: [], modifiedFiles: [], bashSideEffects: [] });
+    expect(res.details.ledger).toEqual({
+      readFiles: [],
+      modifiedFiles: [],
+      bashSideEffects: [],
+    });
     expect(res.details.k).toBe(0);
   });
 
@@ -946,9 +1237,16 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
         msgEntryId("e_rrw", result("call-1")),
       ],
     });
-    await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(appended).toHaveLength(1);
-    expect(Array.isArray((appended[0].data as RewindMarker).hideEntryIds)).toBe(true);
+    expect(Array.isArray((appended[0].data as RewindMarker).hideEntryIds)).toBe(
+      true,
+    );
   });
 
   it("hideEntryIds order follows entry order (root→leaf cursor walk) and is deterministic for the same snapshot", async () => {
@@ -964,9 +1262,17 @@ describe("mulligan_rewind — hideEntryIds capture (fix_design.md §Change 2; pe
     ];
     const { ctx } = makeCtx({ contextEntries: snap });
     // last_tool_call_group excludes call-1 → resolves the B group (most-recent non-excluded) → remove=[3,4]
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_tool_call_group" },
+      "call-1",
+    );
     expect(res.details.k).toBe(2);
-    expect((appended[0].data as RewindMarker).hideEntryIds).toEqual(["e_B", "e_rB"]); // root→leaf order
+    expect((appended[0].data as RewindMarker).hideEntryIds).toEqual([
+      "e_B",
+      "e_rB",
+    ]); // root→leaf order
   });
 });
 
@@ -1006,9 +1312,17 @@ describe("mulligan_rewind — retry budget: per-prompt cap (P4.M1.T3.S1 / spec/0
     const { appended, pi } = makePi();
     // countRetriesAtLatestPrompt: latest user at idx 0 → 3 rewind markers AFTER it → 3 >= 3 → refuse (3/3).
     const { ctx } = makeCtx({
-      entries: [msgEntry(user("update the spec")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+      entries: [
+        msgEntry(user("update the spec")),
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toContain("per-prompt retry budget");
     expect(firstText(res)).toContain("3/3"); // ${retries}/${maxRetriesPerPrompt}
     expect(appended.length).toBe(0); // refused BEFORE persisting
@@ -1024,9 +1338,17 @@ describe("mulligan_rewind — retry budget: zero-hide markers still count (P4.M1
     // unconditionally. These 3 markers represent zero-hide rewinds; if they did NOT count, the next rewind
     // would succeed. Assert it is refused → proves zero-hide markers count.
     const { ctx } = makeCtx({
-      entries: [msgEntry(user("loop again")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+      entries: [
+        msgEntry(user("loop again")),
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toContain("per-prompt retry budget");
     expect(appended.length).toBe(0);
   });
@@ -1048,7 +1370,10 @@ describe("mulligan_rewind — retry budget: a new prompt resets it (P4.M1.T3.S1 
         msgEntry(user("NEW prompt")), // <-- latest user is now AFTER the rewind markers
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(appended.length).toBeGreaterThan(0); // marker persisted = success (K may be 0; appended>0 is the signal)
     expect(firstText(res)).not.toContain("per-prompt retry budget");
   });
@@ -1060,15 +1385,25 @@ describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T
     setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
     const { pi } = makePi();
     const { ctx } = makeCtx({
-      entries: [msgEntry(user("budget hit")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+      entries: [
+        msgEntry(user("budget hit")),
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+      ],
     });
     // 1) rewind IS refused (budget exhausted)
-    const rew = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const rew = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(rew)).toContain("per-prompt retry budget");
     // 2) mulligan_shrink is NOT gated by the retry budget → returns a non-refusal (matched:yes/no, never "refused")
     const shrinkRes = await shrinkCall(pi, ctx);
     expect((shrinkRes.content[0] as { type?: string }).type).toBe("text");
-    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain("Mulligan: refused");
+    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain(
+      "Mulligan: refused",
+    );
   });
 });
 
@@ -1077,7 +1412,9 @@ describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T
 describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e, spec/10 §1.10)", () => {
   it("refuses when filtered context ≥ abortContextFraction of the window even though budget remains; shrink still callable", async () => {
     // HIGH budget → (4b) won't fire first; ONLY the context-fraction (4c) refuses here.
-    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    setConfig({
+      rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 },
+    });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
       contextUsage: { contextWindow: 10000 }, // windowTokens=10000 → (4c) is armed (not skipped)
@@ -1087,14 +1424,22 @@ describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e
     // estimateTokens ≈ chars/4 → 50000 chars ≈ 12500 tokens ≥ 0.9*10000 = 9000. Oversized to be ratio-safe.
     getRuntime("s1").lastFiltered = [
       { role: "user", content: [{ type: "text", text: "x".repeat(50000) }] },
-    ] as unknown as { role: string; content: { type: string; text: string }[] }[];
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    ] as unknown as {
+      role: string;
+      content: { type: string; text: string }[];
+    }[];
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toContain("context is at");
     expect(firstText(res)).toContain("% of the window");
     expect(appended.length).toBe(0);
     // shrink still callable (budget was NOT the reason; only prompt-re-landing rewinds are gated):
     const shrinkRes = await shrinkCall(pi, ctx);
-    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain("Mulligan: refused");
+    expect((shrinkRes.content[0] as { text?: string }).text).not.toContain(
+      "Mulligan: refused",
+    );
   });
 });
 
@@ -1105,20 +1450,32 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
     const { pi } = makePi();
     // throwOnGetEntries makes BOTH countRewindMarkers AND countRetriesAtLatestPrompt return 0 (both defensive)
     // → the rewind passes (4b) and proceeds (may succeed). The assertion is ONLY "no throw + text block".
-    const { ctx } = makeCtx({ entries: [msgEntry(user("x"))], throwOnGetEntries: true });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("x"))],
+      throwOnGetEntries: true,
+    });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect((res.content[0] as { type?: string }).type).toBe("text"); // never throws; always a text block (E13)
   });
 
   it("a throwing getContextUsage → context-fraction guard skipped (no crash)", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    setConfig({
+      rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 },
+    });
     const { pi } = makePi();
     // computeFilteredTotal's try/catch → {0,0} → windowTokens:0 → (4c) skipped. No throw either way.
     const { ctx } = makeCtx({ entries: [msgEntry(user("x"))] });
-    (ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => {
-      throw new Error("getContextUsage boom");
-    };
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    (ctx as unknown as { getContextUsage: () => unknown }).getContextUsage =
+      () => {
+        throw new Error("getContextUsage boom");
+      };
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect((res.content[0] as { type?: string }).type).toBe("text"); // no throw
   });
 
@@ -1126,9 +1483,17 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
     setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
     const { pi } = makePi();
     const { ctx } = makeCtx({
-      entries: [msgEntry(user("x")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+      entries: [
+        msgEntry(user("x")),
+        rewindEntry(1),
+        rewindEntry(2),
+        rewindEntry(3),
+      ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(Array.isArray(res.content)).toBe(true);
     expect(res.content.length).toBeGreaterThan(0);
     expect((res.content[0] as { type?: string }).type).toBe("text");
@@ -1155,7 +1520,10 @@ describe("mulligan_rewind — retry budget: cancelled rewinds excluded (BUG-005 
         rewindEntryWithId(2, "rw2"),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).not.toContain("per-prompt retry budget");
     expect(appended.length).toBeGreaterThan(0); // succeeded (not refused) → marker persisted
   });
@@ -1174,14 +1542,22 @@ describe("mulligan_rewind — depth guard: cancelled rewinds excluded (BUG-004 /
     const { ctx } = makeCtx({
       entries: [
         msgEntry(user("cancel-then-retry workflow")),
-        rewindEntryWithId(1, "rew-1"), cancelEntry("rew-1"),
-        rewindEntryWithId(2, "rew-2"), cancelEntry("rew-2"),
-        rewindEntryWithId(3, "rew-3"), cancelEntry("rew-3"),
-        rewindEntryWithId(4, "rew-4"), cancelEntry("rew-4"),
-        rewindEntryWithId(5, "rew-5"), cancelEntry("rew-5"),
+        rewindEntryWithId(1, "rew-1"),
+        cancelEntry("rew-1"),
+        rewindEntryWithId(2, "rew-2"),
+        cancelEntry("rew-2"),
+        rewindEntryWithId(3, "rew-3"),
+        cancelEntry("rew-3"),
+        rewindEntryWithId(4, "rew-4"),
+        cancelEntry("rew-4"),
+        rewindEntryWithId(5, "rew-5"),
+        cancelEntry("rew-5"),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_tool_call_group",
+    });
     expect(firstText(res)).not.toContain("max rewind depth (5) reached");
     expect(firstText(res)).not.toContain("5 active rewind marker(s)");
     expect(firstText(res)).toContain("Mulligan: rewound");
@@ -1207,11 +1583,19 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       entries: [checkpointLabelEntry("anchor")], // label present (consumable)
       contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
     expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined }); // the CLEAR was captured
     // pure-fn assertion of the consumed state (what mulligan_audit would see post-clear):
-    expect(listCheckpoints([{ type: "label", targetId: "leaf-1", label: undefined }])).not.toContain("anchor");
+    expect(
+      listCheckpoints([
+        { type: "label", targetId: "leaf-1", label: undefined },
+      ]),
+    ).not.toContain("anchor");
   });
 
   it("(b) a second rewind to the consumed name refuses 'not found'", async () => {
@@ -1221,10 +1605,21 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       entries: [checkpointLabelEntry("anchor")],
       contextEntries: [msgEntry(user("u"))],
     });
-    await run(pi, ctx1, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    await run(pi, ctx1, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     // second rewind: FRESH ctx whose entries simulate the consumed state (label gone)
-    const { ctx: ctx2 } = makeCtx({ entries: [], contextEntries: [msgEntry(user("u"))] });
-    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const { ctx: ctx2 } = makeCtx({
+      entries: [],
+      contextEntries: [msgEntry(user("u"))],
+    });
+    const res2 = await run(pi, ctx2, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res2)).toContain(
       "Mulligan: refused — checkpoint 'anchor' not found on this branch.",
     );
@@ -1237,13 +1632,21 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       entries: [checkpointLabelEntry("x")],
       contextEntries: [msgEntry(user("u"))],
     });
-    await run(pi, ctx1, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    await run(pi, ctx1, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
     // simulate a re-create: a FRESH ctx whose entries contain a new checkpointLabelEntry("x")
     const { ctx: ctx2 } = makeCtx({
       entries: [checkpointLabelEntry("x")],
       contextEntries: [msgEntry(user("u"))],
     });
-    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    const res2 = await run(pi, ctx2, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
     expect(firstText(res2)).toContain("Mulligan: rewound checkpoint."); // succeeds again
     expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined }); // the NEW clear was captured
     expect(labels).toHaveLength(2); // two clears total — one per rewind
@@ -1253,12 +1656,21 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
     const { labels, pi } = makePi();
     const { ctx } = makeCtx({
       entries: [checkpointLabelEntry("persist")], // a checkpoint exists but won't be touched
-      contextEntries: [msgEntry(user("u")), msgEntry(asst("c1")), msgEntry(result("c1"))], // last_turn resolves
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("c1")),
+        msgEntry(result("c1")),
+      ], // last_turn resolves
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound"); // the last_turn rewind succeeded
     expect(labels).toEqual([]); // NO setLabel call on a non-checkpoint path
-    expect(listCheckpoints([checkpointLabelEntry("persist")])).toContain("persist"); // still active
+    expect(listCheckpoints([checkpointLabelEntry("persist")])).toContain(
+      "persist",
+    ); // still active
   });
 
   it("(e) a setLabel throw during consumption is swallowed (E13) — rewind still succeeds", async () => {
@@ -1267,7 +1679,11 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       entries: [checkpointLabelEntry("anchor")],
       contextEntries: [msgEntry(user("u"))],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success (NOT refusal)
     expect(firstText(res)).not.toContain("refused"); // not inverted to a failure
     expect(appended).toHaveLength(1); // marker still persisted (E13: clear failure never undoes the rewind)
@@ -1293,7 +1709,11 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       ],
       contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
     // The label-clear MUST have been captured (the buggy code recorded 0 setLabel calls here).
     expect(labels).toContainEqual({ entryId: "leaf-1", label: undefined });
@@ -1317,12 +1737,18 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       contextEntries: [msgEntry(user("u"))],
     });
     // (1) checkpointExists must see this checkpoint as CONSUMED → a rewind by the same name refuses.
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "anchor" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "anchor",
+    });
     expect(firstText(res)).toContain(
       "Mulligan: refused — checkpoint 'anchor' not found on this branch.",
     );
     // (2) listCheckpoints (the mulligan_audit surface) must NOT list a consumed checkpoint.
-    expect(listCheckpoints(ctx.sessionManager.getEntries())).not.toContain("anchor");
+    expect(listCheckpoints(ctx.sessionManager.getEntries())).not.toContain(
+      "anchor",
+    );
     // (3) no clear should have been recorded (the rewind refused before step 7b).
     expect(labels).toHaveLength(0);
   });
@@ -1338,7 +1764,11 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       ],
       contextEntries: [msgEntry(user("u"))],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // active again → succeeds
     expect(listCheckpoints(ctx.sessionManager.getEntries())).toContain("x");
   });
@@ -1357,19 +1787,32 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
       ],
       contextEntries: [msgEntry(user("u"))], // branch non-empty → resolveCheckpoint no-op (success path)
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint."); // success
     // BUG-001 contract: BOTH targets cleared (the old code cleared only msg-a, then broke):
     expect(labels).toContainEqual({ entryId: "msg-a", label: undefined });
     expect(labels).toContainEqual({ entryId: "msg-b", label: undefined });
     // A second rewind by the same name refuses "not found" (both targets now consumed):
     const { ctx: ctx2 } = makeCtx({
-      entries: [checkpointLabelEntry("x", "msg-a"), checkpointLabelEntry("x", "msg-b")],
+      entries: [
+        checkpointLabelEntry("x", "msg-a"),
+        checkpointLabelEntry("x", "msg-b"),
+      ],
       labels: { "msg-a": undefined, "msg-b": undefined }, // override → simulate post-consumption (both cleared)
       contextEntries: [msgEntry(user("u"))],
     });
-    const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
-    expect(firstText(res2)).toContain("Mulligan: refused — checkpoint 'x' not found on this branch.");
+    const res2 = await run(pi, ctx2, {
+      note: VALID_NOTE,
+      granularity: "checkpoint",
+      checkpoint: "x",
+    });
+    expect(firstText(res2)).toContain(
+      "Mulligan: refused — checkpoint 'x' not found on this branch.",
+    );
   });
 });
 // ── P4.M1.T1.S1: v1.2 working-tree revert params (schema additions; logic is P4.M2.T1) ──────
@@ -1386,7 +1829,10 @@ describe("mulligan_rewind — v1.2 revert params (P4.M1.T1.S1)", () => {
     setConfig({ rewind: { enabled: false } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+    });
     expect(firstText(res)).toBe("Mulligan: refused — rewind is disabled.");
   });
 
@@ -1438,13 +1884,18 @@ describe("mulligan_rewind — v1.2 revert params (P4.M1.T1.S1)", () => {
 /**
  * makeFakeStore — a hand-rolled SnapshotStore fake for the 6b tests (mirrors the file's idiom: NO vi.fn()).
  * Scripts `dirtyCheck` via a closure: `drifted` is the list it returns; `throwOnCheck` makes it throw (E13).
- * `restoreCalled` lets the PROCEED test assert S1 does NOT call restore (the S2 seam must stay inert).
- * `restoreResult` is what restore returns (unused in S1 — restore is never called).
+ * [P4.M2.T1.S2] EXTENDED for the restore fold: `restoreResult` is the scripted RestoreResult restore returns
+ * (defaults to 5 empty buckets); `restoreCalls` captures every restore invocation ({beforeRef, opts}) so the
+ * proceed tests can assert the call happened EXACTLY ONCE with the verbatim opts (CRITICAL #3). `restoreThrows`
+ * makes restore throw (the E27/E13 fail-open test). `restoreCalled` (S1) kept for backward-compat.
  */
 function makeFakeStore(opts: {
   drifted?: string[];
   throwOnCheck?: boolean;
   restoreCalled?: () => void;
+  restoreResult?: RestoreResult;
+  restoreCalls?: { beforeRef: string; opts: RestoreOpts }[];
+  restoreThrows?: boolean;
 }): SnapshotStore {
   return {
     describe: () => ({ backend: "git" }),
@@ -1453,18 +1904,19 @@ function makeFakeStore(opts: {
       if (opts.throwOnCheck) throw new Error("dirtyCheck boom");
       return [...(opts.drifted ?? [])];
     },
-    restore: async (
-      _beforeRef: string,
-      _o: RestoreOpts,
-    ) => {
+    restore: async (beforeRef: string, o: RestoreOpts) => {
       opts.restoreCalled?.();
-      return {
-        reverted: [],
-        deleted: [],
-        failed: [],
-        skipped: [],
-        refused: [],
-      } as RestoreResult;
+      opts.restoreCalls?.push({ beforeRef, opts: o });
+      if (opts.restoreThrows) throw new Error("restore boom");
+      return (
+        opts.restoreResult ?? {
+          reverted: [],
+          deleted: [],
+          failed: [],
+          skipped: [],
+          refused: [],
+        }
+      );
     },
     has: async () => true,
     retire: async () => {
@@ -1521,7 +1973,12 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
         msgEntry(result("call-1")),
       ],
     });
-    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" }, "call-1");
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn" },
+      "call-1",
+    );
     // the EXACT v1.1 string (K=2, no warning, no revert clause)
     expect(firstText(res)).toBe(
       "Mulligan: rewound last_turn. 2 messages will be hidden from your view starting next turn. Note left.",
@@ -1571,7 +2028,11 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
     const res = await run(
       pi,
       ctx,
-      { note: VALID_NOTE, granularity: "last_tool_call_group", revert_file_changes: true },
+      {
+        note: VALID_NOTE,
+        granularity: "last_tool_call_group",
+        revert_file_changes: true,
+      },
       "call-1",
     );
     expect(firstText(res)).toContain(
@@ -1670,10 +2131,12 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
     expect(res.details.revertRefused).toBe(true);
   });
 
-  // (g) PROCEED — dirty guard clean → S1 must NOT call store.restore (the S2 seam stays inert); no revert clause.
-  it("PROCEEDS (no clause, no restore yet) when dirtyCheck returns [] — S1 must NOT call store.restore", async () => {
+  // (g) PROCEED — [P4.M2.T1.S2] dirty guard clean → store.restore called EXACTLY ONCE; the success text carries
+  //     the VERBATIM revert clause; the persisted marker carries the revert block; revertSummary is populated.
+  //     (FLIPPED from S1's "must NOT call restore" assertion — S2 fills the seam.)
+  it("PROCEEDS: store.restore called once with checkpoint.beforeRef + verbatim opts; success text carries the clause; marker carries the revert block", async () => {
     setConfig({ revert: { enabled: true } });
-    const { pi } = makePi();
+    const { appended, pi } = makePi();
     const sid = "s1";
     const { ctx } = makeCtx({
       sessionId: sid,
@@ -1686,9 +2149,19 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
       ],
     });
     const rt = getRuntime(sid);
-    let restoreCalls = 0;
-    rt.store = makeFakeStore({ drifted: [], restoreCalled: () => restoreCalls++ });
-    seedTurnCheckpoint(rt);
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    rt.store = makeFakeStore({
+      drifted: [],
+      restoreResult: {
+        reverted: ["src/a.ts"],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+      restoreCalls,
+    });
+    seedTurnCheckpoint(rt); // beforeRef "rb"
     const res = await run(
       pi,
       ctx,
@@ -1696,11 +2169,35 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
       "call-1",
     );
     expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind succeeds
-    // CRITICAL #9: S1 performs NO restore (the proceed branch is a comment-seam for S2).
-    expect(firstText(res)).not.toContain("file revert"); // no clause yet (S2 appends "Reverted X file(s)…")
-    expect(firstText(res)).not.toContain("refused");
+    // the VERBATIM revert clause (no leading space — spec/05 §1 step 6b + spec/14 §7)
+    expect(firstText(res)).toContain(
+      "Reverted 1 file(s), deleted 0; 0 skipped/failed, 0 refused (see log).",
+    );
+    expect(firstText(res)).not.toContain("file revert refused"); // clean guard → proceeds (not refused)
     expect(res.details.revertRefused).toBe(false); // guard ran + was clean (explicitly false, not undefined)
-    expect(restoreCalls).toBe(0); // S1 must NOT call store.restore
+    // restore called EXACTLY ONCE with checkpoint.beforeRef (NOT afterRef) + the verbatim opts (CRITICAL #3/#4)
+    expect(restoreCalls).toHaveLength(1);
+    expect(restoreCalls[0].beforeRef).toBe("rb"); // checkpoint.beforeRef (the PRE-span ref)
+    expect(restoreCalls[0].opts.revertFileChanges).toBe(true);
+    expect(restoreCalls[0].opts.deleteCreatedFiles).toBe(false);
+    // the persisted marker carries the revert block (folded into the ORIGINAL entry — see test (k))
+    const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+      .data as RewindMarker;
+    expect(marker.revert).toBeDefined();
+    expect(marker.revert!.revertedFiles).toEqual(["src/a.ts"]);
+    expect(marker.revert!.deletedFiles).toEqual([]);
+    expect(marker.revert!.failedFiles).toEqual([]);
+    expect(marker.revert!.refusedFiles).toEqual([]);
+    expect(marker.revert!.skipped).toBe(false); // skipped.length > 0 → false
+    expect(marker.revert!.backend).toBe("git"); // store.describe().backend
+    // revertSummary surfaced for P4.M2.T2.T1 (the warning reword) + logs/audit
+    expect(res.details.revertSummary).toBeDefined();
+    expect(res.details.revertSummary!.reverted).toBe(1);
+    expect(res.details.revertSummary!.deleted).toBe(0);
+    expect(res.details.revertSummary!.failed).toBe(0);
+    expect(res.details.revertSummary!.skipped).toBe(0);
+    expect(res.details.revertSummary!.refused).toBe(0);
+    expect(res.details.revertSummary!.backend).toBe("git");
   });
 
   // (h) CHECKPOINT KEY — granularity "checkpoint" resolves via the "ckpt:<name>" key (NOT "checkpoint:<name>").
@@ -1729,9 +2226,11 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
       "call-1",
     );
     expect(firstText(res)).toContain("Mulligan: rewound checkpoint.");
-    // the checkpoint resolved via "ckpt:anchor" → clean guard → proceeds → NO skip/refuse notice.
+    // the checkpoint resolved via "ckpt:anchor" → clean guard → proceeds → NO skip/dirty-guard-refuse notice.
+    // [P4.M2.T1.S2] the proceed branch now appends the revert clause (with its own "0 refused (see log)" text),
+    // so assert the DIRTY-GUARD refuse notice is absent (not the bare word "refused", which the clause contains).
     expect(firstText(res)).not.toContain("no working-tree snapshot");
-    expect(firstText(res)).not.toContain("refused");
+    expect(firstText(res)).not.toContain("file revert refused");
     expect(res.details.revertRefused).toBe(false);
   });
 
@@ -1801,5 +2300,371 @@ describe("mulligan_rewind step 6b decision tree (P4.M2.T1.S1)", () => {
     expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind STILL completes
     expect(firstText(res)).not.toContain("refused");
     expect(res.details.revertRefused).toBe(false); // NOT the refuse path (the throw degraded to skip)
+  });
+});
+// ── P4.M2.T1.S2: step 6b restore fold (spec/05 §1 step 6b; @14 §6/§7) ──────────────────────────
+//
+// S2 fills the proceed seam: store.restore(checkpoint.beforeRef, opts) runs + the RestoreResult folds into
+// (a) the success text (the verbatim "Reverted X file(s), deleted Y; Z skipped/failed, W refused (see log)." clause)
+// and (b) the persisted marker's `revert` block ({revertedFiles, deletedFiles, failedFiles, refusedFiles, skipped,
+// backend}). Because the session tree is append-only (C7), the persist (step 7) was RELOCATED to AFTER step 6b so
+// the revert block rides the spread into the ORIGINAL marker entry (verified by the one-marker-entry test below).
+// These tests extend the hand-rolled makeFakeStore (scripted restoreResult + restoreCalls capture).
+
+// A reusable last_turn success-path seed (a user msg + a non-excluded toolGroup so K may be 0 — 6b runs regardless).
+// Threads a scripted restoreResult + a restoreCalls capture into the fake store + seeds the "turn" checkpoint.
+function seedProceedLastTurn(
+  sid: string,
+  restoreResult: RestoreResult,
+  restoreCalls: { beforeRef: string; opts: RestoreOpts }[],
+): { ctx: ExtensionContext; rt: ReturnType<typeof getRuntime> } {
+  const { ctx } = makeCtx({
+    sessionId: sid,
+    contextEntries: [
+      msgEntry(user("u")),
+      msgEntry(asst("X")),
+      msgEntry(result("X")),
+      msgEntry(asst("call-1")),
+      msgEntry(result("call-1")),
+    ],
+  });
+  const rt = getRuntime(sid);
+  rt.store = makeFakeStore({ drifted: [], restoreResult, restoreCalls });
+  seedTurnCheckpoint(rt);
+  return { ctx, rt };
+}
+
+describe("mulligan_rewind step 6b restore fold (P4.M2.T1.S2)", () => {
+  // (a) DELETIONS — restoreResult.deleted:["src/new.ts"] → text "deleted 1"; marker.revert.deletedFiles populated.
+  it("folds deletions: 'deleted 1' in text; marker.revert.deletedFiles === [path]; revertSummary.deleted === 1", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { appended, pi } = makePi();
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = seedProceedLastTurn(
+      "s1",
+      {
+        reverted: [],
+        deleted: ["src/new.ts"],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+      restoreCalls,
+    );
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "Reverted 0 file(s), deleted 1; 0 skipped/failed, 0 refused (see log).",
+    );
+    const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+      .data as RewindMarker;
+    expect(marker.revert!.deletedFiles).toEqual(["src/new.ts"]);
+    expect(marker.revert!.revertedFiles).toEqual([]);
+    expect(res.details.revertSummary!.deleted).toBe(1);
+  });
+
+  // (b) FAILURES + SKIPPED — failed:["x"], skipped:["y"] → text "2 skipped/failed"; marker.revert.skipped===true.
+  it("folds failures+skipped: '<Z> skipped/failed' with the COUNT; marker.revert.failedFiles + skipped===true", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { appended, pi } = makePi();
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = seedProceedLastTurn(
+      "s1",
+      {
+        reverted: [],
+        deleted: [],
+        failed: ["src/x.ts"],
+        skipped: ["src/y.ts"],
+        refused: [],
+      },
+      restoreCalls,
+    );
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    // Z = skipped.length + failed.length = 2
+    expect(firstText(res)).toContain(
+      "Reverted 0 file(s), deleted 0; 2 skipped/failed, 0 refused (see log).",
+    );
+    const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+      .data as RewindMarker;
+    expect(marker.revert!.failedFiles).toEqual(["src/x.ts"]);
+    expect(marker.revert!.skipped).toBe(true); // skipped.length > 0 → true
+    expect(res.details.revertSummary!.failed).toBe(1);
+    expect(res.details.revertSummary!.skipped).toBe(1); // the COUNT is preserved in revertSummary
+  });
+
+  // (c) REFUSED-FROM-RESTORE — distinct from the dirty-guard refuse (which never reaches restore). restore returning
+  //     refused:["z"] (e.g. a mid-restore conflict) → text "1 refused"; marker.revert.refusedFiles populated.
+  it("folds refused-from-restore: '<W> refused' in text; marker.revert.refusedFiles populated (distinct from dirty-guard refuse)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { appended, pi } = makePi();
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = seedProceedLastTurn(
+      "s1",
+      {
+        reverted: [],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: ["src/z.ts"],
+      },
+      restoreCalls,
+    );
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "Reverted 0 file(s), deleted 0; 0 skipped/failed, 1 refused (see log).",
+    );
+    const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+      .data as RewindMarker;
+    expect(marker.revert!.refusedFiles).toEqual(["src/z.ts"]);
+    expect(res.details.revertSummary!.refused).toBe(1);
+  });
+
+  // (d) delete_created_files threading — the tool passes deleteCreatedFiles verbatim (NO tool-side allowDelete gate;
+  //     the backend gates config.revert.allowDeleteCreatedFiles — CRITICAL #3).
+  it("threads delete_created_files through to RestoreOpts.deleteCreatedFiles (no tool-side allowDelete gate; CRITICAL #3)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { pi } = makePi();
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = seedProceedLastTurn(
+      "s1",
+      { reverted: [], deleted: [], failed: [], skipped: [], refused: [] },
+      restoreCalls,
+    );
+    // delete_created_files:true, revert_file_changes OMITTED (false) — confirms the flag threads through verbatim
+    await run(
+      pi,
+      ctx,
+      {
+        note: VALID_NOTE,
+        granularity: "last_turn",
+        delete_created_files: true,
+      },
+      "call-1",
+    );
+    expect(restoreCalls).toHaveLength(1);
+    expect(restoreCalls[0].opts.deleteCreatedFiles).toBe(true);
+    expect(restoreCalls[0].opts.revertFileChanges).toBe(false);
+  });
+
+  // (e) ONE-MARKER-ENTRY — the re-order: the revert block rides the SAME entry as id/seq (NOT a follow-up amendment).
+  it("persists EXACTLY ONE mulligan:rewind entry carrying data.revert (re-order, not an amendment)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { appended, pi } = makePi();
+    const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+    const { ctx } = seedProceedLastTurn(
+      "s1",
+      {
+        reverted: ["src/a.ts"],
+        deleted: [],
+        failed: [],
+        skipped: [],
+        refused: [],
+      },
+      restoreCalls,
+    );
+    await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    // EXACTLY ONE mulligan:rewind entry (NOT two — no follow-up amendment — the persist relocation).
+    const rewindEntries = appended.filter(
+      (a) => a.customType === "mulligan:rewind",
+    );
+    expect(rewindEntries).toHaveLength(1);
+    // that single entry's data.revert IS populated (proves persist ran AFTER 6b, not before).
+    const marker = rewindEntries[0].data as RewindMarker;
+    expect(marker.revert).toBeDefined();
+    expect(marker.revert!.revertedFiles).toEqual(["src/a.ts"]);
+  });
+
+  // (f) NON-PROCEED regression — each of S1's terminal branches leaves data.revert undefined + revertSummary
+  //     undefined + restore uncalled (the persist relocation must not leak a revert field on these paths).
+  it("NON-PROCEED branches leave data.revert undefined + revertSummary undefined + restore uncalled", async () => {
+    setConfig({ revert: { enabled: true } });
+
+    // (1) disabled branch
+    {
+      const { appended, pi } = makePi();
+      const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+      const { ctx } = seedProceedLastTurn(
+        "s1",
+        {
+          reverted: ["should-not-happen.ts"],
+          deleted: [],
+          failed: [],
+          skipped: [],
+          refused: [],
+        },
+        restoreCalls,
+      );
+      // OVERRIDE config to disabled AFTER seeding (seedProceedLastTurn does not touch config)
+      setConfig({ revert: { enabled: false } });
+      const res = await run(
+        pi,
+        ctx,
+        {
+          note: VALID_NOTE,
+          granularity: "last_turn",
+          revert_file_changes: true,
+        },
+        "call-1",
+      );
+      const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+        .data as RewindMarker;
+      expect(marker.revert).toBeUndefined();
+      expect(res.details.revertSummary).toBeUndefined();
+      expect(restoreCalls).toHaveLength(0);
+      setConfig({ revert: { enabled: true } }); // restore for the next sub-case
+    }
+
+    // (2) NO FLAGS (the byte-identical v1.1 path) — step 6b never runs at all
+    {
+      const { appended, pi } = makePi();
+      const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+      const { ctx } = seedProceedLastTurn(
+        "s1",
+        {
+          reverted: ["no.ts"],
+          deleted: [],
+          failed: [],
+          skipped: [],
+          refused: [],
+        },
+        restoreCalls,
+      );
+      const res = await run(
+        pi,
+        ctx,
+        { note: VALID_NOTE, granularity: "last_turn" },
+        "call-1",
+      );
+      const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+        .data as RewindMarker;
+      expect(marker.revert).toBeUndefined();
+      expect(res.details.revertSummary).toBeUndefined();
+      expect(restoreCalls).toHaveLength(0);
+    }
+
+    // (3) missing-snapshot branch (no "turn" checkpoint)
+    {
+      const { appended, pi } = makePi();
+      const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+      const { ctx } = makeCtx({
+        sessionId: "s2",
+        contextEntries: [
+          msgEntry(user("u")),
+          msgEntry(asst("X")),
+          msgEntry(result("X")),
+          msgEntry(asst("call-1")),
+          msgEntry(result("call-1")),
+        ],
+      });
+      const rt = getRuntime("s2");
+      rt.store = makeFakeStore({ restoreCalls }); // store present but NO "turn" checkpoint seeded
+      const res = await run(
+        pi,
+        ctx,
+        {
+          note: VALID_NOTE,
+          granularity: "last_turn",
+          revert_file_changes: true,
+        },
+        "call-1",
+      );
+      const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+        .data as RewindMarker;
+      expect(marker.revert).toBeUndefined();
+      expect(res.details.revertSummary).toBeUndefined();
+      expect(restoreCalls).toHaveLength(0);
+    }
+
+    // (4) dirty-guard refuse branch
+    {
+      const { appended, pi } = makePi();
+      const restoreCalls: { beforeRef: string; opts: RestoreOpts }[] = [];
+      const { ctx } = makeCtx({
+        sessionId: "s3",
+        contextEntries: [
+          msgEntry(user("u")),
+          msgEntry(asst("X")),
+          msgEntry(result("X")),
+          msgEntry(asst("call-1")),
+          msgEntry(result("call-1")),
+        ],
+      });
+      const rt = getRuntime("s3");
+      rt.store = makeFakeStore({ drifted: ["src/drift.ts"], restoreCalls });
+      seedTurnCheckpoint(rt);
+      const res = await run(
+        pi,
+        ctx,
+        {
+          note: VALID_NOTE,
+          granularity: "last_turn",
+          revert_file_changes: true,
+        },
+        "call-1",
+      );
+      const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+        .data as RewindMarker;
+      expect(marker.revert).toBeUndefined();
+      expect(res.details.revertSummary).toBeUndefined();
+      expect(restoreCalls).toHaveLength(0);
+    }
+  });
+
+  // (g) E13 restore-throw fail-open — store.restore THROWS → degrades to S1's skip notice; revertBlock stays
+  //     undefined (no marker.revert); the rewind STILL completes. (store.restore never throws per E27, but the
+  //     guard must hold — reuses S1's existing inner try/catch; no second try/catch added.)
+  it("E13: a store.restore THROW degrades to 'file revert skipped: an error occurred' (rewind succeeds; no revert field)", async () => {
+    setConfig({ revert: { enabled: true } });
+    const { appended, pi } = makePi();
+    const sid = "s1";
+    const { ctx } = makeCtx({
+      sessionId: sid,
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const rt = getRuntime(sid);
+    rt.store = makeFakeStore({ drifted: [], restoreThrows: true }); // clean guard → proceeds → restore THROWS
+    seedTurnCheckpoint(rt);
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "call-1",
+    );
+    expect(firstText(res)).toContain(
+      "(file revert skipped: an error occurred — 0 files reverted)",
+    );
+    expect(firstText(res)).toContain("Mulligan: rewound last_turn."); // rewind STILL completes
+    expect(firstText(res)).not.toContain("Reverted"); // the clause never fired (restore threw before the fold)
+    expect(firstText(res)).not.toContain("file revert refused");
+    // revertBlock stayed undefined → marker has NO revert field; revertSummary undefined
+    const marker = appended.find((a) => a.customType === "mulligan:rewind")!
+      .data as RewindMarker;
+    expect(marker.revert).toBeUndefined();
+    expect(res.details.revertSummary).toBeUndefined();
   });
 });

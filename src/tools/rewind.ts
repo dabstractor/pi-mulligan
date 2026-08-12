@@ -57,9 +57,16 @@ import {
   appendRewindMarker,
   leaveNote,
   type RewindMarkerInput,
+  type RewindMarker,
   type RevertCheckpoint,
 } from "../markers.js"; // GOTCHA #13: .js
-import { validateNote, renderNote, NOTE_INVALID_REASON, type NoteInput } from "../notes.js";
+import type { RestoreResult } from "../snapshot/store.js"; // [P4.M2.T1.S2] fold the 5-bucket RestoreResult into text + marker
+import {
+  validateNote,
+  renderNote,
+  NOTE_INVALID_REASON,
+  type NoteInput,
+} from "../notes.js";
 import { extractFileLedger, type FileLedger } from "../ledger.js";
 import { getConfig, type Granularity } from "../config.js"; // GOTCHA #14: read ONCE at the top of execute
 import { getRuntime, type SessionRuntime } from "../runtime.js"; // [P4.M1.T2.S3] latch rewindRefusedTurnIndex
@@ -93,10 +100,14 @@ export const RewindParams = Type.Object({
           "The TRUE current state as of this rewind — task progress, decisions, and conclusions (files/commands are auto-captured in the ledger below). This prevents redoing work.",
       }),
       next: Type.String({
-        description: "Imperative: the immediate next action to take when you resume.",
+        description:
+          "Imperative: the immediate next action to take when you resume.",
       }),
     },
-    { description: "The note your resumed self will read. All three fields required." },
+    {
+      description:
+        "The note your resumed self will read. All three fields required.",
+    },
   ),
   granularity: Type.Union(
     [
@@ -200,6 +211,21 @@ export interface RewindDetails {
    *  path when the guard did not refuse (no drift / no snapshot / disabled / no flags). True ONLY on the refuse
    *  branch. (P4.M2.T1.S1.) */
   revertRefused?: boolean;
+  /**
+   * v1.2 working-tree revert summary (step 6b proceed branch only — present iff store.restore ran). Carries the
+   * 5-bucket COUNTS + the backend so the E5 mutation-warning reword (P4.M2.T2.T1) can decide whether files were
+   * reverted WITHOUT re-reading the persisted marker, and so logs/audit surface the outcome. Undefined on every
+   * non-proceed branch (disabled / group-granularity / missing-checkpoint / refuse / no flags). Built from the
+   * RestoreResult at the seam (before the skipped COUNT is folded into the marker's `skipped` boolean). (P4.M2.T1.S2.)
+   */
+  revertSummary?: {
+    reverted: number;
+    deleted: number;
+    failed: number;
+    skipped: number;
+    refused: number;
+    backend: "git" | "cas" | "none";
+  };
 }
 
 /**
@@ -209,7 +235,10 @@ export interface RewindDetails {
  * of the underlying reason. NOTE: the caller passes a reason with NO trailing period (NOTE_INVALID_REASON has none);
  * this helper adds the ".".
  */
-function refusal(reason: string, granularity: Granularity): AgentToolResult<RewindDetails> {
+function refusal(
+  reason: string,
+  granularity: Granularity,
+): AgentToolResult<RewindDetails> {
   return {
     content: [{ type: "text", text: `Mulligan: refused — ${reason}.` }],
     details: { granularity },
@@ -282,10 +311,15 @@ function countRewindMarkers(ctx: ExtensionContext): number {
   for (const e of entries) {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      const ee = e as { type?: unknown; customType?: unknown; data?: { targetId?: unknown } };
+      const ee = e as {
+        type?: unknown;
+        customType?: unknown;
+        data?: { targetId?: unknown };
+      };
       if (ee.type === "custom" && ee.customType === "mulligan:cancel") {
         const targetId = ee.data?.targetId;
-        if (typeof targetId === "string" && targetId.length > 0) cancelledRewindIds.add(targetId);
+        if (typeof targetId === "string" && targetId.length > 0)
+          cancelledRewindIds.add(targetId);
       }
     } catch {
       // a throwing-Proxy entry → skip (never throw on the tool hot path)
@@ -300,7 +334,11 @@ function countRewindMarkers(ctx: ExtensionContext): number {
   for (const e of entries) {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      const ee = e as { type?: unknown; customType?: unknown; data?: { id?: unknown } };
+      const ee = e as {
+        type?: unknown;
+        customType?: unknown;
+        data?: { id?: unknown };
+      };
       if (ee.type === "custom" && ee.customType === "mulligan:rewind") {
         const id = ee.data?.id;
         if (typeof id === "string" && cancelledRewindIds.has(id)) continue; // cancelled → skip
@@ -353,7 +391,8 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
       const ee = e as { type?: unknown; message?: { role?: unknown } };
-      if (ee.type === "message" && ee.message?.role === "user") latestPromptIndex = i;
+      if (ee.type === "message" && ee.message?.role === "user")
+        latestPromptIndex = i;
     } catch {
       // a throwing-Proxy entry → skip (never throw on the tool hot path)
     }
@@ -370,10 +409,15 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
     const e = entries[i];
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      const ee = e as { type?: unknown; customType?: unknown; data?: { targetId?: unknown } };
+      const ee = e as {
+        type?: unknown;
+        customType?: unknown;
+        data?: { targetId?: unknown };
+      };
       if (ee.type === "custom" && ee.customType === "mulligan:cancel") {
         const targetId = ee.data?.targetId;
-        if (typeof targetId === "string" && targetId.length > 0) cancelledRewindIds.add(targetId);
+        if (typeof targetId === "string" && targetId.length > 0)
+          cancelledRewindIds.add(targetId);
       }
     } catch {
       // a throwing-Proxy entry → skip (never throw on the tool hot path)
@@ -389,7 +433,11 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
     const e = entries[i];
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      const ee = e as { type?: unknown; customType?: unknown; data?: { id?: unknown } };
+      const ee = e as {
+        type?: unknown;
+        customType?: unknown;
+        data?: { id?: unknown };
+      };
       if (ee.type === "custom" && ee.customType === "mulligan:rewind") {
         const id = ee.data?.id;
         if (typeof id === "string" && cancelledRewindIds.has(id)) continue; // cancelled → skip
@@ -433,7 +481,12 @@ function checkpointExists(ctx: ExtensionContext, name: string): boolean {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
       const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
-      if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+      if (
+        ee.type === "label" &&
+        ee.label === needle &&
+        typeof ee.targetId === "string" &&
+        ee.targetId.length > 0
+      ) {
         candidates.add(ee.targetId);
       }
     } catch {
@@ -476,7 +529,10 @@ function checkpointExists(ctx: ExtensionContext, name: string): boolean {
  * @param remove  the MESSAGE-INDEX removal set resolvePreview already resolved (number[]); non-array → []
  * @returns the stable ENTRY ids of the entries whose message(s) are in `remove` (each entry at most once); [] if nothing
  */
-function captureHideEntryIds(entries: SessionEntry[], remove: readonly number[]): string[] {
+function captureHideEntryIds(
+  entries: SessionEntry[],
+  remove: readonly number[],
+): string[] {
   if (!Array.isArray(entries) || !Array.isArray(remove)) return [];
   const removeSet = new Set<number>(remove);
   const ids: string[] = [];
@@ -518,7 +574,9 @@ function resolvePreview(
   // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free
   // structural type with a narrower content-block index signature that TS rejects across the boundary.
   // Cast through unknown at this single boundary (the established filter.ts idiom — runtime-identical).
-  const messages = entries.flatMap((e) => sessionEntryToContextMessages(e)) as unknown as MessageLike[];
+  const messages = entries.flatMap((e) =>
+    sessionEntryToContextMessages(e),
+  ) as unknown as MessageLike[];
 
   let remove: number[];
   if (params.granularity === "last_tool_call_group") {
@@ -529,7 +587,13 @@ function resolvePreview(
   } else {
     // checkpoint (existence already verified by the caller; resolveCheckpoint is defensive regardless)
     const branchEntries = ctx.sessionManager.getBranch() as BranchEntry[]; // GOTCHA #8: DATA, not ctx
-    remove = resolveCheckpoint(messages, branchEntries, params.checkpoint ?? "", toolCallId)?.remove ?? [];
+    remove =
+      resolveCheckpoint(
+        messages,
+        branchEntries,
+        params.checkpoint ?? "",
+        toolCallId,
+      )?.remove ?? [];
   }
   const ledger = extractFileLedger(messages, remove); // GOTCHA #7: remove = message indices
   // Pin the STABLE ENTRY ids of the removed messages (fix_design.md §Change 2): the removal set is resolved ONCE
@@ -558,7 +622,10 @@ async function rewindExecute(
 ): Promise<AgentToolResult<RewindDetails>> {
   // Defensive: if a caller violates the type and omits params, normalize the granularity for the catch fallback.
   const granularity: Granularity =
-    params && (params.granularity === "last_tool_call_group" || params.granularity === "last_turn" || params.granularity === "checkpoint")
+    params &&
+    (params.granularity === "last_tool_call_group" ||
+      params.granularity === "last_turn" ||
+      params.granularity === "checkpoint")
       ? params.granularity
       : "last_tool_call_group";
   // [P4.M1.T2.S3] latch the turn index so filter.ts can mute the drift nudge (Nudge B) for the rest of this
@@ -571,7 +638,8 @@ async function rewindExecute(
   let currentTurnIndex: number | null = null;
   try {
     rt = getRuntime(ctx.sessionManager.getSessionId());
-    currentTurnIndex = readMarkers(ctx).metric?.turnIndex ?? rt.lastTurnIndex ?? null;
+    currentTurnIndex =
+      readMarkers(ctx).metric?.turnIndex ?? rt.lastTurnIndex ?? null;
   } catch {
     // E13: leave nulls → flag never set this turn (nudge behaves as before; fail-open).
   }
@@ -580,9 +648,13 @@ async function rewindExecute(
     // (no site missed). The pure refusal() builder is UNCHANGED (adds the prefix + trailing dot). A
     // SUCCESSFUL rewind never calls refuse() → the flag is left whatever it was. The catch (site 9) sets
     // the flag inline (this closure is out of scope there).
-    const refuse = (reason: string, gran: Granularity): AgentToolResult<RewindDetails> => {
+    const refuse = (
+      reason: string,
+      gran: Granularity,
+    ): AgentToolResult<RewindDetails> => {
       try {
-        if (rt !== null && currentTurnIndex !== null) rt.rewindRefusedTurnIndex = currentTurnIndex;
+        if (rt !== null && currentTurnIndex !== null)
+          rt.rewindRefusedTurnIndex = currentTurnIndex;
       } catch {
         /* E13 — never throw on the flag-set */
       }
@@ -593,7 +665,8 @@ async function rewindExecute(
     //     (context pass-through + nudges no-op + tools refuse "Mulligan is disabled").
     const config = getConfig();
     if (!config.enabled) return refuse("Mulligan is disabled", granularity); // E14 master switch
-    if (!config.rewind.enabled) return refuse("rewind is disabled", granularity);
+    if (!config.rewind.enabled)
+      return refuse("rewind is disabled", granularity);
 
     // (2) note validation (step 2; E9). validateNote never throws; NOTE_INVALID_REASON has NO trailing period
     //     (refusal() adds the ".").
@@ -604,10 +677,16 @@ async function rewindExecute(
     if (granularity === "checkpoint") {
       const name = params.checkpoint;
       if (!name || name.length === 0) {
-        return refuse("checkpoint granularity requires a checkpoint name", "checkpoint");
+        return refuse(
+          "checkpoint granularity requires a checkpoint name",
+          "checkpoint",
+        );
       }
       if (!checkpointExists(ctx, name)) {
-        return refuse(`checkpoint '${name}' not found on this branch`, "checkpoint");
+        return refuse(
+          `checkpoint '${name}' not found on this branch`,
+          "checkpoint",
+        );
       }
     }
 
@@ -652,7 +731,10 @@ async function rewindExecute(
     //     context fire) and the per-prompt retry budget (4b) catches repeated rewinds at the same prompt as
     //     a complementary backstop; documented here so future maintainers don't mistake the lag for a bug.
     const { totalTokens, windowTokens } = computeFilteredTotal(ctx);
-    if (windowTokens > 0 && totalTokens / windowTokens >= config.rewind.abortContextFraction) {
+    if (
+      windowTokens > 0 &&
+      totalTokens / windowTokens >= config.rewind.abortContextFraction
+    ) {
       const pct = Math.round((totalTokens / windowTokens) * 100);
       return refuse(
         `context is at ${pct}% of the window; rewinding will not help. Run mulligan_audit and shrink the largest result`,
@@ -676,11 +758,148 @@ async function rewindExecute(
     }
 
     // (6) render note (step 6 — note already validated by step 2; renderNote does NOT re-validate).
-    const rendered = renderNote((params.note as NoteInput) ?? ({} as NoteInput), ledger, granularity);
+    const rendered = renderNote(
+      (params.note as NoteInput) ?? ({} as NoteInput),
+      ledger,
+      granularity,
+    );
+
+    // (The step-7 persist block was RELOCATED to AFTER step 6b by P4.M2.T1.S2 so the `revert` field folds into
+    //     the ORIGINAL marker entry — the session tree is append-only (C7), so an already-persisted marker cannot
+    //     be amended. leaveNote stays paired with persist (correlates via markerId). See step 7 below.)
+
+    // (6b) working-tree revert decision tree — v1.2, opt-in (spec/05 §1 step 6b; @14 §6/§7). Runs AFTER note render
+    //      (step 6) and BEFORE marker persist (step 7) + checkpoint consumption (step 7b) + the mutation warning
+    //      (step 8). [P4.M2.T1.S2] RE-ORDERED the persist to AFTER 6b so the `revert` block folds into the ORIGINAL
+    //      marker entry (the session tree is append-only — C7). S1 (P4.M2.T1.S1) computes the DECISION: gate on
+    //      config → gate on granularity → resolve the RevertCheckpoint from rt.snapshots → run the dirty guard
+    //      (store.dirtyCheck) against the ledger's modified-file set → produce a proceed/refuse/skip decision + the
+    //      success-text notices for every terminal branch. S2 (P4.M2.T1.S2) FILLS the proceed seam: calls
+    //      store.restore + folds the RestoreResult into the success text (revertClause) + the marker's revert
+    //      block (revertBlock) + RewindDetails.revertSummary. Best-effort: a 6b failure (e.g. a thrown dirtyCheck)
+    //      degrades to a skip notice; the rewind ALWAYS completes (E13/E27/E30).
+    //      Branch order is LOAD-BEARING (spec/05 §1 step 6b): config → granularity → resolve → guard → proceed.
+    //      The Map keys are "turn" (last_turn) + "ckpt:"+name (checkpoint) — NOT "checkpoint:"+name (the runtime
+    //      docstrings are imprecise; the actual writers are capture.ts + commands.ts).
+    let revertClause = "";
+    let revertRefused = false;
+    // [P4.M2.T1.S2] accumulators read by BOTH the proceed seam (assigns them) and the relocated persist (step 7,
+    //      after this block — reads revertBlock). Declared at 6b-block-top scope (function/try scope) so the
+    //      persist site — which now runs AFTER 6b — can see them. `undefined` on every non-proceed branch ⇒ the
+    //      marker has NO revert field (JSON.stringify omits it; readOwn falsy) + revertSummary is undefined.
+    let revertBlock: RewindMarker["revert"];
+    let revertSummaryDetails: RewindDetails["revertSummary"];
+    const wantRevert =
+      !!params.revert_file_changes || !!params.delete_created_files;
+    if (wantRevert) {
+      try {
+        if (!config.revert.enabled) {
+          // branch (2): disabled in config (layer-1 gate) — append the disabled notice; skip.
+          revertClause = "(file revert requested but disabled in config)";
+        } else if (granularity === "last_tool_call_group") {
+          // branch (3): unsupported granularity — last_tool_call_group hides one tool interaction, not a whole
+          //     turn's file changes; append the granularity-mismatch notice; skip.
+          revertClause =
+            "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn.";
+        } else {
+          // branch (4)+(5)+(6): resolve the checkpoint + run the dirty guard.
+          const store = rt?.store;
+          // CRITICAL #2: the Map keys are "turn" + "ckpt:"+name (NOT "checkpoint:"+name).
+          const key =
+            granularity === "checkpoint" ? `ckpt:${params.checkpoint}` : "turn";
+          const checkpoint = rt?.snapshots?.get(key);
+          if (!store || !checkpoint) {
+            // branch (4): no store (revert disabled at detection) OR no checkpoint for this boundary → skip with
+            //     an honest count (0 reverted); the rewind still proceeds (@14 §6 step 1).
+            revertClause =
+              "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)";
+          } else {
+            // CRITICAL #3: affectedPaths = ledger.modifiedFiles (the only deterministic file list available at
+            //     this point — the SnapshotStore exposes no diff/listChanged method). Best-effort approximation
+            //     of "files restore would touch"; documented limitation in the PRP. Passing [] would make git.ts
+            //     trivially return [] (guard always passes), so modifiedFiles (possibly empty) is strictly better.
+            const affectedPaths = ledger.modifiedFiles;
+            // afterRef ?? beforeRef: turn checkpoints get afterRef (set post agent_end); checkpoint-granularity
+            //     checkpoints have NO afterRef (they capture once) ⇒ fall back to beforeRef (spec-sanctioned
+            //     degrade — @14 §6 step 3 "if afterRef exists").
+            const afterRef = checkpoint.afterRef ?? checkpoint.beforeRef;
+            // CRITICAL #4: dirtyCheck is ASYNC (await it). Returns the subset of `paths` that drifted vs afterRef.
+            const driftedPaths = await store.dirtyCheck(
+              afterRef,
+              affectedPaths,
+            );
+            if (driftedPaths.length > 0) {
+              // CRITICAL #5: REFUSE THE WHOLE file-revert on ANY drift (not per-path — @14 §6 step 3). The context
+              //     rewind still proceeds; only the file-revert is refused. revertRefused=true signals P4.M2.T2.T1.
+              revertRefused = true;
+              revertClause = `(file revert refused: ${driftedPaths.length} path(s) changed since the turn ended — not overwritten; re-request if intended)`;
+            } else {
+              // PROCEED — dirty guard clean. [P4.M2.T1.S2] perform the working-tree restore + fold the
+              //     RestoreResult into the success text (revertClause) + the marker's revert block (revertBlock)
+              //     + RewindDetails.revertSummary (revertSummaryDetails). store.restore NEVER throws (E27 —
+              //     per-path failures land in failed[]); this lives inside S1's existing inner try/catch (fail-open:
+              //     a hypothetical restore throw degrades to the skip notice + revertBlock stays undefined + the
+              //     rewind STILL completes — E13). CRITICAL #4: restore uses checkpoint.beforeRef (the PRE-span
+              //     state), NOT the dirty-guard afterRef. CRITICAL #3: allowDeleteCreatedFiles is gated INSIDE the
+              //     backend (git.ts ~693 `opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles`) — pass the
+              //     per-call flag verbatim; do NOT read config.revert.allowDeleteCreatedFiles here (double-gate).
+              //     CRITICAL #2: `revert: revertBlock` rides the EXISTING `as RewindMarkerInput` cast (the field IS
+              //     in RewindMarkerInput — no new cast). CRITICAL #7: skipped string[] → boolean for the marker.
+              //     CRITICAL #6: the clause has NO leading space (successText() prepends " ").
+              const restoreResult: RestoreResult = await store.restore(
+                checkpoint.beforeRef,
+                {
+                  revertFileChanges: params.revert_file_changes === true, // CRITICAL #3: no tool-side gate
+                  deleteCreatedFiles: params.delete_created_files === true,
+                },
+              );
+              // CRITICAL #2: the revert block rides the spread into the ORIGINAL marker (persist runs after 6b).
+              revertBlock = {
+                revertedFiles: restoreResult.reverted,
+                deletedFiles: restoreResult.deleted,
+                failedFiles: restoreResult.failed,
+                refusedFiles: restoreResult.refused,
+                skipped: restoreResult.skipped.length > 0, // CRITICAL #7: string[] → boolean
+                backend: store.describe().backend, // "git" | "cas" | "none" — typed match
+              };
+              // Stash the COUNT summary for RewindDetails BEFORE the skipped count is folded into the boolean
+              //     above (the count is lost once folded). Consumed by P4.M2.T2.T1 (the warning reword) so it need
+              //     not re-read the persisted marker.
+              revertSummaryDetails = {
+                reverted: restoreResult.reverted.length,
+                deleted: restoreResult.deleted.length,
+                failed: restoreResult.failed.length,
+                skipped: restoreResult.skipped.length,
+                refused: restoreResult.refused.length,
+                backend: revertBlock.backend,
+              };
+              // CRITICAL #6: NO leading space (successText() does `text += " " + revertClause`). The clause is
+              //     VERBATIM spec/05 §1 step 6b + spec/14 §7.
+              revertClause =
+                `Reverted ${restoreResult.reverted.length} file(s), deleted ${restoreResult.deleted.length}; ` +
+                `${restoreResult.skipped.length + restoreResult.failed.length} skipped/failed, ` +
+                `${restoreResult.refused.length} refused (see log).`;
+            }
+          }
+        }
+      } catch {
+        // CRITICAL #7: E13 fail-open for 6b. A thrown dirtyCheck (network/disk IO) degrades to a SKIP notice
+        //     rather than bubbling to the outer "unexpected error" refusal (which would mislabel a file-revert
+        //     hiccup as a rewind failure). The rewind ALWAYS completes. Only set the notice if no terminal
+        //     branch already produced one (defensive — order-independent).
+        if (!revertClause)
+          revertClause =
+            "(file revert skipped: an error occurred — 0 files reverted)";
+      }
+    }
 
     // (7) persist (step 7 — GOTCHA #1: checkpoint MUST be in the payload even though the frozen
     //     RewindMarkerInput TYPE omits it; the wrapper spread preserves it at runtime. GOTCHA #2:
-    //     excludeToolCallId === toolCallId.)
+    //     excludeToolCallId === toolCallId.) [P4.M2.T1.S2] RELOCATED to AFTER step 6b (was before it in S1) so
+    //     the `revert` field (built in 6b's proceed branch) folds into the ORIGINAL marker entry — the session
+    //     tree is append-only (C7), so an already-persisted marker cannot be amended (no follow-up audit entry).
+    //     CRITICAL #2: `revert: revertBlock` rides the EXISTING `as RewindMarkerInput` cast (the field IS in
+    //     RewindMarkerInput). `revert: undefined` (non-proceed branches) is type-safe; JSON.stringify omits it.
     const payload = {
       granularity,
       options: { protect: config.rewind.protectedRoles },
@@ -692,6 +911,7 @@ async function rewindExecute(
       // `checkpoint` (GOTCHA #1 — spec/04 §3 omits it; it rides the spread). The wrapper's {...data} persists it.
       hideEntryIds,
       checkpoint: params.checkpoint, // GOTCHA #1: persists even when undefined; spec/04 §3 omits it (cast below)
+      revert: revertBlock, // [P4.M2.T1.S2] revert audit block; undefined ⇒ omitted in JSON (non-proceed branches)
     };
     const markerId = appendRewindMarker(pi, ctx, payload as RewindMarkerInput); // cast: frozen type omits checkpoint
     leaveNote(pi, rendered, markerId ?? toolCallId); // GOTCHA #10: entry id; fallback toolCallId
@@ -725,10 +945,20 @@ async function rewindExecute(
         }
         if (Array.isArray(entries)) {
           for (const e of entries) {
-            if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+            if (typeof e !== "object" || e === null || Array.isArray(e))
+              continue;
             try {
-              const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
-              if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+              const ee = e as {
+                type?: unknown;
+                label?: unknown;
+                targetId?: unknown;
+              };
+              if (
+                ee.type === "label" &&
+                ee.label === needle &&
+                typeof ee.targetId === "string" &&
+                ee.targetId.length > 0
+              ) {
                 candidates.add(ee.targetId);
               }
             } catch {
@@ -740,89 +970,14 @@ async function rewindExecute(
         //     ACTUALLY-active targets are cleared — a historical entry already cleared maps to undefined).
         for (const id of candidates) {
           try {
-            if (ctx.sessionManager.getLabel(id) === needle) pi.setLabel(id, undefined);
+            if (ctx.sessionManager.getLabel(id) === needle)
+              pi.setLabel(id, undefined);
           } catch {
             // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
           }
         }
       } catch {
         // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
-      }
-    }
-
-    // (6b) working-tree revert decision tree — v1.2, opt-in (spec/05 §1 step 6b; @14 §6/§7). Runs AFTER marker
-    //      persist (step 7) + checkpoint consumption (step 7b) and BEFORE the mutation warning (step 8). S1 (this
-    //      item, P4.M2.T1.S1) computes the DECISION: gate on config → gate on granularity → resolve the
-    //      RevertCheckpoint from rt.snapshots → run the dirty guard (store.dirtyCheck) against the ledger's
-    //      modified-file set → produce a proceed/refuse/skip decision + the success-text notices for every
-    //      terminal branch. The ACTUAL store.restore + folding the RestoreResult into the marker/success-text is
-    //      P4.M2.T1.S2 (the proceed seam below is a clearly-marked comment for S2 to fill). Best-effort: a 6b
-    //      failure (e.g. a thrown dirtyCheck) degrades to a skip notice; the rewind ALWAYS completes (E13/E27/E30).
-    //      Branch order is LOAD-BEARING (spec/05 §1 step 6b): config → granularity → resolve → guard → proceed.
-    //      The Map keys are "turn" (last_turn) + "ckpt:"+name (checkpoint) — NOT "checkpoint:"+name (the runtime
-    //      docstrings are imprecise; the actual writers are capture.ts + commands.ts).
-    let revertClause = "";
-    let revertRefused = false;
-    const wantRevert = !!(params.revert_file_changes) || !!(params.delete_created_files);
-    if (wantRevert) {
-      try {
-        if (!config.revert.enabled) {
-          // branch (2): disabled in config (layer-1 gate) — append the disabled notice; skip.
-          revertClause = "(file revert requested but disabled in config)";
-        } else if (granularity === "last_tool_call_group") {
-          // branch (3): unsupported granularity — last_tool_call_group hides one tool interaction, not a whole
-          //     turn's file changes; append the granularity-mismatch notice; skip.
-          revertClause =
-            "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn.";
-        } else {
-          // branch (4)+(5)+(6): resolve the checkpoint + run the dirty guard.
-          const store = rt?.store;
-          // CRITICAL #2: the Map keys are "turn" + "ckpt:"+name (NOT "checkpoint:"+name).
-          const key = granularity === "checkpoint" ? `ckpt:${params.checkpoint}` : "turn";
-          const checkpoint = rt?.snapshots?.get(key);
-          if (!store || !checkpoint) {
-            // branch (4): no store (revert disabled at detection) OR no checkpoint for this boundary → skip with
-            //     an honest count (0 reverted); the rewind still proceeds (@14 §6 step 1).
-            revertClause =
-              "(file revert skipped: no working-tree snapshot for this boundary — 0 files reverted)";
-          } else {
-            // CRITICAL #3: affectedPaths = ledger.modifiedFiles (the only deterministic file list available at
-            //     this point — the SnapshotStore exposes no diff/listChanged method). Best-effort approximation
-            //     of "files restore would touch"; documented limitation in the PRP. Passing [] would make git.ts
-            //     trivially return [] (guard always passes), so modifiedFiles (possibly empty) is strictly better.
-            const affectedPaths = ledger.modifiedFiles;
-            // afterRef ?? beforeRef: turn checkpoints get afterRef (set post agent_end); checkpoint-granularity
-            //     checkpoints have NO afterRef (they capture once) ⇒ fall back to beforeRef (spec-sanctioned
-            //     degrade — @14 §6 step 3 "if afterRef exists").
-            const afterRef = checkpoint.afterRef ?? checkpoint.beforeRef;
-            // CRITICAL #4: dirtyCheck is ASYNC (await it). Returns the subset of `paths` that drifted vs afterRef.
-            const driftedPaths = await store.dirtyCheck(afterRef, affectedPaths);
-            if (driftedPaths.length > 0) {
-              // CRITICAL #5: REFUSE THE WHOLE file-revert on ANY drift (not per-path — @14 §6 step 3). The context
-              //     rewind still proceeds; only the file-revert is refused. revertRefused=true signals P4.M2.T2.T1.
-              revertRefused = true;
-              revertClause = `(file revert refused: ${driftedPaths.length} path(s) changed since the turn ended — not overwritten; re-request if intended)`;
-            } else {
-              // PROCEED — dirty guard clean. [P4.M2.T1.S2] does the actual restore here:
-              //   const result = await store.restore(checkpoint.beforeRef, {
-              //     revertFileChanges: !!params.revert_file_changes,
-              //     deleteCreatedFiles: !!params.delete_created_files,
-              //   });
-              //   + fold result into revertClause ("Reverted <X> file(s), deleted <Y>; <Z> skipped/failed, <W> refused (see log).")
-              //     + the marker's revert field (CRITICAL #6: the marker is already persisted at step 7; S2 must
-              //     either re-order persist AFTER restore or append a follow-up audit entry — out of scope here).
-              // S1 only RESOLVES + DIRTY-CHECKS; restore + folding is S2. (No revert clause yet — S2 sets it.)
-              // `store` / `checkpoint` / `affectedPaths` / `afterRef` are in scope here for S2's insertion. The
-              // proceed RevertDecision variant is NOT assigned (CRITICAL #10: avoid an unused variable).
-            }
-          }
-        }
-      } catch {
-        // CRITICAL #7: E13 fail-open for 6b. A thrown dirtyCheck (network/disk IO) degrades to a SKIP notice
-        //     rather than bubbling to the outer "unexpected error" refusal (which would mislabel a file-revert
-        //     hiccup as a rewind failure). The rewind ALWAYS completes. Only set the notice if no terminal
-        //     branch already produced one (defensive — order-independent).
-        if (!revertClause) revertClause = "(file revert skipped: an error occurred — 0 files reverted)";
       }
     }
 
@@ -834,21 +989,35 @@ async function rewindExecute(
       (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
 
     // (9) return success (step 8 — K + K=0 honesty via successText). revertClause threads the 6b terminal-branch
-    //     notices; revertRefused surfaces the refuse flag to logs/audit + P4.M2.T2.T1 (CRITICAL #10: used).
+    //     notices; revertRefused surfaces the refuse flag to logs/audit + P4.M2.T2.T1 (CRITICAL #10: used);
+    //     [P4.M2.T1.S2] revertSummary surfaces the 5-bucket COUNTS + backend on the proceed branch (undefined on
+    //     every non-proceed branch) for the E5 warning reword (P4.M2.T2.T1) + logs/audit.
     const { text } = successText(granularity, k, hasWarning, revertClause);
     return {
       content: [{ type: "text", text }],
-      details: { granularity, k, ledger, hideEntryIds, markerId, revertRefused },
+      details: {
+        granularity,
+        k,
+        ledger,
+        hideEntryIds,
+        markerId,
+        revertRefused,
+        revertSummary: revertSummaryDetails,
+      },
     };
   } catch (e) {
     // Shared tool convention (E13): never throw — return a text result describing the failure.
     // [P4.M1.T2.S3] the refuse() closure is OUT OF SCOPE in this catch → set the flag inline (mirrors refuse()).
     try {
-      if (rt !== null && currentTurnIndex !== null) rt.rewindRefusedTurnIndex = currentTurnIndex;
+      if (rt !== null && currentTurnIndex !== null)
+        rt.rewindRefusedTurnIndex = currentTurnIndex;
     } catch {
       /* E13 — never throw on the flag-set */
     }
-    return refusal(`unexpected error: ${e instanceof Error ? e.message : String(e)}`, granularity);
+    return refusal(
+      `unexpected error: ${e instanceof Error ? e.message : String(e)}`,
+      granularity,
+    );
   }
 }
 
@@ -862,7 +1031,9 @@ async function rewindExecute(
  * index.ts (P1.M7.T1.S1) will do: `pi.registerTool(makeRewindTool(pi));`.
  * Unit tests do: `const tool = makeRewindTool(fakePi);`.
  */
-export function makeRewindTool(pi: ExtensionAPI): ToolDefinition<typeof RewindParams, RewindDetails> {
+export function makeRewindTool(
+  pi: ExtensionAPI,
+): ToolDefinition<typeof RewindParams, RewindDetails> {
   return defineTool({
     name: "mulligan_rewind",
     label: "Mulligan Rewind",
