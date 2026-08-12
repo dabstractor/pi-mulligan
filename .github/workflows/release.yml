@@ -2,9 +2,11 @@ name: Release
 
 # Publishes to npm when a `v*` tag is pushed (or via manual dispatch).
 # The pushed tag IS the source of truth for the version: the workflow
-# reads `vX.Y.Z` off the tag and writes it into package.json before
-# publishing, so you never have to bump package.json by hand — just
-# `git tag vX.Y.Z && git push --tags`.
+# reads `vX.Y.Z` off the tag, writes it into package.json, publishes to
+# npm, and then commits that version bump back to the default branch — so
+# the repo's package.json always matches what's on npm. You never bump it
+# by hand. Just:
+#   git tag vX.Y.Z && git push --tags
 # Requires the `NPM_TOKEN` repo secret (an npm automation or granular
 # publish token). Uses provenance (signed package attestation), so the
 # npm account must have 2FA enabled and the repo must be public.
@@ -16,8 +18,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write   # required for --provenance
+  contents: write  # needed to push the version bump back to the default branch
+  id-token: write  # required for --provenance
 
 concurrency:
   group: release-${{ github.ref }}
@@ -57,3 +59,28 @@ jobs:
         run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Commit version bump to default branch
+        # Tag pushes only (skipped on workflow_dispatch), and only after a
+        # successful publish — so the repo never records a version that
+        # failed to reach npm. The publish step's bump lives on the ephemeral
+        # tag checkout and is discarded, so we re-apply it on the live branch
+        # tip here. Re-runs are a no-op if the bump already landed.
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"   # vX.Y.Z
+          VERSION="${VERSION#v}"               # X.Y.Z
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+          npm version "$VERSION" --no-git-tag-version
+          git add package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "No version change to commit (package.json already at v$VERSION)."
+          else
+            git commit -m "chore(release): v$VERSION"
+            git push origin "$DEFAULT_BRANCH"
+          fi
