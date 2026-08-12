@@ -113,7 +113,7 @@ describe("index.ts extension factory", () => {
     );
   });
 
-  it("arms the 6 event handlers", () => {
+  it("arms the 7 event handlers", () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
 
@@ -121,6 +121,7 @@ describe("index.ts extension factory", () => {
       "agent_end",
       "context",
       "tool_result",
+      "tool_call",
       "turn_end",
       "turn_start",
       "session_start",
@@ -143,6 +144,7 @@ describe("index.ts extension factory", () => {
         "context",
         "session_shutdown",
         "session_start",
+        "tool_call",
         "tool_result",
         "turn_end",
         "turn_start",

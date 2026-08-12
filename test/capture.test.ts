@@ -887,12 +887,15 @@ describe("registerToolCallCapture — arms pi.on('tool_call', toolCallCaptureHan
 // ══════════════════════════════════════════════════════════════════════════════════════════
 
 /**
- * A CasBackend-shaped fake: like makeStore() but also records `notifyBashUsed` calls. The handler casts
- * `rt.store as CasBackend`, so the fake must implement that PUBLIC method (NOT on the SnapshotStore
- * interface — the existing RecordingStore lacks it).
+ * A CasBackend-shaped fake: like makeStore() but also records `notifyBashUsed` + `appendExplicitPath`
+ * calls. The handler casts `rt.store as CasBackend`, so the fake must implement those PUBLIC methods
+ * (NOT on the SnapshotStore interface — the existing RecordingStore lacks them).
  */
-function makeCasStore(): { store: SnapshotStore; calls: string[] } {
+function makeCasStore(
+  opts: { appendThrows?: boolean } = {},
+): { store: SnapshotStore; calls: string[]; appendCalls: string[] } {
   const calls: string[] = [];
+  const appendCalls: string[] = [];
   const store = {
     calls,
     describe() {
@@ -920,8 +923,13 @@ function makeCasStore(): { store: SnapshotStore; calls: string[] } {
     notifyBashUsed(): void {
       calls.push("notifyBashUsed"); // PUBLIC CasBackend method the handler casts to
     },
+    async appendExplicitPath(label: string, path: string): Promise<void> {
+      // [P1.M3.T1.S2 / BUG-003] PUBLIC CasBackend method the handler casts to (pre-write capture).
+      if (opts.appendThrows) throw new Error("appendExplicitPath boom");
+      appendCalls.push(`${label}:${path}`);
+    },
   };
-  return { store: store as unknown as SnapshotStore, calls };
+  return { store: store as unknown as SnapshotStore, calls, appendCalls };
 }
 
 /** Synthetic ToolCallEvent with a controllable toolName + input. */
@@ -1197,5 +1205,223 @@ describe("toolCallCaptureHandler — inert tools (no path push, no bash warning)
     ).resolves.toBeUndefined();
     expect(rt.pendingExplicitPaths).toEqual([]); // no path pushed
     expect(calls).toEqual([]); // no notifyBashUsed, no capture
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// [P1.M3.T1.S2 / BUG-003] toolCallCaptureHandler — pre-write capture (appendExplicitPath)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("toolCallCaptureHandler — [P1.M3.T1.S2] pre-write capture via appendExplicitPath", () => {
+  beforeEach(() => {
+    // explicit-paths mode + revert on (default beforeEach enables revert; set the mode)
+    setConfig({ revert: { enabled: true, nonGitMode: "explicit-paths" } });
+  });
+
+  it("calls (rt.store as CasBackend).appendExplicitPath('turn', path) for a 'write' event (ALSO pushes)", async () => {
+    const { store, appendCalls } = makeCasStore();
+    const rt = getRuntime("write-cap");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "write-cap" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual(["src/a.ts"]); // push happened
+    expect(appendCalls).toEqual(["turn:src/a.ts"]); // pre-write capture happened
+  });
+
+  it("calls appendExplicitPath('turn', path) for an 'edit' event (ALSO pushes)", async () => {
+    const { store, appendCalls } = makeCasStore();
+    const rt = getRuntime("edit-cap");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("edit", { path: "src/b.ts", edits: [{ oldText: "x", newText: "y" }] }),
+      makeCtx({ sessionId: "edit-cap" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual(["src/b.ts"]);
+    expect(appendCalls).toEqual(["turn:src/b.ts"]);
+  });
+
+  it("does NOT call appendExplicitPath when backend === 'git' (backend gate fires before the branch)", async () => {
+    // RecordingStore (git) has no appendExplicitPath; a call would throw. backend gate prevents it.
+    const store = makeStore({ backend: "git" });
+    const rt = getRuntime("write-git");
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("write", { path: "src/a.ts" }),
+        makeCtx({ sessionId: "write-git" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(store.calls).toEqual([]); // no capture, no append
+  });
+
+  it("does NOT call appendExplicitPath when nonGitMode === 'cas' (mode gate)", async () => {
+    setConfig({ revert: { enabled: true, nonGitMode: "cas" } }); // override beforeEach
+    const { store, appendCalls } = makeCasStore();
+    const rt = getRuntime("write-cas-mode");
+    rt.store = store;
+    await toolCallCaptureHandler(
+      makeToolCallEvent("write", { path: "src/a.ts" }),
+      makeCtx({ sessionId: "write-cas-mode" }),
+    );
+    expect(appendCalls).toEqual([]); // mode gate fired before the write/edit branch
+  });
+
+  it("fail-open: a THROWING appendExplicitPath is caught — no throw escapes, error logged (E27)", async () => {
+    setLogFile(file);
+    const { store } = makeCasStore({ appendThrows: true });
+    const rt = getRuntime("throw-append");
+    rt.store = store;
+    await expect(
+      toolCallCaptureHandler(
+        makeToolCallEvent("write", { path: "src/a.ts" }),
+        makeCtx({ sessionId: "throw-append" }),
+      ),
+    ).resolves.toBeUndefined(); // never rejects
+    const lines = readLogLines();
+    expect(
+      lines.some((l) => l.event === "capture.tool_call" && l.level === "error"),
+    ).toBe(true);
+    // the push happens BEFORE the await (push-then-await order) → still populated despite the throw
+    expect(rt.pendingExplicitPaths).toEqual(["src/a.ts"]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// [P1.M3.T1.S2 / BUG-003] turnStartCaptureHandler — clears the accumulator
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("turnStartCaptureHandler — [P1.M3.T1.S2] clears rt.pendingExplicitPaths (fresh per turn)", () => {
+  it("resets a stale rt.pendingExplicitPaths to [] at turn_start", async () => {
+    const store = makeStore({ captureRef: "turn-ref" });
+    const rt = getRuntime("clear");
+    rt.store = store;
+    rt.pendingExplicitPaths = ["stale.ts", "more.ts"]; // seed stale accumulator
+    await turnStartCaptureHandler(
+      makeEvent(5),
+      makeCtx({ sessionId: "clear" }),
+    );
+    expect(rt.pendingExplicitPaths).toEqual([]); // cleared — fresh per-turn
+  });
+
+  it("clears BEFORE capture('turn') runs (capture stays argless — empty placeholder)", async () => {
+    const store = makeStore({ captureRef: "turn-ref" });
+    const rt = getRuntime("clear-order");
+    rt.store = store;
+    rt.pendingExplicitPaths = ["stale.ts"];
+    await turnStartCaptureHandler(
+      makeEvent(7),
+      makeCtx({ sessionId: "clear-order" }),
+    );
+    // capture was called with ONLY the label (1-arg — the empty placeholder the hooks append to)
+    expect(store.calls).toContain("capture:turn");
+    expect(store.calls.some((c) => c.startsWith("capture:turn"))).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// [P1.M3.T1.S2 / BUG-003] agentEndCaptureHandler — threads pendingExplicitPaths (cas backend)
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A recording fake that captures the FULL capture() arg list (label + optional explicitPaths) so the
+ * agent_end threading test can assert whether the 2nd arg was passed + its value. The existing
+ * RecordingStore only records `capture:${label}` (1-arg). This records `{ label, explicitPaths }`.
+ */
+function makeThreadStore(
+  backend: "git" | "cas",
+): {
+  store: SnapshotStore;
+  captureCalls: Array<{ label: string; explicitPaths?: string[] }>;
+} {
+  const captureCalls: Array<{ label: string; explicitPaths?: string[] }> = [];
+  const store = {
+    describe() {
+      return { backend } as { backend: "git" | "cas" | "none" };
+    },
+    async capture(label: string, explicitPaths?: string[]): Promise<string | null> {
+      captureCalls.push({ label, explicitPaths });
+      return "after-ref";
+    },
+    async gc(): Promise<void> {
+      /* no-op */
+    },
+    async dirtyCheck(): Promise<string[]> {
+      return [];
+    },
+    async restore(): Promise<import("../src/snapshot/store.js").RestoreResult> {
+      return { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+    },
+    async has(): Promise<boolean> {
+      return true;
+    },
+    async retire(): Promise<void> {
+      /* no-op */
+    },
+  };
+  return { store: store as unknown as SnapshotStore, captureCalls };
+}
+
+describe("agentEndCaptureHandler — [P1.M3.T1.S2] threads pendingExplicitPaths for cas", () => {
+  it("passes rt.pendingExplicitPaths as the 2nd arg to capture('turn-after') for the cas backend", async () => {
+    const { store, captureCalls } = makeThreadStore("cas");
+    const rt = getRuntime("thread-cas");
+    rt.store = store;
+    rt.pendingExplicitPaths = ["src/a.ts", "src/b.ts"];
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "cas",
+      beforeRef: "turn",
+      turnIndex: 0,
+      ts: 0,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "thread-cas" }),
+    );
+    expect(captureCalls).toEqual([
+      { label: "turn-after", explicitPaths: ["src/a.ts", "src/b.ts"] },
+    ]);
+    // the existing "turn" checkpoint's afterRef was set
+    expect(rt.snapshots?.get("turn")?.afterRef).toBe("after-ref");
+  });
+
+  it("does NOT pass a 2nd arg to capture('turn-after') for the git backend (stays 1-param)", async () => {
+    const { store, captureCalls } = makeThreadStore("git");
+    const rt = getRuntime("thread-git");
+    rt.store = store;
+    rt.pendingExplicitPaths = ["src/a.ts"]; // populated but should be IGNORED for git
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "git",
+      beforeRef: "turn",
+      turnIndex: 0,
+      ts: 0,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "thread-git" }),
+    );
+    expect(captureCalls).toEqual([{ label: "turn-after" }]); // NO explicitPaths key (1-arg)
+  });
+
+  it("passes [] when rt.pendingExplicitPaths is undefined (nullish-coalesce fallback)", async () => {
+    const { store, captureCalls } = makeThreadStore("cas");
+    const rt = getRuntime("thread-undefined");
+    rt.store = store;
+    rt.pendingExplicitPaths = undefined; // defensive: runtime never sets it undefined, but guard it
+    rt.snapshots?.set("turn", {
+      label: "turn",
+      backend: "cas",
+      beforeRef: "turn",
+      turnIndex: 0,
+      ts: 0,
+    });
+    await agentEndCaptureHandler(
+      makeAgentEndEvent(),
+      makeCtx({ sessionId: "thread-undefined" }),
+    );
+    expect(captureCalls).toEqual([{ label: "turn-after", explicitPaths: [] }]);
   });
 });

@@ -13,6 +13,7 @@ import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
 import {
   registerTurnStartCapture,
   registerAgentEndCapture,
+  registerToolCallCapture,
   gcTurnSnapshots,
   rebuildCheckpointSnapshots, // [P1.M2.T1.S2 / BUG-002] shared rebuild helper (session_start + test)
 } from "./capture.js";
@@ -91,6 +92,9 @@ export default function (pi: ExtensionAPI): void {
   // GC + capture("turn"). Self-guards on revert.enabled (fail-open).
   registerAgentEndCapture(pi); // pi.on("agent_end", …) — v1.2 working-tree revert: capture("turn-after")
   // for the dirty guard (E30). Self-guards on revert.enabled (fail-open).
+  registerToolCallCapture(pi); // [P1.M3.T1.S2 / BUG-003] pi.on("tool_call", …) — capture pre-write file
+  // state in explicit-paths non-git mode (Pi awaits the hook before the tool runs — spec §4.2 line 127).
+  // Self-guards on revert.enabled + backend==='cas' + nonGitMode==='explicit-paths' (fail-open).
 
   // 6. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
   //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory

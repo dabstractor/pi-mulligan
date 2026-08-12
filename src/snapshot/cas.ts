@@ -640,6 +640,107 @@ export class CasBackend implements SnapshotStore {
   }
 
   /**
+   * [P1.M3.T1.S2 / spec/14 §4.2 / BUG-003] Append ONE workspace-rel file's pre-write state to the
+   * manifest at `manifestPath(label)` (the "turn" beforeRef placeholder the turn_start capture wrote).
+   * Called by the P3 `tool_call` capture hook (capture.ts toolCallCaptureHandler) BEFORE each
+   * `write`/`edit` tool runs (Pi AWAITS the hook in preflight — spec §4.2 line 127: "Pi preflights
+   * sibling tool_calls sequentially then runs them concurrently" ⇒ the file is still in its pre-write
+   * state when this reads it — race-safe). This is the BUG-003 fix: the naive "pass
+   * `pendingExplicitPaths` to `capture('turn')`" is insufficient because at turn_start the
+   * accumulator is EMPTY (no tool ran yet) ⇒ an empty beforeRef ⇒ restore reverts nothing. The pre-write
+   * content is observable ONLY inside this hook, so the hook itself must snapshot each path via this
+   * method as the tool fires.
+   *
+   * Mirrors {@link captureExplicitPaths}' per-file capture logic EXACTLY (same ordering + same entry
+   * shapes so {@link restore} treats them identically):
+   *   - `isDangerousWorkspaceRel(path)` ⇒ silent skip (safety floor — .git/.pi/node_modules/`..`/absolute).
+   *     NOTE: this catches `..`/absolute escapes BEFORE `resolveSafeWorkspacePath` runs, so an escape
+   *     path is a clean no-op (not a throw). `resolveSafeWorkspacePath` is belt-and-suspenders for any
+   *     path that slips past the syntactic check; if it ever throws, the caller's try/catch handles it.
+   *   - stat ENOENT ⇒ `{hash:"", size:0, mtime:0, existed:false}` (the upcoming write will CREATE it —
+   *     no blob; restore DELETES it under deleteCreatedFiles+allowDeleteCreatedFiles).
+   *   - oversize (`> maxFileBytes`) ⇒ skip + warn (fail-closed — never silently claim restorable); NO entry.
+   *   - else `readFile` → `hashContent` → `storeBlob` (deduped) → `{hash, size, mtime, existed:true}`
+   *     (restore readBlob(hash) + writeFile reverts it).
+   *
+   * CREATE-OR-APPEND: the manifest at `manifestPath(label)` may be ABSENT (turn_start capture('turn')
+   * returned null on a cap/error) ⇒ read+parse; on miss/corrupt start from a fresh empty manifest
+   * `{version:1, label, turnIndex:0, ts:Date.now(), files:{}}`, then append. This makes beforeRef
+   * (the label "turn") resolve to the SAME manifest file the hooks mutate during the turn.
+   *
+   * IDEMPOTENT per (label, path) — FIRST-WRITE-WINS: if `files[path]` already has an entry, RETURN
+   * without overwriting. A path written twice in a turn: write-2's hook fires with write-1's content
+   * on disk; overwriting would LOSE the true pre-turn state (mirrors `captureExplicitPaths`' `seen`
+   * Set dedupe).
+   *
+   * MUTEX-SERIALIZED (spec §4.3: a single mutex per store serializes ALL store ops). Pattern:
+   * `const release = await this.mutex.acquire(); try{…}finally{release();}` — `release()` in the
+   * `finally` is mandatory (AsyncMutex GOTCHA #5 — forgetting it deadlocks every later acquire).
+   *
+   * DOES NOT BUMP `capturesThisTurn`: this appends to an EXISTING manifest (the "turn" placeholder
+   * turn_start wrote), NOT a new snapshot. `capturesThisTurn` is the maxSnapshotsPerTurn counter and
+   * is (a pre-existing latent bug — see GOTCHA #3 in the PRP) NEVER reset at the turn boundary, so
+   * every bump inches toward the 64 cap → eventual capture starvation. The turn_start capture('turn')
+   * + agent_end capture('turn-after') each bump it once (2/turn) — that is existing behavior, leave it.
+   *
+   * PUBLIC so the P3 `tool_call` hook calls it on a CasBackend-typed ref (a SnapshotStore-typed ref
+   * cannot reach it — the explicit-paths capture is CasBackend-specific; the hook casts
+   * `store as CasBackend`, like {@link notifyBashUsed}). @14 §4.2 + §4.3.
+   *
+   * @param label the capture-namespace key (the hook passes "turn" — the beforeRef placeholder).
+   * @param path  the workspace-rel path (the write/edit tool's `input.path`) to snapshot pre-write.
+   */
+  async appendExplicitPath(label: string, path: string): Promise<void> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    try {
+      if (isDangerousWorkspaceRel(path)) return; // safety floor — .git/.pi/node_modules/escape
+      const abs = resolveSafeWorkspacePath(this.cwd, path); // THROWS on escape ⇒ caller's try/catch
+      // create-or-append: load the existing manifest (may be absent if turn_start capture returned null)
+      let manifest: CasManifest;
+      try {
+        const buf = await this.fs.readFile(this.manifestPath(label));
+        manifest = parseManifest(buf.toString("utf8")); // throws on bad version ⇒ fresh start below
+      } catch {
+        manifest = { version: 1, label, turnIndex: 0, ts: Date.now(), files: {} };
+      }
+      // IDEMPOTENT — first-write-wins (a double-write turn must keep the TRUE pre-turn state)
+      if (manifest.files[path] !== undefined) return;
+      // per-file capture — mirror captureExplicitPaths exactly
+      let st: { size: number; mtimeMs: number };
+      let existed = true;
+      try {
+        st = await this.fs.stat(abs);
+      } catch {
+        // file does not exist yet (the upcoming write will CREATE it) ⇒ record absence, NO blob
+        existed = false;
+      }
+      if (existed) {
+        if (st!.size > this.cfg.maxFileBytes) {
+          // fail-closed (§4.3) — skip+warn, NO entry (never silently claim restorable)
+          console.warn(
+            `[mulligan] snapshot.appendExplicitPath: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${path}`,
+          );
+          return;
+        }
+        const content = await this.fs.readFile(abs);
+        const hash = await this.hashContent(content);
+        await this.storeBlob(content); // deduped via access
+        manifest.files[path] = { hash, size: st!.size, mtime: st!.mtimeMs, existed: true };
+      } else {
+        manifest.files[path] = { hash: "", size: 0, mtime: 0, existed: false };
+      }
+      await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
+      await this.fs.writeFile(
+        this.manifestPath(label),
+        Buffer.from(serializeManifest(manifest), "utf8"),
+      );
+      // NOTE: deliberately NO this.capturesThisTurn++ (appends to an existing manifest, not a new snapshot — GOTCHA #2).
+    } finally {
+      release(); // AsyncMutex GOTCHA #5 — never forget
+    }
+  }
+
+  /**
    * Return the subset of `paths` whose CURRENT work-tree content differs from the `afterRef`
    * snapshot — files that drifted AFTER the agent's turn (a human/other-process edit since
    * `agent_end`). spec/14 §6 step 3 (the dirty guard REFUSE), §2 (the interface). The restore

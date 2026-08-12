@@ -164,6 +164,7 @@ export async function turnStartCaptureHandler(
     if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
     const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
     if (!rt.store) return; // store not created (config off / T2.S1 not wired)
+    rt.pendingExplicitPaths = []; // [P1.M3.T1.S2 / BUG-003] fresh per-turn accumulator (clear before capture)
     // (1) GC FIRST — prompt-boundary reclamation (drop all turn/* refs + reclaim + clear in-memory).
     await gcTurnSnapshots(rt);
     // (2) THEN CAPTURE — snapshot the working set now → the turn's before-ref.
@@ -236,7 +237,18 @@ export async function agentEndCaptureHandler(
     if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
     const rt = getRuntime(sessionId); // STRING arg, not ctx (NOT ctx.sessionId)
     if (!rt.store) return; // store not created (config off / T2.S1 not wired)
-    const afterRef = await rt.store.capture("turn-after");
+    // [P1.M3.T1.S2 / BUG-003] thread rt.pendingExplicitPaths into capture("turn-after") for the cas
+    // backend (the widening is CasBackend-specific — SnapshotStore.capture is 1-param). At agent_end
+    // the accumulator holds ALL paths written this turn and the files are at their POST-write state —
+    // exactly the afterRef (dirty-guard baseline) we want. git/none stay 1-param (the arg is ignored).
+    const backend = rt.store.describe().backend;
+    const afterRef =
+      backend === "cas"
+        ? await (rt.store as CasBackend).capture(
+            "turn-after",
+            rt.pendingExplicitPaths ?? [],
+          )
+        : await rt.store.capture("turn-after");
     if (afterRef) {
       // MUTATE the existing "turn" checkpoint in place (spec/14 §5: the after-ref rides the same
       // RevertCheckpoint the turn_start before-ref lives on). Do NOT Map.set a replacement — held
@@ -311,12 +323,14 @@ export function registerAgentEndCapture(pi: ExtensionAPI): void {
  * the time the handler reaches this call it has ALREADY gated nonGitMode, so the warning WILL fire; the
  * handler does NOT replicate those guards (CasBackend owns them).
  *
- * SCOPE NOTE: this handler is registered by `registerToolCallCapture` below, which index.ts step 5 will
- * call once at startup — but NOT in S1. S1 is PRODUCER-ONLY and stays DORMANT until S2 (a) wires the
- * registration, (b) threads `rt.pendingExplicitPaths` into the capture("turn")/capture("turn-after") calls,
- * and (c) clears the accumulator at the next turn_start. Until S2, the accumulator is populated here but
- * never consumed → captureExplicitPaths still loops [] and writes an empty manifest (the current pre-fix
- * behavior). So S1 alone has NO user-visible effect.
+ * SCOPE NOTE: this handler is registered by `registerToolCallCapture` below, which index.ts step 5
+ * calls once at startup (S2 wired it). S2 also (a) snapshots the pre-write file state via
+ * `(rt.store as CasBackend).appendExplicitPath("turn", path)` (the BUG-003 fix — captureExplicitPaths
+ * at turn_start would loop an empty accumulator; the pre-write content is observable ONLY here, so
+ * the hook captures each path's current state before the tool mutates it), (b) threads
+ * `rt.pendingExplicitPaths` into `capture("turn-after", …)` at agent_end, and (c) clears the
+ * accumulator at the next turn_start. Until S3's end-to-end integration test, the mechanism is proven
+ * via the appendExplicitPath unit test (an existing-file capture ⇒ a restore-shaped manifest entry).
  *
  * @param event the ToolCallEvent (`{ type:"tool_call"; toolCallId; toolName; input }`). `input` shape varies
  *   by toolName (Write/EditToolInput carry a `path`; BashToolInput does not).
@@ -335,13 +349,22 @@ export async function toolCallCaptureHandler(
     const backend = rt.store.describe().backend;
     if (backend !== "cas") return; // explicit-paths is CasBackend-specific (skips git + none)
     if (getConfig().revert.nonGitMode !== "explicit-paths") return; // 'cas' mode won't consume the paths
-    // ── write/edit: accumulate the path BEFORE the tool runs (spec/14 §4.2) ──
+    // ── write/edit: accumulate the path + snapshot its PRE-WRITE state BEFORE the tool runs ──
+    // (spec/14 §4.2 line 127: Pi AWAITS this hook in preflight before the tool runs ⇒ the file is
+    // still in its pre-write state here — race-safe.)
     if (event.toolName === "write" || event.toolName === "edit") {
       // `===` is runtime-correct but does NOT narrow event.input in TS (CustomToolCallEvent.toolName is
       // `string`, overlapping all literals) → defensive cast + typeof guard (CRITICAL #1 / Pattern A).
       const path = (event.input as { path?: string }).path;
       if (typeof path === "string" && path.length > 0) {
         rt.pendingExplicitPaths?.push(path); // S2 threads rt.pendingExplicitPaths into capture()
+        // [P1.M3.T1.S2 / BUG-003] snapshot the path's PRE-WRITE state BEFORE the tool runs (Pi awaits
+        // this hook in preflight — spec §4.2 line 127). appendExplicitPath appends to the "turn"
+        // beforeRef manifest (the empty placeholder turn_start wrote) so restore can revert it.
+        // appendExplicitPath is CasBackend-specific (NOT on SnapshotStore) ⇒ cast (S1 added the type import).
+        // FAIL-OPEN (E27): a throw (escape path / fs error) is caught by the outer try/catch → log +
+        // return; the tool_call is NEVER blocked — the path simply won't be reverted (best-effort).
+        await (rt.store as CasBackend).appendExplicitPath("turn", path);
       }
       return;
     }

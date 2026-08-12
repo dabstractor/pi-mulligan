@@ -113,14 +113,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Major Fix — Explicit-Paths Non-Git Mode Capture (BUG-003)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Register a tool_call hook that, when config.revert.enabled and the backend is CasBackend in explicit-paths mode, collects write/edit tool paths and feeds them to captureExplicitPaths. Currently no tool_call hook is registered and every capture call passes no explicitPaths, so explicit-paths mode always writes empty manifests and file revert is a no-op.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Register tool_call hook and thread explicit paths through capture",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Create a tool_call capture hook in capture.ts that collects write/edit paths per-turn into SessionRuntime. Register the hook in index.ts. Thread the collected paths as the second arg to rt.store.capture('turn') and rt.store.capture('turn-after'). Clear the accumulator at turn_start. Add the explicit-paths integration test.",
               "subtasks": [
                 {
@@ -142,7 +142,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Register tool_call hook in index.ts + thread explicitPaths through capture calls + clear accumulator at turn_start",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -159,7 +159,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S3",
                   "title": "Add explicit-paths integration test verifying write/edit file revert in non-git mode",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2"

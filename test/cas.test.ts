@@ -1574,3 +1574,151 @@ describe("CasBackend.gc — prompt-boundary namespace-delete + mark-sweep (spec/
     expect(state.manifestPresent("turn")).toBe(false);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-003]
+// Create-or-append ONE workspace-rel file's pre-write state to the manifest at manifestPath(label).
+// Mirrors captureExplicitPaths' per-file capture EXACTLY. The P3 tool_call hook casts the store to
+// CasBackend to call this BEFORE each write/edit tool runs (Pi awaits the hook in preflight — the
+// file is still in its pre-write state). Mutex-serialized; idempotent per (label, path); does NOT
+// bump capturesThisTurn. Uses the makeTreeBackend DI fake (TreeFs working-tree + blob/manifest store).
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-003]", () => {
+  /** Helper: read + parse the manifest at <storage>/manifests/<label>.json via the fake fs. */
+  async function readManifest(fakeFs: CasFs, storageDir: string, label: string): Promise<CasManifest> {
+    const buf = await fakeFs.readFile(join(storageDir, "manifests", `${label}.json`));
+    return parseManifest(buf.toString("utf8"));
+  }
+
+  it("captures an EXISTING file's pre-write state: {hash,size,mtime,existed:true} + stores the blob", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const content = Buffer.from("A0");
+    const expectedHash = createHash("sha256").update(content).digest("hex");
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "src/a.ts": { content, mtimeMs: 1234 },
+    });
+    await cb.appendExplicitPath("turn", "src/a.ts");
+    const m = await readManifest(fakeFs, storage, "turn");
+    const entry = m.files["src/a.ts"];
+    expect(entry).toBeDefined();
+    expect(entry).toEqual({ hash: expectedHash, size: 2, mtime: 1234, existed: true });
+    // the blob was stored (accessible via the fake)
+    const blobBuf = await fakeFs.readFile(`${storage}/blobs/${expectedHash.slice(0, 2)}/${expectedHash}`);
+    expect(blobBuf.equals(content)).toBe(true);
+  });
+
+  it("captures a NON-EXISTENT file (ENOENT): {hash:'',size:0,mtime:0,existed:false} + NO blob", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    // empty tree — src/created.ts does NOT exist yet (the upcoming write will create it)
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {});
+    await cb.appendExplicitPath("turn", "src/created.ts");
+    const m = await readManifest(fakeFs, storage, "turn");
+    expect(m.files["src/created.ts"]).toEqual({
+      hash: "",
+      size: 0,
+      mtime: 0,
+      existed: false,
+    });
+  });
+
+  it("skips an OVERSIZE file: NO manifest written, NO blob (fail-closed)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const big = Buffer.from("x".repeat(100));
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "big.ts": { content: big, mtimeMs: 1 },
+    }, { maxFileBytes: 10 }); // 100-byte file > 10-byte cap
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await cb.appendExplicitPath("turn", "big.ts");
+    warnSpy.mockRestore();
+    // fail-closed skip returns BEFORE writing the manifest → NO manifest file was created
+    await expect(fakeFs.readFile(join(storage, "manifests/turn.json"))).rejects.toThrow();
+  });
+
+  it("skips a DANGEROUS path (.git/config): NO entry, no throw, no fs read of the real path", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb } = makeTreeBackend(cwd, storage, {});
+    // must NOT throw + must NOT add an entry. The manifest file won't be written (nothing to append).
+    await expect(cb.appendExplicitPath("turn", ".git/config")).resolves.toBeUndefined();
+  });
+
+  it("is IDEMPOTENT per (label, path): a 2nd call is a no-op (first-write-wins)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs, readCalls } = makeTreeBackend(cwd, storage, {
+      "src/a.ts": { content: Buffer.from("original"), mtimeMs: 100 },
+    });
+    await cb.appendExplicitPath("turn", "src/a.ts");
+    const m1 = await readManifest(fakeFs, storage, "turn");
+    const entry1 = m1.files["src/a.ts"];
+    // simulate the tool mutating the file's working-tree content (write-2 fires with write-1 on disk,
+    // but the FIRST appendExplicitPath already captured the true pre-turn state)
+    const readsBefore = readCalls.size;
+    await cb.appendExplicitPath("turn", "src/a.ts"); // 2nd call — should be a no-op
+    const m2 = await readManifest(fakeFs, storage, "turn");
+    // the entry is UNCHANGED (first-write-wins preserves the true pre-turn state)
+    expect(m2.files["src/a.ts"]).toEqual(entry1);
+    // the 2nd call did NOT re-read the file content (idempotent early-return on files[path] !== undefined)
+    expect(readCalls.size).toBe(readsBefore);
+    expect(Object.keys(m2.files)).toHaveLength(1); // still ONE entry
+  });
+
+  it("CREATE-OR-APPEND: appends to an EXISTING manifest without overwriting other entries", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "src/x.ts": { content: Buffer.from("x-content"), mtimeMs: 10 },
+      "src/y.ts": { content: Buffer.from("y-content"), mtimeMs: 20 },
+    });
+    // first append — captures x
+    await cb.appendExplicitPath("turn", "src/x.ts");
+    const m1 = await readManifest(fakeFs, storage, "turn");
+    expect(Object.keys(m1.files)).toEqual(["src/x.ts"]);
+    // second append — appends y WITHOUT losing x
+    await cb.appendExplicitPath("turn", "src/y.ts");
+    const m2 = await readManifest(fakeFs, storage, "turn");
+    expect(Object.keys(m2.files).sort()).toEqual(["src/x.ts", "src/y.ts"]);
+    expect(m2.files["src/x.ts"]).toEqual(m1.files["src/x.ts"]); // x unchanged
+  });
+
+  it("skips a `..` escape path SILENTLY (isDangerousWorkspaceRel fires BEFORE resolveSafeWorkspacePath): NO entry, no throw", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {});
+    // `..` is caught by isDangerousWorkspaceRel (the safety floor runs FIRST) → silent return, no throw.
+    // (A tool_call hook with an escape path is fail-open: the handler's try/catch also covers a throw,
+    // but the dangerous-path check makes it a clean no-op instead.)
+    await expect(cb.appendExplicitPath("turn", "../escape")).resolves.toBeUndefined();
+    // NO manifest file was written (nothing appended)
+    await expect(fakeFs.readFile(join(storage, "manifests/turn.json"))).rejects.toThrow();
+  });
+
+  it("does NOT bump capturesThisTurn: a subsequent capture() is NOT starved", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb } = makeTreeBackend(cwd, storage, {
+      "src/a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
+    }, { maxSnapshotsPerTurn: 2 }); // tight cap so starvation would show
+    // MANY appendExplicitPath calls — if they bumped the counter, capture() would starve after 2.
+    for (let i = 0; i < 10; i++) {
+      await cb.appendExplicitPath("turn", `src/file${i}.ts`); // nonexistent paths → existed:false entries
+    }
+    // a subsequent capture() must STILL succeed (the counter was NOT bumped by the 10 appends)
+    const ref = await cb.capture("turn-after");
+    expect(ref).toBe("turn-after");
+  });
+
+  it("acquires + releases the mutex (a subsequent op is NOT deadlocked)", async () => {
+    const cwd = "/ws";
+    const storage = "/store";
+    const { cb } = makeTreeBackend(cwd, storage, {});
+    await cb.appendExplicitPath("turn", "src/a.ts");
+    // if appendExplicitPath forgot release(), this capture() would hang → test timeout (not a clean fail)
+    const ref = await cb.capture("turn-after");
+    expect(ref).toBe("turn-after");
+  });
+});
