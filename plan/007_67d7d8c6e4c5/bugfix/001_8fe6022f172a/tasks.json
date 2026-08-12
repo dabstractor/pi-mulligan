@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "PRD Divergence Remediation — pi-mulligan v1.1 Nudge/Audit/Guard Layer",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Remediate the 4 PRD divergences found in the pi-mulligan v1.1 validation pass. All 4 are in the nudge/audit/guard layer — none affect core soft-delete correctness or cause data loss. The core rewind/shrink/cancel/checkpoint/banner mechanisms are verified correct (1042 tests pass). Fixes: BUG-001 (driftThresholdTokens reconciliation), BUG-002 (high-water nudge awareness-only text), BUG-003 (audit report checkpoint annotation), BUG-004 (rewind depth guard cancel-exclusion). Research findings stored in plan/007_67d7d8c6e4c5/bugfix/001_8fe6022f172a/architecture/.",
       "milestones": [
         {
@@ -70,7 +70,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor Bug Fixes — audit checkpoint annotation + rewind depth guard cancel-exclusion",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the 2 Minor-severity divergences. BUG-003: add the required '(user-set)' annotation to the audit report checkpoint clause (spec/13 §4 step 3) and singularize the count. BUG-004: update countRewindMarkers to exclude cancelled markers, mirroring the BUG-005 cancel-exclusion pattern already in countRetriesAtLatestPrompt, so the depth guard honors spec/05 §1 step 4 'count active' and the cancel-then-retry workflow is not blocked.",
           "tasks": [
             {
@@ -102,14 +102,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "BUG-004 — Exclude cancelled markers from rewind depth guard (countRewindMarkers)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "countRewindMarkers (src/tools/rewind.ts:204-220) counts ALL mulligan:rewind entries without excluding those retired by a mulligan:cancel, contradicting spec/05 §1 step 4 'count active.' The sibling countRetriesAtLatestPrompt ALREADY excludes cancelled rewinds (BUG-005 fix), making the two guards internally inconsistent. An agent that creates 5 rewinds, cancels all 5 (0 active), and attempts a 6th is incorrectly refused with a misleading '5 active rewind marker(s)' message, blocking the cancel-then-retry workflow.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add cancel-exclusion to countRewindMarkers, fix stale comments, add cancel-then-retry regression test",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/007_67d7d8c6e4c5/bugfix/001_8fe6022f172a/architecture/bug_analysis.md §BUG-004. The countRewindMarkers function is at src/tools/rewind.ts:204-220 (module-private, tested indirectly via tool behavior). It currently scans ALL entries for type==='custom' && customType==='mulligan:rewind' and returns the count — NEVER checking for mulligan:cancel entries. Its stale comment (line 199-203) says 'Markers are permanent (never cleared), so ALL persisted rewind markers count toward maxDepth' — this is pre-E21 reasoning; markers ARE now retractable via mulligan_cancel. The EXACT pattern to mirror is in countRetriesAtLatestPrompt (rewind.ts:270-340, the BUG-005 fix): it scans for mulligan:cancel entries, collects data.targetId into a Set<string> (cancelledRewindIds), then skips any mulligan:rewind whose data.id is in that Set. IMPORTANT DIFFERENCE: countRewindMarkers scans the ENTIRE entry list (cumulative depth guard), so the cancel scan must also cover ALL entries (not just post-latest-prompt like countRetriesAtLatestPrompt does). The depth guard is called at rewind.ts:525. The refusal text at line 528 reports '${depth} active rewind marker(s)' — with the fix, depth will correctly exclude cancelled markers. The filter.ts readMarkers cancelledIds mechanism (filter.ts:101-205) is the canonical version of this pattern.\n2. INPUT: ctx.sessionManager.getEntries() returns the full entry list. Entries with type==='custom' && customType==='mulligan:rewind' are rewind markers (data.id is the uuid). Entries with type==='custom' && customType==='mulligan:cancel' are cancel entries (data.targetId is the uuid of the retired marker). A rewind is ACTIVE iff its data.id is NOT in the set of cancelled targetIds.\n3. LOGIC: (a) In countRewindMarkers, add a FIRST pass over ALL entries to collect mulligan:cancel data.targetId values into a Set<string> (cancelledRewindIds). Read targetId defensively: typeof string && length > 0. Wrap each entry access in try/catch (never throw — E13). (b) In the SECOND pass (the existing rewind count loop), skip any mulligan:rewind entry whose data.id (read defensively) is in cancelledRewindIds. A rewind with an unreadable/missing data.id is COUNTED (conservative: never exclude on bad data — matches countRetriesAtLatestPrompt's polarity). (c) Update the stale comment at lines 199-203: remove 'Markers are permanent (never cleared)' and explain cancelled markers are excluded per spec/05 §1 step 4 'count active' (reference the E21 cancel mechanism and the BUG-005 sibling fix in countRetriesAtLatestPrompt). (d) Update the depth-guard comment at line 524 ('Markers are permanent → ALL persisted rewind markers count toward maxDepth') to reflect the cancel-exclusion. (e) Add a NEW regression test: build entries with 5 mulligan:rewind markers (each with a unique data.id) + 5 mulligan:cancel entries (each with data.targetId matching one rewind id) + a user message entry. Call makeRewindTool(pi).execute(...) with valid params → the rewind SUCCEEDS (0 active markers, depth guard passes). Use existing test helpers: customEntry() and rewindEntryData() from test/tools/rewind.test.ts. Build cancel entries as customEntry('mulligan:cancel', { targetId: 'rew-N' }). Mirror the structure of the BUG-005 cancel-exclusion test at rewind.test.ts:1133-1161. (f) Verify existing depth guard tests still pass: rewind.test.ts:404-412 (5 non-cancelled → refused), rewind.test.ts:418-428 (4 → succeeds), edge-cases.test.ts:438-446 (same boundary). These should be UNCHANGED because their fixtures have no cancel entries.\n4. OUTPUT: countRewindMarkers returns the count of ACTIVE (non-cancelled) rewind markers. The cancel-then-retry workflow works: 5 cancelled rewinds → 6th succeeds. The refusal text accurately reports active (non-cancelled) count. All tests pass.\n5. MOCKING: countRewindMarkers is tested indirectly via the tool's execute() path. Use the existing fake ctx (makeCtx with entries) and fake pi (makePi). No new mocks needed — the cancel entries are just additional SessionEntry objects in the entries array.\n6. DOCS: [Mode A] No user-facing/config/API surface change. The refusal text format is unchanged (only the count value becomes accurate). No README change needed for this subtask.",
@@ -129,21 +129,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset-level Documentation Sync",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final sweep of changeset-level documentation (README.md feature sections, resolved-bugs list) that spans the whole changeset. Per SOW §5 Mode B, this runs LAST and depends on all implementing subtasks. It ensures the README's high-water nudge description, feature overview, and resolved-bugs section are consistent with the 4 fixes.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation — README feature blurbs + resolved-bugs section",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Sweep README.md and any overview docs that summarize the changeset delta. This catches cross-cutting documentation that only makes sense once all 4 fixes are in place: the high-water nudge feature description (README line 233, if not already updated by P1.M1.T2.S1), the resolved-bugs section (README 'Resolved bugs' around line 263), and any feature-overview references to the behaviors changed by BUG-001 through BUG-004.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md high-water description + add new resolved-bugs entries for BUG-001–004",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

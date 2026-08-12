@@ -197,12 +197,15 @@ function emptyLedger(): FileLedger {
 
 /**
  * countRewindMarkers — the depth-guard source (GOTCHA #9). Scan `ctx.sessionManager.getEntries()` for entries
- * where `type === "custom" && customType === "mulligan:rewind"`; return the count. Markers are permanent (never
- * cleared), so ALL persisted rewind markers count toward maxDepth. Defensive (never throws; a throwing-Proxy
- * entry or a non-array → the entry is skipped / the count is 0). Module-local.
+ * where `type === "custom" && customType === "mulligan:rewind"`; return the count of ACTIVE markers, EXCLUDING
+ * rewinds retired by a `mulligan:cancel` (BUG-004: spec/05 §1 step 4 says "count ACTIVE"). Markers are now
+ * retractable via mulligan_cancel (E21 amends D6), so a cancelled rewind (its data.id ∈ the cancel targetIds)
+ * does NOT count toward maxDepth — the cancel-then-retry workflow must not be blocked at 5 cumulative rewinds.
+ * Mirrors countRetriesAtLatestPrompt's BUG-005 fix and readMarkers' cancelledIds (src/filter.ts). Defensive
+ * (never throws; a throwing-Proxy entry or a non-array → the entry is skipped / the count is 0). A rewind with
+ * an unreadable data.id is COUNTED (never exclude on bad data). Module-local.
  */
 function countRewindMarkers(ctx: ExtensionContext): number {
-  let count = 0;
   let entries: unknown;
   try {
     entries = ctx.sessionManager.getEntries();
@@ -210,10 +213,39 @@ function countRewindMarkers(ctx: ExtensionContext): number {
     return 0; // never let the depth guard throw
   }
   if (!Array.isArray(entries)) return 0;
+
+  // BUG-004: collect the uuid ids of rewinds RETIRED by a mulligan:cancel on the branch, so cancelled rewinds
+  // are excluded from the cumulative depth count (spec/05 §1 step 4 "count ACTIVE"). Mirrors the cancel-
+  // exclusion in countRetriesAtLatestPrompt (the BUG-005 fix) and readMarkers' cancelledIds (src/filter.ts):
+  // scan ALL entries (the depth guard is cumulative across the whole branch, not per-prompt), read
+  // data.targetId defensively. A malformed cancel (non-string / empty / missing targetId) is skipped
+  // (fail-open, never throw).
+  const cancelledRewindIds = new Set<string>();
   for (const e of entries) {
     if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
     try {
-      if ((e as { type?: unknown }).type === "custom" && (e as { customType?: unknown }).customType === "mulligan:rewind") {
+      const ee = e as { type?: unknown; customType?: unknown; data?: { targetId?: unknown } };
+      if (ee.type === "custom" && ee.customType === "mulligan:cancel") {
+        const targetId = ee.data?.targetId;
+        if (typeof targetId === "string" && targetId.length > 0) cancelledRewindIds.add(targetId);
+      }
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+
+  // Count ACTIVE (non-cancelled) mulligan:rewind markers across the WHOLE branch. A rewind whose data.id ∈
+  // cancelledRewindIds is SKIPPED (retired by a cancel). A rewind with an unreadable data.id is COUNTED —
+  // never exclude on bad data (defensive polarity matches readMarkers' "keep on bad id" /
+  // countRetriesAtLatestPrompt: here "keep" = "count", the conservative direction for a depth guard).
+  let count = 0;
+  for (const e of entries) {
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown; data?: { id?: unknown } };
+      if (ee.type === "custom" && ee.customType === "mulligan:rewind") {
+        const id = ee.data?.id;
+        if (typeof id === "string" && cancelledRewindIds.has(id)) continue; // cancelled → skip
         count++;
       }
     } catch {
@@ -521,7 +553,7 @@ async function rewindExecute(
       }
     }
 
-    // (4) depth guard (step 4; E4). Markers are permanent → ALL persisted rewind markers count toward maxDepth.
+    // (4) depth guard (step 4; E4). countRewindMarkers counts ACTIVE rewind markers (cancelled rewinds are excluded — BUG-004; spec/05 §1 step 4 "count active").
     const depth = countRewindMarkers(ctx);
     if (depth >= config.rewind.maxDepth) {
       return refuse(

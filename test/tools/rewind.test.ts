@@ -1155,6 +1155,34 @@ describe("mulligan_rewind — retry budget: cancelled rewinds excluded (BUG-005 
   });
 });
 
+// ── BUG-004: cancelled rewinds excluded from the cumulative depth (spec/05 §1 step 4 "count ACTIVE") ─────
+// countRewindMarkers scans ALL entries (cumulative depth guard) for mulligan:cancel and skips rewinds whose
+// data.id is targeted by one. Mirrors countRetriesAtLatestPrompt's BUG-005 fix + readMarkers' cancelledIds.
+// Backward-compatible: id-less rewinds (rewindEntry(seq)) are still COUNTED (defensive — never exclude on bad data).
+describe("mulligan_rewind — depth guard: cancelled rewinds excluded (BUG-004 / spec/05 §1 step 4 'count active')", () => {
+  it("5 rewinds each retired by a mulligan:cancel → 0 active → a new rewind SUCCEEDS (not depth-refused)", async () => {
+    const { appended, pi } = makePi();
+    // countRewindMarkers scans ALL entries (cumulative depth guard). WITHOUT the fix → counts 5 rewind markers
+    // → 5>=maxDepth(5) → refuse. WITH the fix → excludes the 5 cancelled (data.id ∈ cancel targetIds) → 0
+    // active → 0<5 → succeed (marker persisted). Default maxDepth=5 (no setConfig needed).
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("cancel-then-retry workflow")),
+        rewindEntryWithId(1, "rew-1"), cancelEntry("rew-1"),
+        rewindEntryWithId(2, "rew-2"), cancelEntry("rew-2"),
+        rewindEntryWithId(3, "rew-3"), cancelEntry("rew-3"),
+        rewindEntryWithId(4, "rew-4"), cancelEntry("rew-4"),
+        rewindEntryWithId(5, "rew-5"), cancelEntry("rew-5"),
+      ],
+    });
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
+    expect(firstText(res)).not.toContain("max rewind depth (5) reached");
+    expect(firstText(res)).not.toContain("5 active rewind marker(s)");
+    expect(firstText(res)).toContain("Mulligan: rewound");
+    expect(appended).toHaveLength(1); // succeeded → one new marker persisted
+  });
+});
+
 // ── P1.M3.T1.S2: checkpoint consumption (spec/05 §3 step 5 "Auto-expiry on consumption (REQUIRED)") ──
 // These tests verify the S1 hook (src/tools/rewind.ts step 7b): a successful checkpoint rewind CONSUMES its
 // target checkpoint — pi.setLabel(targetId, undefined) clears the label so mulligan_audit no longer lists it
