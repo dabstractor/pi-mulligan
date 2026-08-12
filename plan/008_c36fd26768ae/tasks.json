@@ -179,14 +179,14 @@
           "type": "Milestone",
           "id": "P2.M2",
           "title": "GitBackend — external shadow repository",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Create src/snapshot/git.ts implementing the SnapshotStore interface via an external git shadow repository. All writes target GIT_DIR=<storageDir>/<key>; the user's .git is never touched (except read-only rev-parse).",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M2.T1",
               "title": "Implement GitBackend (src/snapshot/git.ts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The external shadow-repo backend. init sets up GIT_DIR=<storageDir>/<key> + GIT_WORK_TREE=<repoRoot>. capture uses add --all -f + write-tree + commit-tree + update-ref. dirtyCheck diffs against afterRef. restore uses read-tree + checkout -- <paths>. The five git-safety guarantees are enforced.",
               "subtasks": [
                 {
@@ -211,7 +211,7 @@
                   "type": "Subtask",
                   "id": "P2.M2.T1.S2",
                   "title": "GitBackend dirtyCheck + restore + retire + has",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M2.T1.S1"
@@ -245,7 +245,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "CAS hash + blob store + manifest format",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M1.T1.S1",

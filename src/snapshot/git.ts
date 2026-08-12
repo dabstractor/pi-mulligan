@@ -1,11 +1,11 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, unlink as fsUnlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AsyncMutex, type SnapshotStore, type RestoreOpts, type RestoreResult } from "./store.js";
-import { normalizeRelPath, isDangerousWorkspaceRel } from "./paths.js";
+import { normalizeRelPath, isDangerousWorkspaceRel, resolveSafeWorkspacePath, DANGEROUS_DIRS } from "./paths.js";
 import type { MulliganConfig } from "../config.js";
 
 const execFileDefault = promisify(execFileCb);
@@ -88,6 +88,12 @@ export interface GitBackendDeps {
    * maxFileBytes so the DI seam signature stays clean (the scan owns the per-file-size decision).
    */
   scan?: (repoRoot: string, excludeGlobs: readonly string[], maxFileBytes: number) => Promise<CapScan>;
+  /**
+   * Default: node:fs/promises.unlink. The delete-created-files path in restore() (S2) calls this;
+   * tests inject a recording fake to assert unlink targets (never node_modules/.git). Optional +
+   * backward-compatible — production construction omits it → real fsUnlink.
+   */
+  unlink?: (path: string) => Promise<void>;
 }
 
 /**
@@ -167,10 +173,10 @@ async function scanForCaps(
 }
 
 /**
- * GitBackend — the shadow-repo snapshot backend. Implements `SnapshotStore` (the 5 IO-bearing
- * methods are async). `describe()` returns `{ backend: "git" }` (sync metadata). This task (S1)
- * ships `init()` + `capture()`; the four remaining methods (`dirtyCheck`/`restore`/`has`/`retire`)
- * are throwing stubs implemented in P2.M2.T1.S2.
+ * GitBackend — the shadow-repo snapshot backend. Implements the FULL `SnapshotStore` interface (the
+ * 5 IO-bearing methods are async). `describe()` returns `{ backend: "git" }` (sync metadata). S1
+ * (P2.M2.T1.S1) shipped `init()` + `capture()`; S2 (P2.M2.T1.S2) shipped `dirtyCheck` + `restore` +
+ * `has` + `retire` (real, working-tree-only, git-safe, mutex-serialized implementations).
  */
 export class GitBackend implements SnapshotStore {
   private readonly cwd: string;
@@ -180,6 +186,7 @@ export class GitBackend implements SnapshotStore {
   private readonly mutex = new AsyncMutex();
   private readonly exec: GitExec;
   private readonly scan: (root: string, globs: readonly string[], maxFileBytes: number) => Promise<CapScan>;
+  private readonly unlink: (path: string) => Promise<void>;
   // resolved lazily by ensureInit():
   private repoRoot!: string;
   private sourceGitDir!: string;
@@ -192,7 +199,7 @@ export class GitBackend implements SnapshotStore {
    * @param cwd            the workspace root to snapshot (resolved).
    * @param revertConfig   `MulliganConfig["revert"]` (the 8-field block).
    * @param sessionDir     optional — used ONLY when `storageDir` is null, to resolve `<sessionDir>/mulligan/`.
-   * @param deps           DI test seam (optional exec + scan; production omits → real impls).
+   * @param deps           DI test seam (optional exec + scan + unlink; production omits → real impls).
    * @throws when `storageDir` is null AND `sessionDir` is absent (cannot resolve a storage path).
    */
   constructor(
@@ -213,6 +220,7 @@ export class GitBackend implements SnapshotStore {
     }
     this.exec = deps?.exec ?? (execFileDefault as GitExec);
     this.scan = deps?.scan ?? scanForCaps;
+    this.unlink = deps?.unlink ?? fsUnlink;
   }
 
   /** Report the active backend (sync metadata for logging / the rewind notice). */
@@ -351,19 +359,216 @@ export class GitBackend implements SnapshotStore {
     };
   }
 
-  // ── P2.M2.T1.S2 stubs (dirtyCheck/restore/has/retire) — NOT implemented here. ──
-  // Throwing (not silent no-ops) so a premature caller fails loud. detectAndCreate is not wired into
-  // index.ts until P3.M1.T2 (after S2 lands), so no live code hits these.
-  async dirtyCheck(_afterRef: string, _paths: string[]): Promise<string[]> {
-    throw new Error("GitBackend.dirtyCheck not implemented — see P2.M2.T1.S2");
+  /**
+   * Return the subset of `paths` whose CURRENT work-tree content differs from the `afterRef`
+   * snapshot — files that drifted AFTER the agent's turn (a human/other-process edit since
+   * `agent_end`). spec/14 §3 (GitBackend dirty-check), §6 step 3 (the dirty guard REFUSE). The
+   * restore dirty-guard calls this BEFORE restore: if ANY affected path is dirty, the WHOLE
+   * file-revert is refused (not silently clobbered — E30).
+   *
+   * Implementation: `git diff --name-only <afterRef> -- <paths>` against the SHADOW repo
+   * (env.GIT_DIR=shadowDir). Compares the afterRef tree to the WORKING TREE scoped to `paths`;
+   * the stdout lines are the drifted paths. null/empty `afterRef` (no drift baseline — e.g. a
+   * mid-turn rewind with no after-ref yet) ⇒ `[]` (allow). Serialized by the mutex (spec §4.3).
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any git error (bad ref, exec failure) is caught, warned,
+   * and returns `[]` (no drift detected ⇒ allow restore). The refuse/allow decision is the
+   * caller's (rewindExecute, P4.M2.T1); this method only reports drift.
+   */
+  async dirtyCheck(afterRef: string, paths: string[]): Promise<string[]> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    try {
+      await this.ensureInit();
+      if (!afterRef || paths.length === 0) return []; // no drift baseline / nothing to check ⇒ allow
+      const out = await this.exec(
+        "git",
+        ["diff", "--name-only", afterRef, "--", ...paths.filter((p) => p.length > 0)],
+        this.shadowEnv(),
+      );
+      return out.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    } catch (err) {
+      // E27 best-effort: any git error ⇒ [] (no drift detected ⇒ allow restore). Never rejects.
+      console.warn(
+        `[mulligan] snapshot.dirtyCheck failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    } finally {
+      release();
+    }
   }
-  async restore(_beforeRef: string, _opts: RestoreOpts): Promise<RestoreResult> {
-    throw new Error("GitBackend.restore not implemented — see P2.M2.T1.S2");
+
+  /**
+   * Does a snapshot ref still exist (resolvable) in the SHADOW repo? Used by the capture lifecycle /
+   * cross-reload (E32) to decide whether a persisted RevertCheckpoint's refs are still honored.
+   * spec/14 §2, §5.
+   *
+   * Implementation: `git rev-parse --verify <ref>` (shadow). exit 0 ⇒ the object exists in the
+   * shadow DB ⇒ `true`; a non-zero exit (rev-parse --verify of a missing ref ⇒ exit 128) is caught
+   * ⇒ `false`. `ref` is a commit SHA (capture()'s return — a SHA, NOT a refname).
+   *
+   * NOT mutex-serialized (spec §4.3 omits `has` from the serialized list — it is a fast read-only
+   * existence check; serializing it would add latency to the cross-reload ref-honoring path for no
+   * correctness benefit, since it writes nothing and mutates no state). BEST-EFFORT: never rejects.
+   */
+  async has(ref: string): Promise<boolean> {
+    try {
+      await this.ensureInit();
+      await this.exec("git", ["rev-parse", "--verify", ref], this.shadowEnv());
+      return true;
+    } catch {
+      // non-zero exit (missing ref ⇒ exit 128) or init failure ⇒ false. Never rejects.
+      return false;
+    }
   }
-  async has(_ref: string): Promise<boolean> {
-    throw new Error("GitBackend.has not implemented — see P2.M2.T1.S2");
+
+  /**
+   * Drop a protected ref so its underlying objects can be reclaimed by the next GC pass. Called when
+   * a checkpoint is revoked (`/mulligan_checkpoint_revoke`) or consumed (a rewind targets it);
+   * spec/14 §5. Serialized by the mutex (spec §4.3).
+   *
+   * CRITICAL — SHA→refname resolution: `ref` is a commit SHA (capture()'s return), but
+   * `git update-ref -d <SHA>` is INVALID (update-ref -d deletes a REFERENCE NAME, not an object).
+   * So retire MUST first resolve the SHA → refname(s) via `git for-each-ref --points-at <sha>`
+   * scoped to `refs/mulligan/snapshots/` (the ONLY namespace capture pins refs into, via
+   * `refForLabel`), THEN `update-ref -d <each refname>`. This is robust to a SHA pinned under
+   * multiple labels (revokes all) and to an already-retired SHA (empty result ⇒ no-op). S1's own
+   * design note (refForLabel JSDoc) anticipates exactly this two-step resolution.
+   *
+   * BEST-EFFORT (E27): NEVER rejects — any git error is caught, warned, and returns void. retire
+   * failure degrades only to slower GC reclamation (objects linger), never blocks the rewind.
+   */
+  async retire(ref: string): Promise<void> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    try {
+      await this.ensureInit();
+      const out = await this.exec(
+        "git",
+        ["for-each-ref", "--points-at", ref, "--format=%(refname)", "refs/mulligan/snapshots/"],
+        this.shadowEnv(),
+      );
+      const refnames = out.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      for (const rn of refnames) {
+        await this.exec("git", ["update-ref", "-d", rn], this.shadowEnv());
+      }
+    } catch (err) {
+      // E27 best-effort: any git error ⇒ warn + void (objects linger until next GC; never blocks).
+      console.warn(
+        `[mulligan] snapshot.retire failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      release();
+    }
   }
-  async retire(_ref: string): Promise<void> {
-    throw new Error("GitBackend.retire not implemented — see P2.M2.T1.S2");
+
+  /**
+   * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state).
+   * spec/14 §3 (the FIVE git-safety guarantees), §6 (restore semantics). Serialized by the mutex
+   * (spec §4.3). CONSUMED BY: rewindExecute step 6b (P4.M2.T1.S2) after the dirty guard passes.
+   *
+   * INTERFACE: `restore(beforeRef, opts)` has NO `afterRef` param (fixed by S1/store.ts). The
+   * delete-created set therefore uses "files present NOW but absent from the beforeRef tree"
+   * (PRD §6 step 4), which reconciles the work-item's "afterRef-but-not-beforeRef" wording: the
+   * dirty guard (rewindExecute, P4) REFUSES if the worktree drifted from afterRef, so present-now
+   * ≈ afterRef at restore time.
+   *
+   * RECIPE (spec/14 §3 — working-tree ONLY, never the source index/refs):
+   *  (a) `git read-tree <beforeRef>` (shadow) — loads the beforeRef tree into the SHADOW index.
+   *  (b) REVERT modified + deleted-from-worktree files: `git diff --name-only --diff-filter=MD`
+   *      (shadow; index-vs-worktree — after read-tree the index === beforeRef, so M=modified vs
+   *      beforeRef, D=deleted-from-worktree vs beforeRef) lists them; per path `git checkout -- <path>`
+   *      (the `--` form, NO tree/commit arg — checks out FROM THE INDEX into the working tree, so it
+   *      writes beforeRef's content). The read-tree-then-checkout-from-index two-step is the spec's
+   *      exact recipe and is INDEX-LOCAL (never moves a ref). Do NOT use `git checkout <beforeRef>
+   *      -- <path>` (heavier, can be mistaken for ref ops — see gotchas).
+   *  (c) DELETE span-created files (present now, absent from beforeRef) — TWO-flag AND
+   *      (opts.deleteCreatedFiles && cfg.allowDeleteCreatedFiles): `git ls-files --others`
+   *      (shadow; untracked files) with `:!` pathspec negations for excludeGlobs + DANGEROUS_DIRS,
+   *      then per safe path `unlink(resolveSafeWorkspacePath(repoRoot, rel))`. The `:!` pathspecs
+   *      + the per-path isDangerousWorkspaceRel gate are TWO safety layers (mirrors capture's
+   *      caps-walk two-layer approach) — WITHOUT them node_modules/.git would be enumerated and
+   *      unlinked (catastrophic).
+   *
+   * BEST-EFFORT (E27): NEVER rejects. Per-path checkout/unlink failures land in `failed[]`; a
+   * read-tree failure (bad beforeRef) ⇒ warn + return whatever was collected (5 buckets, possibly
+   * all-empty). The feature's overriding rule: revert degradation never blocks the context rewind
+   * (PRD §6 step 1 — the refuse/allow decision is rewindExecute's, P4). Returns a RestoreResult.
+   */
+  async restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult> {
+    const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    const result: RestoreResult = { reverted: [], deleted: [], failed: [], skipped: [], refused: [] };
+    try {
+      await this.ensureInit();
+      // Neither flag set ⇒ nothing to do (rewindExecute normally guards this, but restore is
+      // best-effort + defensive — return the 5 empty buckets without touching git).
+      if (!opts.revertFileChanges && !opts.deleteCreatedFiles) return result;
+
+      // (a) Load beforeRef into the SHADOW index (NEVER the source index — shadowEnv, guarantee #2).
+      //     Best-effort: a bad beforeRef rejects here → the outer catch returns the (all-empty) result.
+      await this.exec("git", ["read-tree", beforeRef], this.shadowEnv());
+
+      // (b) REVERT modified + deleted-from-worktree files vs beforeRef (index===beforeRef after read-tree).
+      if (opts.revertFileChanges) {
+        const diff = (
+          await this.exec("git", ["diff", "--name-only", "--diff-filter=MD"], this.shadowEnv())
+        ).stdout;
+        for (const rel of diff.split("\n").map((s) => s.trim()).filter((s) => s.length > 0)) {
+          // Safety floor: never revert a dangerous path (belt-and-suspenders; the spec excludes these
+          // at capture, but defend here too so a hand-crafted beforeRef cannot wedge .git/.pi/node_modules).
+          if (isDangerousWorkspaceRel(rel)) continue;
+          try {
+            // `git checkout -- <path>`: the `--` form, NO tree arg — checks out FROM THE SHADOW INDEX
+            // (=== beforeRef after read-tree) into the working tree. Index-local; never moves a ref.
+            await this.exec("git", ["checkout", "--", rel], this.shadowEnv());
+            result.reverted.push(rel);
+          } catch {
+            result.failed.push(rel); // per-path best-effort (E27) — restore still resolves
+          }
+        }
+      }
+
+      // (c) DELETE span-created files (present now, absent from beforeRef) — TWO-flag AND.
+      //     Missing EITHER flag ⇒ zero deletions. The `:!` pathspecs exclude heavy/dangerous dirs so
+      //     ls-files never lists node_modules/.git; the isDangerousWorkspaceRel gate is belt-and-suspenders.
+      if (opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles) {
+        const othersSpecs = [
+          ".",
+          ...this.cfg.excludeGlobs.map((g) => `:!${g}`),
+          ...DANGEROUS_DIRS.map((d) => `:!${d}`),
+        ];
+        const others = (
+          await this.exec("git", ["ls-files", "--others", "--", ...othersSpecs], this.shadowEnv())
+        ).stdout;
+        for (const rel of others.split("\n").map((s) => s.trim()).filter((s) => s.length > 0)) {
+          if (isDangerousWorkspaceRel(rel)) continue; // belt-and-suspenders (ls-files :! already filters)
+          try {
+            // resolveSafeWorkspacePath throws on `..`/absolute escape → caught below ⇒ failed[] (E27).
+            const abs = resolveSafeWorkspacePath(this.repoRoot, rel);
+            await this.unlink(abs);
+            result.deleted.push(rel);
+          } catch (e) {
+            // ENOENT (already gone — e.g. deleted twice) ⇒ silent skip; any other error ⇒ failed[].
+            const code = (e as NodeJS.ErrnoException)?.code;
+            if (code !== "ENOENT") result.failed.push(rel);
+          }
+        }
+      }
+
+      return result;
+    } catch (err) {
+      // read-tree failed (bad beforeRef) or resolveSafeWorkspacePath escape — best-effort (E27).
+      // Return whatever was collected so far (possibly all-empty); NEVER rejects.
+      console.warn(
+        `[mulligan] snapshot.restore partial: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return result;
+    } finally {
+      release();
+    }
   }
 }
