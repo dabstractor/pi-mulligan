@@ -128,21 +128,21 @@
           "type": "Milestone",
           "id": "P2.M1",
           "title": "SnapshotStore interface + detectAndCreate factory + AsyncMutex",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Create src/snapshot/store.ts with the SnapshotStore interface, the detectAndCreate factory (git→GitBackend, non-git-writable→CasBackend, neither→none), and the AsyncMutex that serializes all store operations.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "Create src/snapshot/store.ts (interface + factory + mutex)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The central store module: interface definition, type exports, AsyncMutex serialization primitive, and the detectAndCreate factory that picks the right backend.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T1.S1",
                   "title": "SnapshotStore interface + types + AsyncMutex",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"
@@ -158,7 +158,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S2",
                   "title": "detectAndCreate factory (backend detection)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",
