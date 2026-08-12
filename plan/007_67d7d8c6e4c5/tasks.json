@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Guardrail + agent-side modifications (no new Pi surfaces)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Pure-core + tool + nudge changes that do not depend on the new registerCommand/setWidget surfaces. Land first because Phase 2's commands reuse the now-finalized rewind behavior + setCheckpoint wrapper. Three milestones: remove to_previous_prompt, agent-attributable drift delta, unregister the checkpoint agent tool.",
       "milestones": [
         {
@@ -162,21 +162,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Remove the mulligan_checkpoint agent tool",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The agent can no longer create checkpoints (E23 resolved — foresight lives with the user). The agent keeps mulligan_rewind(granularity:checkpoint). The setCheckpoint wrapper in markers.ts is retained (the human command in Phase 2 reuses it). checkpointExists + checkpoint-consumption logic stay in rewind.ts.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Unregister the agent tool; retire its tests",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Stop registering makeCheckpointTool in index.ts. Update the factory JSDoc from 5 tools to 4. Update test/index.test.ts and other tests that assert 5 tools or reference checkpoint as an agent tool. Do NOT delete src/tools/checkpoint.ts yet — Phase 2 extracts validCheckpointName/NAME_RE from it.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "index.ts: stop registering the checkpoint agent tool",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/change_surface.md §Change 1 documents index.ts. Line 10: `import { makeCheckpointTool } from \"./tools/checkpoint.js\";`. Line 49: `pi.registerTool(makeCheckpointTool(pi));`. Line 17 JSDoc: 'all 5 agent-callable tools'. Line 44 comment: 'Register all 5 agent-callable tools.' Four remaining tools: mulligan_rewind (line 47), mulligan_shrink (line 48), mulligan_audit (line 50), mulligan_cancel (line 51).\n2. INPUT: No prior dependency.\n3. LOGIC: (a) Remove line 10: `import { makeCheckpointTool } from \"./tools/checkpoint.js\";`. (b) Remove line 49: `pi.registerTool(makeCheckpointTool(pi));`. (c) Update JSDoc line 17: 'all 5 agent-callable tools' → 'all 4 agent-callable tools'. (d) Update comment line 44: 'Register all 5 agent-callable tools' → 'Register all 4 agent-callable tools'. Do NOT delete src/tools/checkpoint.ts — Phase 2 reuses validCheckpointName + NAME_RE from it. The file becomes unregistered dead code until Phase 2 extracts its reusable bits.\n4. OUTPUT: index.ts registers exactly 4 tools. The checkpoint tool factory file still exists (exports used by tests). Consumed by P1.M3.T1.S2 (test assertions) and P2.M1.T1.S2 (index.ts is re-edited to add command registrations).\n5. DOCS: [Mode A] factory JSDoc (spec/03 §2.1 tool inventory). Rides WITH the work.",
@@ -191,7 +191,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Tests: drop the checkpoint-tool registration assertion + update tool-count references",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
