@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Foundation — config block + pure helpers + type additions",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Land the config.revert.* knob, the pure paths.ts safety module, and the marker/runtime type additions. Zero new runtime behavior — everything is inert until config.revert.enabled is true. Unblocks Phase 2 (backends).",
       "milestones": [
         {
@@ -47,7 +47,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Pure helpers & type additions (R2a paths.ts, R2b marker field, R2c runtime field)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Create the pure paths.ts safety module and add the RewindMarker.revert field, RevertCheckpoint type, and SessionRuntime.snapshots field. All additions are inert (optional fields, pure functions).",
           "tasks": [
             {
@@ -77,14 +77,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Add RewindMarker.revert field + RevertCheckpoint type + SessionRuntime.snapshots",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the optional revert audit block to RewindMarker (markers.ts), the new RevertCheckpoint type, and the snapshots Map field to SessionRuntime (runtime.ts). All optional/additive — old code type-checks unchanged.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add RewindMarker.revert field + RevertCheckpoint type to markers.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: RewindMarker extends MulliganEnvelope ({schema,v,kind}). RewindMarkerInput = Omit<RewindMarker, \"schema\"|\"v\"|\"kind\"|\"id\"|\"seq\"|\"ts\">. appendRewindMarker(pi, ctx, data) spreads `data` into the marker entry. The revert field rides this spread like the existing optional fields. The field is OPTIONAL (revert?) so old markers type-check unchanged. See plan/008_c36fd26768ae/architecture/codebase_patterns.md §2.\n2. INPUT: The existing RewindMarker interface and RewindMarkerInput type in src/markers.ts.\n3. LOGIC: Add to RewindMarker interface (after existing fields): `revert?: { revertedFiles: string[]; deletedFiles: string[]; failedFiles: string[]; refusedFiles: string[]; skipped: boolean; backend: \"git\"|\"cas\"|\"none\"; }`. The field is optional (revert?) — absent when revert did not run. Add new EXPORTED type: `interface RevertCheckpoint { label: string; backend: \"git\"|\"cas\"; beforeRef: string; afterRef?: string; turnIndex: number; ts: number; }`. This type is imported by runtime.ts (P1.M2.T2.S2) and store.ts (P2.M1.T1.S1).\n4. OUTPUT: RewindMarker.revert? field (written by rewind.ts step 6b in P4.M2.T1.S2) and RevertCheckpoint type (consumed by runtime.ts and store.ts).\n5. DOCS: [Mode A] JSDoc on the revert field + RevertCheckpoint citing @14 §2 and @spec/04 §3. Rides WITH the work.",
@@ -99,7 +99,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S2",
                   "title": "Add SessionRuntime.snapshots field to runtime.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"

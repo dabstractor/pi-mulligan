@@ -17,6 +17,7 @@ import {
   type CancelMarker,
   type CancelMarkerInput,
   type NoteDetails,
+  type RevertCheckpoint,
   type SetCheckpointResult,
 } from "../src/markers.js";
 import { clearAll } from "../src/runtime.js";
@@ -490,6 +491,13 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(withoutHide.hideEntryIds).toEqualTypeOf<string[] | undefined>();
   });
 
+  it("RewindMarker/RewindMarkerInput carry optional revert (v1.2 working-tree revert; backward-compat)", () => {
+    const withoutRevert: RewindMarkerInput = REWIND_DATA; // omits revert → compiles (old markers)
+    const withRevert: RewindMarkerInput = { ...REWIND_DATA, revert: { revertedFiles: ["src/a.ts"], deletedFiles: ["tmp/x"], failedFiles: [], refusedFiles: ["dirty.ts"], skipped: false, backend: "git" } };
+    expectTypeOf(withRevert.revert).toEqualTypeOf<RewindMarker["revert"] | undefined>();
+    expectTypeOf(withoutRevert.revert).toEqualTypeOf<RewindMarker["revert"] | undefined>();
+  });
+
   it("TurnMetric has NO `id` field and deltaTokens is number | null (GOTCHA #4, #6)", () => {
     const m = {} as TurnMetric;
     expectTypeOf(m).not.toHaveProperty("id");
@@ -724,5 +732,15 @@ describe("NoteDetails + SetCheckpointResult types (GOTCHA #5 — NoteDetails is 
     expectTypeOf(ok).toMatchTypeOf<SetCheckpointResult>();
     expectTypeOf(err).toMatchTypeOf<SetCheckpointResult>();
     expectTypeOf<SetCheckpointResult>().toEqualTypeOf<{ entryId: string } | { error: string }>();
+  });
+
+  it("RevertCheckpoint is { label; backend:'git'|'cas'; beforeRef; afterRef?; turnIndex; ts } (spec/14 §2)", () => {
+    const c = {} as RevertCheckpoint;
+    expectTypeOf(c.label).toEqualTypeOf<string>();
+    expectTypeOf(c.backend).toEqualTypeOf<"git" | "cas">();
+    expectTypeOf(c.beforeRef).toEqualTypeOf<string>();
+    expectTypeOf(c.afterRef).toEqualTypeOf<string | undefined>();
+    expectTypeOf(c.turnIndex).toEqualTypeOf<number>();
+    expectTypeOf(c.ts).toEqualTypeOf<number>();
   });
 });

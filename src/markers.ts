@@ -80,11 +80,52 @@ export interface RewindMarker extends MulliganEnvelope {
   note: NoteInput;
   ledger: FileLedger;
   ts: number;
+  /** v1.2 working-tree revert result — present only when the agent requested revert AND `config.revert.enabled` AND
+   *  the granularity is supported (last_turn/checkpoint). `backend:"none"`/absent ⇒ revert did not run. The rewind
+   *  tool (rewindExecute step 6b, P4.M2.T1.S2) populates this from store.restore()'s RestoreResult and folds it into
+   *  the marker via the appendRewindMarker `{...data}` spread (RewindMarkerInput carries it — see Omit at line ~87).
+   *  OPTIONAL for backward compatibility: absent on old persisted markers (v1.1). Audit-recoverable from /tree.
+   *  See `@14-working-tree-revert.md` §2 (SnapshotStore), §6 (restore semantics), §7 (mulligan_rewind integration). */
+  revert?: {
+    /** Paths restored to their pre-span content. */
+    revertedFiles: string[];
+    /** Span-created paths deleted (delete_created_files + config.revert.allowDeleteCreatedFiles). */
+    deletedFiles: string[];
+    /** Paths that could not be restored/deleted (best-effort; logged — E27). */
+    failedFiles: string[];
+    /** Paths the dirty guard refused to overwrite (post-turn drift detected — E30) — revert skipped those. */
+    refusedFiles: string[];
+    /** true when caps/partial snapshot degraded the restore (E29). */
+    skipped: boolean;
+    /** Which backend ran: "git" | "cas" | "none" ("none"/absent ⇒ revert did not run). */
+    backend: "git" | "cas" | "none";
+  };
 }
 
 /** RewindMarkerInput — the caller-supplied payload for appendRewindMarker (spec/04 §3 MINUS the envelope + id + seq + ts,
  *  which the wrapper stamps on). The mulligan_rewind tool (P1.M5.T1.S1) builds this. */
 export type RewindMarkerInput = Omit<RewindMarker, "schema" | "v" | "kind" | "id" | "seq" | "ts">;
+
+// ── Revert checkpoint (v1.2 working-tree revert — spec/04 §3 revert field; @14 §2) ────────────────────────────
+
+/**
+ * RevertCheckpoint — a paired before/after snapshot ref held in `SessionRuntime` (in-memory, keyed by capture label:
+ * "turn" | "checkpoint:<name>") and persisted for cross-reload (spec/14 §2). Pairs a `beforeRef` (snapshot at turn
+ * start / checkpoint set) with an `afterRef` (snapshot at turn end / next capture) so the rewind tool can
+ * `dirtyCheck(afterRef, paths)` then `restore(beforeRef, opts)`. `backend` is "git" | "cas" only — a checkpoint
+ * exists ONLY when a real backend captured ("none" ⇒ no checkpoint created). `afterRef` is OPTIONAL (null until the
+ * turn_end / next-capture snapshot writes it). EXPORTED so runtime.ts (P1.M2.T2.S2 — `snapshots?: Map<string,
+ * RevertCheckpoint>`) and store.ts (P2.M1.T1.S1 — SnapshotStore) share ONE canonical shape. See `@14-working-tree-
+ * revert.md` §2 (definition), §5 (capture lifecycle), §6 (restore).
+ */
+export interface RevertCheckpoint {
+  label: string;
+  backend: "git" | "cas";
+  beforeRef: string;
+  afterRef?: string;
+  turnIndex: number;
+  ts: number;
+}
 
 // ── Marker: shrink (spec/04-data-model.md §4) ───────────────────────────────
 
