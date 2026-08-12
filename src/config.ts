@@ -119,6 +119,16 @@ export interface MulliganConfig {
     estimateConfidence: EstimateConfidence;
   };
 
+  /** UI settings (operator-facing surfaces). */
+  ui: {
+    /** v1.1: shows the persistent above-prompt-box banner (`ctx.ui.setWidget`,
+     *  placement:"aboveEditor") while ≥1 user-set checkpoint is active, so the operator does not
+     *  forget they have armed destructive cross-prompt rewind power (spec/08 E26, spec/13 §5).
+     *  Disablable WITHOUT disabling checkpoints. Default: true. Source: spec/09 §2/§3.
+     *  Consumed by reconcileBanner (P2.M3.T1.S2). */
+    activeCheckpointBanner: boolean;
+  };
+
   /** Structured logging settings (the primary observability surface in non-TUI modes). */
   log: {
     /** Absolute path to an append-only JSONL debug log, or null to disable. If set, opening
@@ -161,6 +171,9 @@ export const DEFAULT_CONFIG: MulliganConfig = {
   },
   audit: {
     estimateConfidence: "medium",
+  },
+  ui: {
+    activeCheckpointBanner: true,
   },
   log: {
     file: null,
@@ -312,6 +325,13 @@ export function validateConfig(raw: unknown): MulliganConfig {
     if (isRecord(auditRaw)) {
       v = safeGet(auditRaw, "estimateConfidence");
       if (v !== undefined) cfg.audit.estimateConfidence = coerceEstimateConfidence(v, cfg.audit.estimateConfidence);
+    }
+
+    // ui.* (v1.1: active-checkpoint banner; spec/09 §2/§4, spec/13 §5)
+    const uiRaw = safeGet(raw, "ui");
+    if (isRecord(uiRaw)) {
+      v = safeGet(uiRaw, "activeCheckpointBanner");
+      if (v !== undefined) cfg.ui.activeCheckpointBanner = coerceBoolean(v, cfg.ui.activeCheckpointBanner);
     }
 
     // log.*  (opening/writing the file is log.ts / P1.M1.T3 — NOT this module)

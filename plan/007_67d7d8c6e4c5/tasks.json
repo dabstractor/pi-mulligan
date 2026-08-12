@@ -371,7 +371,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "config.ts + settings.ts: add ui.activeCheckpointBanner",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md documents config.ts. MulliganConfig interface is at config.ts:24-134. DEFAULT_CONFIG is at config.ts:137-161. validateConfig is at config.ts:224-336. There is NO `ui` field currently. Validation uses coerceBoolean (config.ts:339+: `!!value`). settings.ts deep-merges nested objects (project-local wins) — no change needed there since deepMergeSettings already recurses into nested objects.\n2. INPUT: No prior dependency.\n3. LOGIC: (a) In MulliganConfig interface (config.ts:24-134), add a new top-level field: `ui: { activeCheckpointBanner: boolean }`. (b) In DEFAULT_CONFIG (config.ts:137-161), add `ui: { activeCheckpointBanner: true }`. (c) In validateConfig (config.ts:224-336), add validation for the ui block: read `safeGet(obj, 'ui')`; if present and isRecord, read `safeGet(uiObj, 'activeCheckpointBanner')`; coerce with `!!` (like `enabled`); invalid → keep default (true). Follow the existing per-field pattern. (d) settings.ts needs NO change — deepMergeSettings already handles nested objects.\n4. OUTPUT: MulliganConfig has `ui: { activeCheckpointBanner: boolean }`, default true, validated. Consumed by P2.M3.T1.S2 (reconcileBanner reads it).\n5. DOCS: [Mode A] JSDoc on the field + rationale row in config (spec/09 §2/§3). Rides WITH the work.",
@@ -386,7 +386,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S2",
                   "title": "src/banner.ts: reconcileBanner(ctx) helper",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M3.T1.S1"

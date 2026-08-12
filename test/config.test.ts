@@ -32,6 +32,7 @@ describe("DEFAULT_CONFIG", () => {
         highWaterFraction: 0.7,
       },
       audit: { estimateConfidence: "medium" },
+      ui: { activeCheckpointBanner: true },
       log: { file: null },
     });
   });
@@ -71,6 +72,7 @@ describe("validateConfig", () => {
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1 },
       audit: { estimateConfidence: "low" },
+      ui: { activeCheckpointBanner: false },
       log: { file: "/tmp/mulligan.jsonl" },
     });
     expect(cfg).toEqual({
@@ -79,6 +81,7 @@ describe("validateConfig", () => {
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2, notifyMaxChars: 2048 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { read: 24576 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
+      ui: { activeCheckpointBanner: false },
       log: { file: "/tmp/mulligan.jsonl" },
     });
   });
@@ -607,5 +610,56 @@ describe("shrink.notifyMaxChars (P1.M2.T1.S3 / spec/09 §4)", () => {
 
   it("(type) shrink.notifyMaxChars is a required number", () => {
     expectTypeOf<MulliganConfig["shrink"]>().toHaveProperty("notifyMaxChars").toEqualTypeOf<number>();
+  });
+});
+
+// ── ui.activeCheckpointBanner (P2.M3.T1.S1 / spec/09 §2-§4, spec/13 §5) ──────────────────────
+// v1.1 active-checkpoint banner knob. validateConfig coerces with coerceBoolean (value, fallback) =>
+// value===undefined ? fallback : !!value (spec/09 §4: booleans coerce with !!, NEVER warn).
+// Non-record `ui` sub-object is silently ignored, matching audit/log/shrink/nudges block handling.
+// Consumed (out of scope here) by reconcileBanner (P2.M3.T1.S2); S1 is config-surface only.
+describe("ui.activeCheckpointBanner (P2.M3.T1.S1 / spec/09 §2-§4, spec/13 §5)", () => {
+  it("(a) passes through a valid boolean", () => {
+    expect(validateConfig({ ui: { activeCheckpointBanner: false } }).ui.activeCheckpointBanner).toBe(false);
+    expect(validateConfig({ ui: { activeCheckpointBanner: true } }).ui.activeCheckpointBanner).toBe(true);
+  });
+
+  it("(b) defaults to true with NO warn when absent (spec/09 §4 — booleans never warn)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({}).ui.activeCheckpointBanner).toBe(true);          // top-level ui absent
+      expect(validateConfig({ ui: {} }).ui.activeCheckpointBanner).toBe(true);  // ui present, field absent
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(c) coerces with !! — non-empty string truthy, null falsy (matches `enabled`; GOTCHA #3)", () => {
+    expect(validateConfig({ ui: { activeCheckpointBanner: 1 } }).ui.activeCheckpointBanner).toBe(true);
+    expect(validateConfig({ ui: { activeCheckpointBanner: 0 } }).ui.activeCheckpointBanner).toBe(false);
+    expect(validateConfig({ ui: { activeCheckpointBanner: "false" } }).ui.activeCheckpointBanner).toBe(true); // non-empty string → truthy
+    expect(validateConfig({ ui: { activeCheckpointBanner: null } }).ui.activeCheckpointBanner).toBe(false);   // !!null → false
+  });
+
+  it("(d) non-record ui value → whole block silently ignored, default true, NO warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(validateConfig({ ui: "oops" }).ui.activeCheckpointBanner).toBe(true);
+      expect(validateConfig({ ui: [1, 2] }).ui.activeCheckpointBanner).toBe(true); // array is not a record
+      expect(validateConfig({ ui: null }).ui.activeCheckpointBanner).toBe(true);   // null is not a record
+      expect(warn).not.toHaveBeenCalled(); // matches audit/log/shrink/nudges block handling
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("(e) round-trip via setConfig/getConfig", () => {
+    setConfig({ ui: { activeCheckpointBanner: false } });
+    expect(getConfig().ui.activeCheckpointBanner).toBe(false);
+  });
+
+  it("(type) ui.activeCheckpointBanner is a required boolean", () => {
+    expectTypeOf<MulliganConfig["ui"]>().toHaveProperty("activeCheckpointBanner").toEqualTypeOf<boolean>();
   });
 });
