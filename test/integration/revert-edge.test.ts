@@ -14,9 +14,12 @@
  *     makeCheckpointCommand + makeRewindTool, then SIMULATES a `/resume` (resetRuntime + detectAndCreate on the
  *     SAME storage) and re-issues a checkpoint-rewind to prove E32 cross-reload DURABILITY: the ckpt:* git ref
  *     survives resetRuntime+detectAndCreate (store.has(R0) stays true) and the rebuilt in-memory snapshot
- *     restores the checkpoint. Also exercises the dirty-guard BYPASS for a checkpoint with NO afterRef (CRITICAL
- *     #3): checkpoint-rewind uses beforeRef as the dirty baseline, so the rewind span MUST contain NO file
- *     toolCalls (empty modifiedFiles → dirtyCheck→[] → PROCEED).
+ *     restores the checkpoint. ALSO exercises the real checkpoint file-revert path (BUG-001 regression guard):
+ *     a checkpoint captures ONCE (commands.ts sets beforeRef, NEVER afterRef), so per spec/14 §6 step 3 the dirty
+ *     guard is SKIPPED for checkpoint granularity (post BUG-001 fix: `afterRef = checkpoint.afterRef` with NO
+ *     `?? beforeRef` fallback). The checkpoint-rewind span therefore CAN and DOES contain a real `write` toolCall
+ *     to a.ts, which IS reverted — this test FAILS without the BUG-001 fix (the pre-fix fallback afterRef=beforeRef
+ *     would flag the agent's own write as drift → REFUSE, a.ts stays A3-resume).
  *
  * House idiom (mirror test/tools/rewind.test.ts + test/integration/revert-git.test.ts): vitest, hand-rolled
  * `makePi()` / `makeCtx()` / `makeSessionCtx()` fakes (NO vi.fn()), `.js` import paths, `clearAll()` +
@@ -563,9 +566,11 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
     //
     // A real /resume reloads the session AND the Mulligan filter HIDES messages removed by a prior rewind
     // marker. Step (e)'s last_turn rewind hid u2/a2(write)/r1, so in the reloaded (filtered) view those
-    // message entries are GONE — which is exactly what lets CRITICAL #3 hold: the checkpoint-rewind span
-    // (from the a1 anchor to leaf) then contains NO file toolCalls → empty modifiedFiles → dirty guard
-    // bypassed. Our makeSessionCtx.buildContextEntries() returns the raw shared array (no filter), so we
+    // message entries are GONE — the checkpoint-rewind span (from the a1 anchor to leaf) then carries only the
+    // surviving seed + the post-/resume messages. Step (h) below pushes a REAL `write` to a.ts onto that span
+    // (the BUG-001 regression guard): modifiedFiles=["a.ts"], which post-fix takes the skipped-guard branch
+    // (PROCEED → store.restore(R0) → a.ts→A0) and PRE-fix would trip the beforeRef-baseline REFUSE. Our
+    // makeSessionCtx.buildContextEntries() returns the raw shared array (no filter), so we
     // SIMULATE the filtered post-/resume view here by excising the rewound message entries (u2/a2/r1),
     // keeping the seed + the checkpoint label + the control entry (the non-message bookkeeping survives).
     const rewoundIds = new Set(["u2", "a2", "r1"]);
@@ -597,9 +602,10 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
     // E32 DURABILITY: the R0 git object is STILL resolvable after resetRuntime + detectAndCreate(same storage).
     expect(await store2.has(R0)).toBe(true);
 
-    // REBUILD rt2.snapshots from the persisted mulligan:revert-checkpoint control entries (production NEVER does
-    // this read-side — it is the gap E32 leaves; the test SIMULATES the rebuild a future session_start hook would
-    // do, proving the CONTROL DATA is durable even though the in-memory Map is not). For each control entry,
+    // REBUILD rt2.snapshots from the persisted mulligan:revert-checkpoint control entries. Production NEVER does
+    // this read-side — it is the BUG-002 gap tracked by P1.M2.T1: a future session_start hook will scan the
+    // mulligan:revert-checkpoint entries and rebuild rt.snapshots (so the in-memory Map need not survive reload).
+    // The test SIMULATES that rebuild here to prove the CONTROL DATA is durable even though the Map is not. For each control entry,
     // restore a minimal RevertCheckpoint (turnIndex:-1 sentinel; beforeRef from the stored ref).
     const controlEntries = (appended as unknown[]).filter(
       (e) =>
@@ -623,13 +629,23 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
     expect(rebuiltCkpt!.beforeRef).toBe(R0);
     expect(rebuiltCkpt!.backend).toBe("git");
 
-    // ── (h) rewind checkpoint "x" with revert → "Reverted"; a.ts "A2-postreload\n" → "A0\n" ───────────
-    //    CRITICAL #3: a checkpoint has NO afterRef → the dirty baseline is beforeRef. The checkpoint-rewind
-    //    span (from the a1 anchor to leaf) now contains NO file toolCalls (the rewound a2 write was excised at
-    //    (g); only the non-writing resume messages follow): ledger.modifiedFiles empty →
-    //    dirtyCheck(afterRef=beforeRef, []) → [] → PROCEED. parentId chains back to a1 (the surviving anchor).
+    // ── (h) rewind checkpoint "x" with revert → "Reverted"; a.ts "A3-resume\n" → "A0\n" ──────────────
+    //    BUG-001 regression guard. The checkpoint span now contains a REAL `write` to a.ts (asstWrite("w2")),
+    //    so ledger.modifiedFiles=["a.ts"] (the heuristic picks up a real write toolCall). Two outcomes:
+    //    • WITHOUT the BUG-001 fix: `afterRef = checkpoint.afterRef ?? checkpoint.beforeRef` (= R0). Then
+    //      dirtyCheck(R0, ["a.ts"]) compares the CURRENT tree to the PRE-checkpoint state R0 — the agent's
+    //      OWN in-span write (A3-resume) is flagged as drift → REFUSE → a.ts STAYS "A3-resume\n", and the
+    //      result text carries the REFUSE clause ("file revert refused …").
+    //    • WITH the fix: `afterRef = checkpoint.afterRef` (undefined — checkpoints never set afterRef). The
+    //      `else` branch fires → doRestore() → store.restore(R0) → a.ts → "A0\n" (PROCEED clause "Reverted …").
+    //    The on-disk writeFileSync is ALSO required so the real working tree differs from R0 (the ledger is
+    //    advisory, but store.restore/dirtyCheck read the REAL tree). parentId chains back to a1 (the surviving
+    //    anchor); the "final" rewind toolCallId needs no matching stream message (resolveCheckpoint resolves
+    //    to the branch leaf regardless — the prior degenerate step (h) already relied on this).
+    writeFileSync(join(repoDir, "a.ts"), "A3-resume\n");
     appended.push({ type: "message", id: "u3", parentId: "a1", timestamp: 0, message: user("resume and reconsider") } as never);
-    appended.push({ type: "message", id: "a3", parentId: "u3", timestamp: 0, message: asst("post-resume") } as never);
+    appended.push({ type: "message", id: "a3", parentId: "u3", timestamp: 0, message: asstWrite("w2", "a.ts") } as never);
+    appended.push({ type: "message", id: "r2", parentId: "a3", timestamp: 0, message: result("w2") } as never);
 
     const res2 = await run(
       pi,
@@ -637,9 +653,13 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
       { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x", revert_file_changes: true },
       "final",
     );
-    expect(firstText(res2)).toContain("Reverted");
+    expect(firstText(res2)).toContain("Reverted"); // PROCEED clause
     expect(firstText(res2)).toContain("rewound checkpoint");
-    // a.ts reverted from "A2-postreload\n" back to "A0\n" (the ckpt:x beforeRef state).
+    // REFUSE clause MUST be absent. NOTE: the PROCEED clause ("… N refused (see log).") itself contains the
+    // substring "refused", so the absence assertion MUST key on the REFUSE-only string "file revert refused",
+    // never bare "refused".
+    expect(firstText(res2)).not.toContain("file revert refused");
+    // a.ts reverted from "A3-resume\n" back to "A0\n" (the ckpt:x beforeRef state) — FAILS without the BUG-001 fix.
     expect(readFileSync(join(repoDir, "a.ts"), "utf8")).toBe("A0\n");
 
     // The persisted marker's revert block names the git backend + the reverted file.
