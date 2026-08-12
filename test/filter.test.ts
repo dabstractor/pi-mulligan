@@ -529,6 +529,64 @@ describe("contextHandler — disabled pass-through, transform+cache, fail-open (
     expect(() => contextHandler(pi, { type: "context", messages: [] }, ctx)).not.toThrow();
     expect(contextHandler(pi, { type: "context", messages: [] }, ctx)).toBeUndefined();
   });
+
+  // (P2.M3.T1.S4) reconcileBanner at the contextHandler tail is UI-ONLY: the returned `messages` array is
+  // deep-equal whether the banner fires (hasUI:true) or no-ops (no hasUI), AND contains ZERO banner bytes
+  // (spec/13 §5; spec/08 E26 acceptance (d) — the banner never injects into event.messages).
+  //
+  // CONTEXT: filter.ts computes `messages` via filterPipeline, THEN calls reconcileBanner(ctx) in a tail
+  // try/catch (S3 defense-in-depth). reconcileBanner's ONLY effect is a ctx.ui.setWidget side effect — it
+  // never touches `messages`. This test pins that invariant so a future regression (a leak) is caught.
+  it("(P2.M3.T1.S4) messages array is unchanged by the tail reconcileBanner(ctx) call + 0 banner bytes", () => {
+    const { pi } = makePi();
+    // An ACTIVE checkpoint label entry (listCheckpoints shape) → reconcileBanner WILL SET the banner when
+    // hasUI is true. (For the no-hasUI control ctx, makeCtx's bare ctx causes reconcileBanner to no-op.)
+    const checkpointEntry = {
+      type: "label",
+      targetId: "leaf-1",
+      label: "mulligan:checkpoint:x",
+    } as unknown as SessionEntry;
+    // A known filtered view the mocked filterPipeline returns for BOTH the control and treatment fires.
+    const filteredView = [{ role: "assistant", content: [{ type: "text", text: "filtered" }] }];
+
+    // CONTROL — bare makeCtx (no hasUI/ui) → reconcileBanner hits its !hasUI no-op branch.
+    pipelineReturn = filteredView;
+    const controlCtx = makeCtx({ sessionId: "banner-ctrl", entries: [checkpointEntry] });
+    const resultControl = contextHandler(pi, { type: "context", messages: [] }, controlCtx) as {
+      messages: unknown[];
+    };
+
+    // TREATMENT — LOCAL hasUI:true ctx with a setWidget spy (GOTCHA #7: do NOT edit makeCtx; ~40 sites).
+    const widgets: { key: string; content: unknown; options?: unknown }[] = [];
+    const treatmentCtx = {
+      hasUI: true,
+      ui: {
+        setWidget: (k: string, c: unknown, o?: unknown) => widgets.push({ key: k, content: c, options: o }),
+      },
+      sessionManager: {
+        getSessionId: () => "banner-treat",
+        getEntries: () => [checkpointEntry],
+        getBranch: () => [],
+      },
+    } as unknown as ExtensionContext;
+    pipelineReturn = filteredView; // SAME view → messages should be byte-identical
+    const resultWith = contextHandler(pi, { type: "context", messages: [] }, treatmentCtx) as {
+      messages: unknown[];
+    };
+
+    // (a) the banner hook DID fire in the treatment (proves the two ctxs are genuinely different).
+    expect(widgets).toHaveLength(1);
+    expect(widgets[0].key).toBe("mulligan:active-checkpoint");
+    expect(widgets[0].options).toEqual({ placement: "aboveEditor" });
+
+    // (b) THE REGRESSION: the returned messages array is deep-equal whether or not the banner fired.
+    expect(resultWith.messages).toEqual(resultControl.messages);
+
+    // (c) ZERO banner bytes (E26 acceptance (d)): the banner key + warning text never reach event.messages.
+    const j = JSON.stringify(resultWith.messages);
+    expect(j).not.toContain("mulligan:active-checkpoint");
+    expect(j).not.toContain("Mulligan checkpoint active");
+  });
 });
 
 // ── registerFilterHandler ───────────────────────────────────────────────────────────────────

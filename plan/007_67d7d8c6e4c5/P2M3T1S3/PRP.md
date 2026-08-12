@@ -324,8 +324,11 @@ Task 4: VERIFY — typecheck + full test suite
 //                            // fail-open convention (its other callees are also fail-open).
 //   });
 //
-// Plus the import (top of file, value-import group):
-//   import { reconcileBanner } from "./banner.js";
+// Plus the import. index.ts is a MULTI-TOUCH file (4 parallel items), so place by ANCHOR not line number.
+// The LAST current value import is the commands.js line — add banner.js immediately AFTER it:
+//   import { makeCheckpointCommand, makeCheckpointRevokeCommand, makeAuditCommand } from "./commands.js";  // (existing, anchor)
+//   import { reconcileBanner } from "./banner.js";                                                              // (NEW — P2.M3.T1.S3)
+// (Placement anywhere in the value-import group typechecks fine; the anchor just avoids collisions.)
 
 // ── filter.ts — the contextHandler tail BEFORE (verbatim, current) ───────────────────────────
 //     } catch (retireErr) {
@@ -357,8 +360,11 @@ Task 4: VERIFY — typecheck + full test suite
 //     // ONE cast at the return boundary: MessageLike[] -> Pi's AgentMessage[] (ContextEventResult.messages).
 //     return { messages: messages as unknown as NonNullable<ContextEventResult["messages"]> };
 //
-// Plus the import (top of file, value-import group, near "./transforms.js" etc.):
-//   import { reconcileBanner } from "./banner.js";
+// Plus the import. filter.ts's value imports are NOT strictly alphabetical (transforms.js leads as the core,
+// then runtime/config/log/tokens/markers/nudges). Add banner.js anywhere in the value-import group — e.g. after
+// the last value import (nudges.js), which is the safest no-collision slot:
+//   import { shouldHighWater, injectHighWaterNudge, injectNudge, shouldNudge, suppressCheck } from "./nudges.js";  // (existing, anchor)
+//   import { reconcileBanner } from "./banner.js";                                                               // (NEW — P2.M3.T1.S3)
 ```
 
 ### Integration Points

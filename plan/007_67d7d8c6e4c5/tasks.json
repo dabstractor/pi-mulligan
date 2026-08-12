@@ -213,7 +213,7 @@
       "type": "Phase",
       "id": "P2",
       "title": "Human-facing surface (new Pi surfaces: registerCommand + setWidget)",
-      "status": "Researching",
+      "status": "Ready",
       "description": "The three slash commands (/mulligan_checkpoint, /mulligan_checkpoint_revoke, /mulligan_audit) and the persistent active-checkpoint banner. Verified Pi surfaces: pi.registerCommand (types.d.ts:903), ctx.ui.setWidget (types.d.ts:97), ExtensionCommandContext extends ExtensionContext (types.d.ts:254). Depends on Phase 1 (rewind behavior finalized + checkpoint.ts still has reusable exports).",
       "milestones": [
         {
@@ -357,14 +357,14 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "Active-checkpoint banner + config knob",
-          "status": "Researching",
+          "status": "Ready",
           "description": "A persistent above-prompt-box reminder while >=1 user-set checkpoint is active (E26). Reconciled on set/revoke/consumption/session_start/every context fire. New config knob ui.activeCheckpointBanner (default true).",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "reconcileBanner + config knob + hooks",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Add ui.activeCheckpointBanner to config. Create reconcileBanner(ctx) in a new src/banner.ts (or commands.ts) that reads active checkpoints and sets/clears the widget. Hook it into command handlers, session_start, and the contextHandler tail.",
               "subtasks": [
                 {
@@ -402,7 +402,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S3",
                   "title": "Hook reconcileBanner into the refresh points (commands + session_start + contextHandler tail)",
-                  "status": "Complete",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M3.T1.S2",
@@ -421,7 +421,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S4",
                   "title": "Tests for the banner + filter regression",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M3.T1.S1",
@@ -445,28 +445,28 @@
       "type": "Phase",
       "id": "P3",
       "title": "Sync changeset-level documentation (Mode B)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "The README has cross-cutting references to the v1.0 surface that this delta invalidates. One sweep. The spec files spec/01-13 are already at v1.1 from commit 57a5e1f9 — no spec edits needed. Depends on all of Phases 1 + 2.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P3.M1",
           "title": "README sweep",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Update README.md to reflect v1.1: 4 tools (not 5), 3 human commands, the active-checkpoint banner, the guardrail, and the removal of to_previous_prompt.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M1.T1",
               "title": "Update README to v1.1",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Sweep README.md for all v1.0 references invalidated by this delta. Update tool count (5→4), remove to_previous_prompt, add human commands section, update the disabled section, add guardrail note, update the 'no human-facing command' sentence.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P3.M1.T1.S1",
                   "title": "README.md v1.1 sweep",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S4",
