@@ -1,10 +1,12 @@
 /**
- * checkpoint.ts — the `mulligan_checkpoint` agent-callable tool (spec/05 §3; spec/04 §6).
+ * checkpoint.ts — shared checkpoint helper + validation module (spec/13 §3 human command; spec/04 §6).
  *
- * THIRD of the four Mulligan agent-callable tools (P1.M5.T3.S1). It is the sole writer of the
- * `mulligan:checkpoint:` label namespace: the agent names the current transcript position so a
- * later `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` (P1.M5.T1.S1) can target
- * it precisely in one shot — an anchor neither relative granularity can express.
+ * Since v1.1 the user-facing surface is the `/mulligan_checkpoint` HUMAN COMMAND (spec/13), wired up
+ * via makeCheckpointCommand in src/commands.ts — NOT an agent tool (the destructive cross-prompt rewind
+ * power belongs to the user). It remains the sole writer of the `mulligan:checkpoint:` label namespace:
+ * the human names the current transcript position so a later
+ * `mulligan_rewind(granularity:"checkpoint", checkpoint:"<name>")` can target it precisely in one shot
+ * — an anchor neither relative granularity can express.
  *
  * DESIGN (read the gotchas + the PRP):
  * - Thin, typebox-schema'd, validation-owning adapter on top of `setCheckpoint` (src/markers.ts, P1.M4.T1.S2 —
@@ -21,16 +23,18 @@
  *   file is strict-typechecked by tsconfig, unlike spec/reference/looper-smoke.proto.ts). We use a small
  *   structured object (`{ name, entryId? }`) for audit/debug intent.
  * - `pi` (ExtensionAPI) is NOT passed to execute() — it is captured via the `makeCheckpointTool(pi)`
- *   factory closure (the recommended testable shape; no module-scoped mutable state). index.ts
- *   (P1.M7.T1.S1) will do `pi.registerTool(makeCheckpointTool(pi))`.
+ *   factory closure (the recommended testable shape; no module-scoped mutable state). makeCheckpointTool
+ *   is exercised by unit/integration tests (test/tools/checkpoint.test.ts, test/integration/smoke.ts);
+ *   the `/mulligan_checkpoint` command (commands.ts) is the user-facing surface that invokes the same
+ *   name-validation + setCheckpoint path.
  *
  * config.enabled gate (spec/08 E14, BUG-007): checkpointExecute refuses with
  * "Mulligan: refused — Mulligan is disabled." when getConfig().enabled === false, BEFORE name validation
- * (mirrors rewind/shrink/audit/cancel step 1). No label is written when disabled (setCheckpoint is not
+ * (mirrors the four agent tools step 1). No label is written when disabled (setCheckpoint is not
  * called). There is still NO config.checkpoint sub-knob (spec/09 has no checkpoint section) — the master
  * switch is the only gate (like cancel). NOTE: the disabled case is inlined (not via the refusal() helper)
- * because checkpoint's refusal() omits the trailing "." the other four tools' helpers add; inlining yields
- * byte-identical disabled text across all five tools. This item does NOT modify src/index.ts (P1.M7.T1.S1).
+ * because checkpoint's refusal() omits the trailing "." the other tools' helpers add; inlining yields
+ * byte-identical disabled text across the four agent tools.
  */
 import { Type } from "typebox";
 import type { Static } from "typebox";
@@ -131,7 +135,7 @@ async function checkpointExecute(
   const name = params?.name;
   try {
     // (0) config gate (spec/08 E14, BUG-007): master switch off → refuse BEFORE name validation (mirrors
-    //     rewind/shrink/audit/cancel step 1). Byte-identical to the other four tools' disabled text.
+    //     the four agent tools step 1). Byte-identical to the agent tools' disabled text.
     //     INLINED (NOT via refusal()) because checkpoint's refusal() helper omits the trailing '.' — see
     //     the file-header note + the research/bug007 dot-parity decision. setCheckpoint is NOT called → no
     //     label is written. details:{name} for correlation (CheckpointDetails; no entryId on refusal).
@@ -176,7 +180,8 @@ async function checkpointExecute(
  * passed to the extension FACTORY in src/index.ts, not to each tool's execute()). `defineTool` preserves
  * `CheckpointParams` inference when assigning to a variable.
  *
- * index.ts (P1.M7.T1.S1) will do: `pi.registerTool(makeCheckpointTool(pi));`.
+ * makeCheckpointTool is exercised by unit/integration tests (test/tools/checkpoint.test.ts,
+ * test/integration/smoke.ts); the user-facing surface is the `/mulligan_checkpoint` command (commands.ts).
  * Unit tests do: `const tool = makeCheckpointTool(fakePi);`.
  */
 export function makeCheckpointTool(pi: ExtensionAPI): ToolDefinition<typeof CheckpointParams, CheckpointDetails> {

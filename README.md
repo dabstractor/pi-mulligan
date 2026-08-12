@@ -2,7 +2,7 @@
 
 > Autonomous, token-cheap context self-rewind for a [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent. The agent sheds context it produced by mistake and redoes a turn with a self-authored note — no human in the loop.
 
-**Pi:** `0.84.x` · **License:** MIT · **Status:** v1.1
+**Pi:** `0.84.x` · **License:** MIT · **Status:** v1.2
 
 ---
 
@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 21 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 21 base knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3). The v1.2 `revert` block (8 more knobs) is documented separately in [§5 Working-tree revert (v1.2)](#5-working-tree-revert-v12-opt-in).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -128,11 +128,11 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
 
 ## 4. Tools
 
-Mulligan registers four agent-callable tools. The descriptions below are **verbatim copies** of the LLM-facing description strings the agent sees at runtime (from `src/tools/*.ts`) — they are the agent's documentation, reproduced here so a human knows exactly what the agent can now do. When-to-use guidance follows each one (from `spec/05-tools.md`).
+Mulligan registers four agent-callable tools. (v1.2 adds optional *params* to `mulligan_rewind` — see [§5 Working-tree revert (v1.2)](#5-working-tree-revert-v12-opt-in) — not a new tool.) The descriptions below are **verbatim copies** of the LLM-facing description strings the agent sees at runtime (from `src/tools/*.ts`) — they are the agent's documentation, reproduced here so a human knows exactly what the agent can now do. When-to-use guidance follows each one (from `spec/05-tools.md`).
 
 ### `mulligan_rewind`
 
-> Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The hidden content disappears from your view permanently (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.
+> Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. Set revert_file_changes to also restore the working-tree files you modified, so you need not re-read them on resume (v1.2, opt-in, last_turn/checkpoint only).
 
 **When to use it:**
 
@@ -199,7 +199,80 @@ Checkpoints and the bloat diagnostic are the three narrow human commands (the de
 
 ---
 
-## 5. How It Works
+## 5. Working-tree revert (v1.2, opt-in)
+
+**Working-tree revert** is an opt-in, best-effort restoration of the files on disk (the *working tree*) to the state captured just before a rewound span, so the resumed agent need not re-read files to reorient. The whole point of a rewind is a cheap re-attempt; re-reading entire files to rebuild "what was there before this turn" *adds* more context than the rewind just shed — defeating its purpose. Restoring the files removes that need: the disk matches the model's mental model of "what was there before I started this turn."
+
+**This feature touches the WORKING TREE (files on disk), not the append-only session tree.** Like the rest of Mulligan, it never mutates the conversation history — your session tree stays append-only. It is **not retry/replay**: no tool call is re-executed, it is a state-restore (the `spec/SPEC.md` §9 D1 hard-retry limitation stands). It reverts working-tree file state from **any** tool — `write`/`edit` **and** bash file commands (`sed -i`, `awk -i inplace`, `cp`, `mv`, `rm`, heredocs, `python -c` writing files) alike. **Non-filesystem effects persist and are NOT reverted:** git refs/history (`git commit`/`push`/`tag` — refs are never touched), the git index (`git add`), excluded dependency/generated dirs (`node_modules`/`.venv`/`dist` — so `npm`/`pip` installs persist), and network/DB/process effects.
+
+Full design in `spec/14-working-tree-revert.md` (§0 scope; §1 opt-in model + granularity table; §3 `GitBackend` + the five git-safety guarantees; §4 `CasBackend` / non-git modes; §6 restore / refuse-on-dirty).
+
+### How to enable it
+
+Set `config.revert.enabled: true` in your `mulligan` settings block (the **master switch**). It is `false` by default, which means the snapshot machinery is entirely inert — zero capture, zero storage, zero overhead; the rewind tool still accepts the flags but ignores them with a one-line notice. Like the rest of the `mulligan` config, the `revert` block is lazy-loaded, cached for the session, and re-read on `/reload`.
+
+### Per-call flags
+
+`mulligan_rewind` gains two optional boolean params. The agent **must set at least one** — they are never inferred:
+
+- **`revert_file_changes`** — restore the working-tree files modified in the rewound span to their pre-span state, so the agent need not re-read them on resume. Best-effort; failures are logged and never block the rewind. Requires `config.revert.enabled`. Ignored at `last_tool_call_group` granularity (noticed in the result).
+- **`delete_created_files`** — **destructive.** Delete working-tree files the rewound span newly created (files that did not exist before the span). Requires **both** this flag **and** the global `config.revert.allowDeleteCreatedFiles: true`. Deletion is the one irreversible action, so it sits behind two gates (the per-call flag **and** a config kill-switch).
+
+### Granularity scope
+
+File revert is supported at `last_turn` and `checkpoint` only:
+
+| Granularity            | File revert?              | Notes |
+|------------------------|---------------------------|-------|
+| `last_turn`            | ✅                         | Restore to the turn-start snapshot. The natural, common case. |
+| `checkpoint`           | ✅                         | Restore to the checkpoint-creation snapshot. |
+| `last_tool_call_group` | ❌ (ignored + noticed)     | Whole-tree snapshots are boundary-granular; a group-granularity file revert would over-revert to turn-start (undoing earlier good edits in the same turn) — a semantic mismatch the tool refuses rather than silently performing. The context rewind still happens normally. |
+
+At `last_tool_call_group`, the file revert is ignored and the tool returns the notice: "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn." (The context rewind still proceeds.)
+
+### Git-safety guarantee
+
+In a git repo the backend uses an **external shadow repository**: its `GIT_DIR` lives under `config.revert.storageDir` (one shadow repo per source worktree), and its `GIT_WORK_TREE` points at the user's working tree. The user's `.git` is **never written — not even a transient/dangling object.** The only command ever run against the user's git is the read-only `git rev-parse` (to resolve repo root/gitdir). The five git-safety guarantees (`spec/14` §3):
+
+1. **No ref-moving or write command is ever issued against the user's git** — every write (`add`, `write-tree`, `commit-tree`, `update-ref`, `read-tree`, `checkout`, `gc`) targets the shadow repo. Forbidden everywhere: `commit`, `reset`, `checkout <branch>`, `merge`, `stash`, `rebase` against the source.
+2. **The user's `.git` is never written — not even a dangling object.** This is strictly cleaner than a `git stash create`-in-source design: there is nothing to reclaim from the user's repo because nothing was ever put there. `git status`, `git log`, `git stash list`, and the reflog of the source repo are byte-for-byte unaffected.
+3. **Restore writes only working-tree files.** The source index and all source refs are never touched.
+4. **`delete_created_files` only deletes files the span created** (present now, absent from the before-snapshot), behind the per-call flag **and** `config.revert.allowDeleteCreatedFiles`.
+5. **Pre-flight refuse-on-dirty** (below): if any affected path drifted since the after-snapshot, the **whole file-revert is refused** — never a silent clobber.
+
+### Dirty-guard behavior
+
+Before restore, a dirty check compares each affected file's **current** content to its after-snapshot state. If **any** affected file changed since the turn ended (a human/other-process edit), the **whole file-revert is refused** — not a silent skip — and the context rewind still proceeds. The rewind result names the dirty paths (`refused`). Rationale: clobbering an unsaved human edit is the one unrecoverable failure; refusing and letting the agent re-request is safe.
+
+### Non-git mode
+
+Outside a git repo, a content-addressed store (**CAS**) backend snapshots and restores the same comprehensive file set. `config.revert.nonGitMode` selects the strategy:
+
+- **`"cas"`** (default) — comprehensive whole-tree: walks cwd minus `excludeGlobs`, dedupes content by hash, reuses unchanged-file hashes via `(mtime, size)` short-circuiting. Universal fallback.
+- **`"explicit-paths"`** — conservative: snapshots only the explicit `write`/`edit` tool paths. Bash file commands are **not** captured (the tool warns once per turn); use this for cost-sensitive workspaces where whole-tree scanning is too broad.
+
+If neither backend can initialize (no git, unwritable storage) → revert is unavailable and the system **fails open**: the rewind still succeeds with just the note (today's pre-v1.2 behavior).
+
+### Configuration
+
+The eight `revert.*` knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/14` §8):
+
+| Knob | Default | What it does |
+|------|---------|--------------|
+| `revert.enabled` | `false` | Master switch (opt-in). `false` → the snapshot machinery is entirely inert. |
+| `revert.allowDeleteCreatedFiles` | `false` | Global kill-switch on the destructive `delete_created_files` path. Required in addition to the per-call flag. |
+| `revert.nonGitMode` | `"cas"` | Non-git capture strategy: `"cas"` (comprehensive whole-tree, default) or `"explicit-paths"` (conservative — `write`/`edit` only). |
+| `revert.storageDir` | `null` | Shadow-repo / CAS root; `null` → `<sessionDir>/mulligan/`. **Never resolves inside `cwd`** (validation rejects it). |
+| `revert.maxFileBytes` | `262144` | Per-file cap (256 KB); skip + warn (fail-closed) — a huge gitignored data file is not silently captured. |
+| `revert.maxTotalBytes` | `33554432` | Per-session cap (32 MB); capture stops beyond it (partial snapshot). |
+| `revert.maxSnapshotsPerTurn` | `64` | Count cap; capture stops beyond it (partial snapshot). |
+| `revert.excludeGlobs` | `[".git","node_modules","dist","build",".next",".venv","target"]` | Snapshot excludes for **both** backends. `.gitignore` is deliberately **not** consulted — see the privacy note. |
+
+> **`.gitignore` is deliberately not consulted.** The snapshot uses its own `excludeGlobs`, not `.gitignore`, so a gitignored `.env` (or secrets/dotfiles) **is** captured and restored on rewind — `.gitignore` means "don't commit to VCS", not "don't snapshot". **Privacy:** captured files live in local snapshot storage (the shadow repo / CAS dir under `storageDir`, **outside** `cwd`), are **never sent anywhere**, and are wiped on `session_shutdown`. Restoring those files is the feature's job.
+
+---
+
+## 6. How It Works
 
 The core insight (established empirically in the feasibility spike, `spec/02-proven-constraints.md`): Pi's conversation is an **append-only tree** that an agent *cannot* structurally mutate from a tool, but the agent **can** drop persisted "view instructions" that the `context` event honors on every inference. A rewind is therefore not a deletion — it is a **permanent soft-delete**: a persisted marker that hides a span from every future inference, while the originals remain on disk and are visible in `/tree`.
 
@@ -238,7 +311,7 @@ See `spec/SPEC.md` §1, §4 and `spec/06-context-filter.md` for the full archite
 
 ---
 
-## 6. Guarantees
+## 7. Guarantees
 
 1. **Soft-delete / audit trail.** Hidden content is **never lost** — it stays in the session JSONL on disk and is visible in Pi's native `/tree`.
 2. **Fail-open.** Any internal error degrades to a logged no-op, never a broken agent turn. Every tool and handler is try/catch-wrapped.
@@ -246,13 +319,13 @@ See `spec/SPEC.md` §1, §4 and `spec/06-context-filter.md` for the full archite
 
 ---
 
-## 7. Known Limitations
+## 8. Known Limitations
 
 Mulligan is deliberately minimal. These are the four things it deliberately does **not** do in v1.
 
 - **Compaction leak (`spec/08-edge-cases.md` E7).** Pi's auto-compaction may summarize a span that included a Mulligan-hidden message, producing a transient "leak" via the summary until the next compaction settles. v1 accepts this as bounded and transient — and Mulligan *reducing* context makes compaction fire later and over less-important content. There is no v1 mitigation.
-- **No general undo (`spec/SPEC.md` §9 D6; softened by `spec/08-edge-cases.md` E21).** Agent-initiated rewinds and shrinks persist across reload and `/resume`, and there is no un-rewind that *replays* hidden content or *reverses* on-disk side effects (file edits and bash commands persist) — a human who wants to explore hidden content uses Pi's native `/tree`. One safety valve now exists: a mis-targeted marker is **retractable** via `mulligan_cancel`, which stops the transform applying from the next turn on (the marker stays on disk for the audit trail). This softens D6 for marker mistakes; it does not make rewinds/shrinks generally reversible.
-- **No hard retry / replay (`spec/SPEC.md` §9 D1).** Mulligan supports *soft* retry only (rewind + note + re-plan). Hidden tool calls' **side effects persist on disk** (files written, commands run); replaying them would compound those effects (a duplicate commit, a double `mkdir`). The mutation warning and the note's `true_current_state` / auto-appended file ledger are the safeguards.
+- **No general undo (`spec/SPEC.md` §9 D6; softened by `spec/08-edge-cases.md` E21).** Agent-initiated rewinds and shrinks persist across reload and `/resume`, and there is no un-rewind that *replays* hidden content or *reverses* on-disk side effects — a human who wants to explore hidden content uses Pi's native `/tree`. Working-tree **file content** is now *conditionally* reversible on opt-in via v1.2 (see [§5](#5-working-tree-revert-v12-opt-in)); **non-filesystem** effects (bash network/DB/git refs, the git index) and the **session-tree view** still persist. One safety valve now exists: a mis-targeted marker is **retractable** via `mulligan_cancel`, which stops the transform applying from the next turn on (the marker stays on disk for the audit trail). This softens D6 for marker mistakes; it does not make rewinds/shrinks generally reversible.
+- **No hard retry / replay (`spec/SPEC.md` §9 D1).** Mulligan supports *soft* retry only (rewind + note + re-plan). Hidden tool calls' **side effects persist on disk** (files written, commands run); replaying them would compound those effects (a duplicate commit, a double `mkdir`). File **writes** are *conditionally* reversible on opt-in (v1.2 [§5](#5-working-tree-revert-v12-opt-in) restores working-tree file content); **non-filesystem** bash effects (network/DB/processes) and **git ref/history mutations** still persist and are NOT reverted. The mutation warning and the note's `true_current_state` / auto-appended file ledger are the safeguards.
 - **Markers accumulate (`spec/08-edge-cases.md` E15).** v1 does no marker garbage-collection — markers persist intentionally (they are the audit trail). `rewind.maxDepth=5` bounds simultaneous *active* rewind markers; the only cost is disk growth (markers are control state, not in context). The filter is cheap in practice (few markers × messages bounded by compaction). Two hard backstops guard against runaway same-prompt retry loops (`spec/08-edge-cases.md` E22): a per-prompt retry budget (`rewind.maxRetriesPerPrompt`) and a context-fraction stop (`rewind.abortContextFraction`) that refuse a rewind *before* it can drive the context to a provider 'Prompt too long' rejection.
 
 ### Resolved bugs (BUG-001–BUG-005)
@@ -275,7 +348,7 @@ A second validation pass (v1.1) found and fixed four more edge-case bugs (2 Majo
 
 ---
 
-## 8. License
+## 9. License
 
 **MIT** (per `spec/SPEC.md`). The MIT text is in the top-level [`LICENSE`](./LICENSE) file.
 
@@ -290,3 +363,4 @@ The `spec/` directory is the deep-detail reference. Start with `spec/SPEC.md` (t
 - `spec/09-configuration.md` — the configuration surface + coercion rules.
 - `spec/08-edge-cases.md` — edge cases (E7 compaction leak, E14 master switch, E15 markers).
 - `spec/13-human-commands.md` — the three human commands + active-checkpoint banner.
+- `spec/14-working-tree-revert.md` — the v1.2 working-tree-revert feature (opt-in file restoration, snapshot backends, git-safety, dirty guard).

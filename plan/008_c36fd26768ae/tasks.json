@@ -549,7 +549,7 @@
       "type": "Phase",
       "id": "P5",
       "title": "Integration tests + changeset-level documentation",
-      "status": "Ready",
+      "status": "Complete",
       "description": "The 8 integration test scenarios from spec/10 (each validates a specific cross-cutting behavior path) and the README.md changeset-level documentation sync. Unit tests for each component are implicit in the implementation subtasks (TDD per §3); this phase covers integration-level verification and the Mode-B doc sweep.",
       "milestones": [
         {
@@ -635,21 +635,21 @@
           "type": "Milestone",
           "id": "P5.M2",
           "title": "Sync changeset-level documentation (Mode B — R7)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Cross-cutting docs that only make sense once R1–R6 land. The README gets a new 'Working-tree revert (v1.2)' section. Depends on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P5.M2.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Update README.md with the working-tree revert feature section. Grep for stale v1.1 language. Verify no orphan references.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P5.M2.T1.S1",
                   "title": "README.md 'Working-tree revert (v1.2)' section + stale-reference sweep",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
