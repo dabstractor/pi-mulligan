@@ -215,7 +215,7 @@ Set `config.revert.enabled: true` in your `mulligan` settings block (the **maste
 
 `mulligan_rewind` gains two optional boolean params. The agent **must set at least one** — they are never inferred:
 
-- **`revert_file_changes`** — restore the working-tree files modified in the rewound span to their pre-span state, so the agent need not re-read them on resume. Best-effort; failures are logged and never block the rewind. Requires `config.revert.enabled`. Ignored at `last_tool_call_group` granularity (noticed in the result).
+- **`revert_file_changes`** — restore the working-tree files modified in the rewound span to their pre-span state, so the agent need not re-read them on resume. Best-effort; failures are logged and never block the rewind. Files skipped at capture time because a cap was hit (`maxFileBytes`/`maxTotalBytes`/`maxSnapshotsPerTurn`) are surfaced in the result (the success text notes "N skipped/failed" and the marker's `revert.skipped` flag is set), so the agent is told its file-revert was incomplete rather than silently dropped. Requires `config.revert.enabled`. Ignored at `last_tool_call_group` granularity (noticed in the result).
 - **`delete_created_files`** — **destructive.** Delete working-tree files the rewound span newly created (files that did not exist before the span). Requires **both** this flag **and** the global `config.revert.allowDeleteCreatedFiles: true`. Deletion is the one irreversible action, so it sits behind two gates (the per-call flag **and** a config kill-switch).
 
 ### Granularity scope
@@ -225,7 +225,7 @@ File revert is supported at `last_turn` and `checkpoint` only:
 | Granularity            | File revert?              | Notes |
 |------------------------|---------------------------|-------|
 | `last_turn`            | ✅                         | Restore to the turn-start snapshot. The natural, common case. |
-| `checkpoint`           | ✅                         | Restore to the checkpoint-creation snapshot. |
+| `checkpoint`           | ✅                         | Restore to the checkpoint-creation snapshot. Checkpoints are rebuilt from the persisted `mulligan:revert-checkpoint` control entries on session start, so a checkpoint-granularity `revert_file_changes` still finds its snapshot after `/resume`. |
 | `last_tool_call_group` | ❌ (ignored + noticed)     | Whole-tree snapshots are boundary-granular; a group-granularity file revert would over-revert to turn-start (undoing earlier good edits in the same turn) — a semantic mismatch the tool refuses rather than silently performing. The context rewind still happens normally. |
 
 At `last_tool_call_group`, the file revert is ignored and the tool returns the notice: "File revert applies to last_turn/checkpoint granularity — to also restore files, rewind the whole turn." (The context rewind still proceeds.)
@@ -242,7 +242,9 @@ In a git repo the backend uses an **external shadow repository**: its `GIT_DIR` 
 
 ### Dirty-guard behavior
 
-Before restore, a dirty check compares each affected file's **current** content to its after-snapshot state. If **any** affected file changed since the turn ended (a human/other-process edit), the **whole file-revert is refused** — not a silent skip — and the context rewind still proceeds. The rewind result names the dirty paths (`refused`). Rationale: clobbering an unsaved human edit is the one unrecoverable failure; refusing and letting the agent re-request is safe.
+Before restore, a dirty check compares each **affected** file's **current** content to its after-snapshot state. The **affected** set is the comprehensive snapshot diff — every workspace path that differs between the pre-span snapshot and the current tree — so it covers `write`/`edit` **and** bash file mutations (`sed -i`, `awk -i inplace`, `cp`/`mv`/`rm`, `python -c`, `perl -i`, heredocs), not just the write/edit tool calls. If **any** affected file drifted since the turn ended (a human/other-process edit), the **whole file-revert is refused** — not a silent clobber — and the context rewind still proceeds; the rewind result names the drifted paths in the marker's `refusedFiles` field.
+
+The dirty guard is a **turn-level** guarantee: it needs the turn's after-snapshot (captured at `agent_end`). A **checkpoint** captures once and has no after-snapshot, so checkpoint-granularity revert **skips** the dirty guard and restores to the checkpoint snapshot directly (a checkpoint's entire purpose is wholesale rollback to a known point). Rationale: clobbering an unsaved human edit is the one unrecoverable failure; for turns the guard refuses and lets the agent re-request, while checkpoints restore outright. See `spec/14` §6 step 3.
 
 ### Non-git mode
 
