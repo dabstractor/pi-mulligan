@@ -10,6 +10,7 @@ import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
 import { makeCancelTool } from "./tools/cancel.js"; // 4th agent-callable tool (P3.M1.T3.S1)
 import { makeCheckpointCommand, makeCheckpointRevokeCommand, makeAuditCommand } from "./commands.js"; // 3 human slash commands (P2.M1.T1.S1 + P2.M2.T1.S1)
+import { reconcileBanner } from "./banner.js"; // [P2.M3.T1.S3 / spec/13 §5] restore/refresh the active-checkpoint banner at the refresh points
 
 /**
  * Mulligan — Pi extension factory (spec/01 §1, spec/03 §4, spec/11 §8 Step 8).
@@ -83,6 +84,10 @@ export default function (pi: ExtensionAPI): void {
     setConfig(loadMulliganConfig(ctx.cwd));
     setLogFile(getConfig().log.file);
     resetRuntime(ctx.sessionManager.getSessionId());
+    reconcileBanner(ctx); // [P2.M3.T1.S3 / spec/13 §5] restore the banner on every session start
+                           // (startup|reload|new|resume|fork) — so /resume never silently drops the reminder.
+                           // Bare call (no wrapper): reconcileBanner NEVER throws (S2), matching the handler's
+                           // fail-open convention (its other callees are also fail-open).
   });
 
   // 7. session_shutdown → wipe ALL per-session runtimes (full process teardown). Never throws.

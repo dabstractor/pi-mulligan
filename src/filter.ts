@@ -39,6 +39,7 @@ import type {
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { reconcileBanner } from "./banner.js"; // [P2.M3.T1.S3 / spec/13 §5] banner reconciliation at the contextHandler tail
 import { filterPipeline, resolvePinnedShrink, stableSortBySeq } from "./transforms.js";
 import type { MessageLike, BranchEntry, RewindDiag } from "./transforms.js";
 import { getRuntime } from "./runtime.js";
@@ -428,6 +429,17 @@ export function contextHandler(
       } catch {
         /* log() never throws, but be safe */
       }
+    }
+
+    // [P2.M3.T1.S3 / spec/13 §5] Defense-in-depth: reconcile the active-checkpoint banner on EVERY context
+    // fire. The filter already scans entries; this catches checkpoint CONSUMPTION (a rewind retires the
+    // label) and any state change the command/session_start hooks missed. NEVER throws — the explicit
+    // try/catch preserves the already-computed filter transform (without it, a throw would reach the OUTER
+    // catch → void pass-through, losing the transform — E13). reconcileBanner itself never throws (S2).
+    try {
+      reconcileBanner(ctx);
+    } catch {
+      /* E13 — banner failure must never break a context fire */
     }
 
     // ONE cast at the return boundary: MessageLike[] -> Pi's AgentMessage[] (ContextEventResult.messages).
