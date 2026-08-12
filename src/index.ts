@@ -9,13 +9,17 @@ import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
 import { auditTool } from "./tools/audit.js";
 import { makeCancelTool } from "./tools/cancel.js"; // 4th agent-callable tool (P3.M1.T3.S1)
+import { makeCheckpointCommand, makeCheckpointRevokeCommand } from "./commands.js"; // 2 human slash commands (P2.M1.T1.S1)
 
 /**
  * Mulligan — Pi extension factory (spec/01 §1, spec/03 §4, spec/11 §8 Step 8).
  *
  * The single entry point (package.json `main` + `pi.extensions`). Wires all 4 agent-callable tools,
- * the 3 event-driven handlers (context filter + 2 nudges), and the session lifecycle (runtime reset /
- * full cleanup). Config loads from merged Pi settings (global ~/.pi/agent + project-local <cwd>/.pi)
+ * the 3 event-driven handlers (context filter + 2 nudges), the 2 human slash commands
+ * (/mulligan_checkpoint, /mulligan_checkpoint_revoke — spec/13 §2–§3; v1.1 replaces the v1
+ * mulligan_checkpoint agent tool, E23 RESOLVED), and the session lifecycle (runtime reset /
+ * full cleanup). /mulligan_audit is added by P2.M2.T1.S2. Config loads from merged Pi settings
+ * (global ~/.pi/agent + project-local <cwd>/.pi)
  * via loadMulliganConfig → setConfig; absent/invalid settings fail-open to validated DEFAULT_CONFIG
  * (enabled:true, log off).
  *
@@ -49,12 +53,18 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool(auditTool);
   pi.registerTool(makeCancelTool(pi)); // 4th tool — marker retraction (P3.M1.T3.S1 / E21)
 
-  // 4. Arm the 3 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
+  // 4. Register the 2 human slash commands (spec/13 §2–§3; v1.1 replaces the v1 mulligan_checkpoint
+  //    agent tool — E23 RESOLVED). Both are FACTORIES capturing `pi` via closure (mirroring the tool
+  //    factories above). No try/catch — fail-fast by design (GOTCHA #7).
+  pi.registerCommand("mulligan_checkpoint", makeCheckpointCommand(pi));
+  pi.registerCommand("mulligan_checkpoint_revoke", makeCheckpointRevokeCommand(pi));
+
+  // 5. Arm the 3 event-driven handlers (each is a thin pi.on seam; fail-open lives INSIDE each handler).
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart
   registerBloatReminder(pi); // pi.on("tool_result", bloatReminderHandler) — Nudge A
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
 
-  // 5. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
+  // 6. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
   //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory
   //    (step 1) loaded config with process.cwd() because it had no ctx (lifecycle asymmetry, D4);
   //    here ctx.cwd is the real project root, so this is the correct place to re-read. Doubly
@@ -71,7 +81,7 @@ export default function (pi: ExtensionAPI): void {
     resetRuntime(ctx.sessionManager.getSessionId());
   });
 
-  // 6. session_shutdown → wipe ALL per-session runtimes (full process teardown). Never throws.
+  // 7. session_shutdown → wipe ALL per-session runtimes (full process teardown). Never throws.
   pi.on("session_shutdown", () => {
     clearAll();
   });

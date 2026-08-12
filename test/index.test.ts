@@ -29,6 +29,7 @@ beforeEach(() => {
 function makePi() {
   const handlers: Record<string, ((...a: unknown[]) => unknown) | undefined> = {};
   const tools: { name: string }[] = [];
+  const commands: { name: string }[] = [];
   const pi = {
     on(event: string, handler: (...a: unknown[]) => unknown) {
       handlers[event] = handler;
@@ -36,8 +37,11 @@ function makePi() {
     registerTool(tool: { name: string }) {
       tools.push(tool);
     },
+    registerCommand(name: string, _options: unknown) {
+      commands.push({ name });
+    },
   };
-  return { handlers, tools, pi: pi as unknown as ExtensionAPI };
+  return { handlers, tools, commands, pi: pi as unknown as ExtensionAPI };
 }
 
 /** Minimal fake ExtensionContext: carries the sessionManager (getSessionId) and cwd that the
@@ -77,6 +81,14 @@ describe("index.ts extension factory", () => {
     const { tools, pi } = makePi();
     indexFactory(pi);
     expect(tools.length).toBe(4);
+  });
+
+  it("registers the 2 human checkpoint slash commands with the exact names", () => {
+    const { commands, pi } = makePi();
+    indexFactory(pi);
+    expect(commands.map((c) => c.name).sort()).toEqual(
+      ["mulligan_checkpoint", "mulligan_checkpoint_revoke"].sort(),
+    );
   });
 
   it("arms the 5 event handlers", () => {
