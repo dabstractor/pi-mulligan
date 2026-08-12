@@ -386,7 +386,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S2",
                   "title": "src/banner.ts: reconcileBanner(ctx) helper",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M3.T1.S1"
@@ -402,7 +402,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S3",
                   "title": "Hook reconcileBanner into the refresh points (commands + session_start + contextHandler tail)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M3.T1.S2",
