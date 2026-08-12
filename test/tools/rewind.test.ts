@@ -298,7 +298,7 @@ describe("mulligan_rewind — registration metadata (spec/05 §5)", () => {
 
   it("description is the spec/05 §5 verbatim string", () => {
     expect(REWIND_DESC).toBe(
-      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.",
+      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. Set revert_file_changes to also restore the working-tree files you modified, so you need not re-read them on resume (v1.2, opt-in, last_turn/checkpoint only).",
     );
   });
 
@@ -806,7 +806,7 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
     expectTypeOf(tool.name).toEqualTypeOf<string>();
   });
 
-  it("RewindArgs (Static<typeof RewindParams>) has note + granularity + checkpoint", () => {
+  it("RewindArgs (Static<typeof RewindParams>) has note + granularity + checkpoint + v1.2 revert fields", () => {
     const args = {} as RewindArgs;
     expectTypeOf(args.note).toEqualTypeOf<{
       what_happened: string;
@@ -815,6 +815,11 @@ describe("mulligan_rewind — types (ToolDefinition + RewindParams inference)", 
     }>();
     expectTypeOf(args.granularity).toEqualTypeOf<"last_tool_call_group" | "last_turn" | "checkpoint">();
     expectTypeOf(args.checkpoint).toEqualTypeOf<string | undefined>();
+    // [P4.M1.T1.S1] v1.2 working-tree revert params — optional booleans (Type.Optional → boolean | undefined).
+    expectTypeOf(args.revert_file_changes).toEqualTypeOf<boolean | undefined>();
+    expectTypeOf(args.delete_created_files).toEqualTypeOf<
+      boolean | undefined
+    >();
   });
 
   it("execute returns AgentToolResult<RewindDetails>", async () => {
@@ -1364,5 +1369,57 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
     });
     const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
     expect(firstText(res2)).toContain("Mulligan: refused — checkpoint 'x' not found on this branch.");
+  });
+});
+// ── P4.M1.T1.S1: v1.2 working-tree revert params (schema additions; logic is P4.M2.T1) ──────
+// RewindParams gained two Type.Optional(Type.Boolean(...)) fields: revert_file_changes + delete_created_files.
+// This item is schema + description ONLY — the params are CARRIED but NOT yet acted on (step 6b is P4.M2.T1).
+// These tests prove: (a) backward-compat (omitting the new fields still works), (b) schema presence
+// (both keys are present + boolean at the typebox level), (c) a positive-path call that DOES pass
+// revert_file_changes:true is accepted but NOT yet reverted (no premature step-6b wiring).
+
+describe("mulligan_rewind — v1.2 revert params (P4.M1.T1.S1)", () => {
+  // (a) BACKWARD-COMPAT — calling with ONLY {note, granularity} (no new fields) behaves exactly as before.
+  // Easiest robust variant: a config-disabled refusal (no snapshot needed) so we assert the NORMAL refusal text.
+  it("calling with {note, granularity} (NO new fields) still behaves normally (backward-compat)", async () => {
+    setConfig({ rewind: { enabled: false } });
+    const { pi } = makePi();
+    const { ctx } = makeCtx();
+    const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
+    expect(firstText(res)).toBe("Mulligan: refused — rewind is disabled.");
+  });
+
+  // (b) SCHEMA PRESENCE — the typebox schema carries both keys, each a boolean.
+  it("RewindParams.properties carries revert_file_changes + delete_created_files as booleans", () => {
+    const props = RewindParams.properties as Record<string, { type?: string }>;
+    expect(props).toHaveProperty("revert_file_changes");
+    expect(props).toHaveProperty("delete_created_files");
+    expect(props.revert_file_changes?.type).toBe("boolean");
+    expect(props.delete_created_files?.type).toBe("boolean");
+  });
+
+  // (c) POSITIVE-PATH — a call that DOES pass revert_file_changes:true is accepted but NOT yet reverted
+  //     (the param is ignored until P4.M2.T1). Guards against prematurely wiring step-6b logic.
+  it("passing revert_file_changes:true is accepted but does NOT yet revert (success text has no 'Reverted')", async () => {
+    const { pi } = makePi();
+    // seed a minimal snapshot so the success path resolves (a user msg + a non-excluded toolGroup → K>0)
+    const { ctx } = makeCtx({
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asst("X")),
+        msgEntry(result("X")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, {
+      note: VALID_NOTE,
+      granularity: "last_turn",
+      revert_file_changes: true,
+    });
+    expect(firstText(res)).toContain("Mulligan: rewound"); // accepted (not refused)
+    // CRITICAL #5: NO step-6b logic in this item → the success text must NOT contain a "Reverted" clause
+    // (that wording lands in P4.M2.T1).
+    expect(firstText(res)).not.toContain("Reverted");
   });
 });

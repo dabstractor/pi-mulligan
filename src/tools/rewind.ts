@@ -112,6 +112,20 @@ export const RewindParams = Type.Object({
         "Required when granularity=checkpoint. The name of a checkpoint set via mulligan_checkpoint.",
     }),
   ),
+
+  // ── v1.2 working-tree revert (opt-in). See @14-working-tree-revert.md. ──
+  revert_file_changes: Type.Optional(
+    Type.Boolean({
+      description:
+        "v1.2 OPT-IN. When true (granularity last_turn/checkpoint), restore the working-tree files you modified in the rewound span to their pre-span state, so you need not re-read them on resume. Best-effort; failures are logged and never block the rewind. Requires revert to be enabled in config. Ignored at last_tool_call_group granularity (noticed in the result).",
+    }),
+  ),
+  delete_created_files: Type.Optional(
+    Type.Boolean({
+      description:
+        "v1.2 OPT-IN, DESTRUCTIVE. When true, DELETE working-tree files the rewound span newly created (files that did not exist before the span). Requires BOTH this flag AND config.revert.allowDeleteCreatedFiles. Best-effort.",
+    }),
+  ),
 });
 
 /** RewindArgs — the inferred execute-time params type. EXPORTED for ergonomics/tests. */
@@ -124,7 +138,7 @@ export type RewindArgs = Static<typeof RewindParams>;
  * This string IS the tool's documentation. Copy verbatim — it drives LLM usage.
  */
 export const REWIND_DESC =
-  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.";
+  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. Set revert_file_changes to also restore the working-tree files you modified, so you need not re-read them on resume (v1.2, opt-in, last_turn/checkpoint only)."; // v1.2 append: spec/05 §6 revert_file_changes advertisement sentence
 
 // ── Mutation warning (spec/08 E5 — VERBATIM warning string) ──────────────────
 
