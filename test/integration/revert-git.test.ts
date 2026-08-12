@@ -728,4 +728,115 @@ describe("F-revert-* integration (spec/10 §2.1 / spec/14)", () => {
     // sanity: not a refusal.
     expect(firstText(res)).not.toContain("Mulligan: refused");
   });
+
+  // ── F-revert-dirtyguard (BUG-004 regression: bash/python-mutated file caught by changedPaths) ──
+  //
+  // The agent mutates b.ts via a `python3 -c` bash call. python3 is NOT in FILE_MUTATING_COMMANDS,
+  // so the OLD heuristic (ledger.modifiedFiles) recorded modifiedFiles=[] → the dirty guard inspected
+  // NO affected paths → a concurrent human edit to b.ts was silently clobbered (E30). The BUG-004 fix
+  // (rewind.ts: `affectedPaths = await store.changedPaths(checkpoint.beforeRef)`) derives the affected
+  // set from the git diff instead, so b.ts IS inspected → the guard REFUSES on the human edit.
+  it("F-revert-dirtyguard: file mutated via non-heuristic bash (python3) is covered by changedPaths; a concurrent human edit REFUSES the revert (BUG-004)", async () => {
+    if (!(await gitAvailable())) {
+      console.warn("[revert-git] git not on PATH — skipping F-revert-dirtyguard");
+      return;
+    }
+
+    // SETUP: a real git repo with an initial commit on b.ts.
+    const repoDir = await makeRepo("rev-dirtyguard-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "b.ts"), "original\n");
+    await git(repoDir, ["add", "-A"]);
+    await git(repoDir, ["config", "user.email", "test@example.com"]);
+    await git(repoDir, ["config", "user.name", "Test"]);
+    await git(repoDir, ["commit", "-m", "init"]);
+
+    // SEPARATE storage dir (must NOT resolve inside cwd — config rejects that → NoOpStore).
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    setConfig({ revert: { enabled: true, storageDir } });
+
+    // REAL store via detectAndCreate (GitBackend).
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("git");
+
+    // WIRE the store into the runtime BEFORE the capture hooks (they self-gate on rt.store).
+    const sid = "s-dirtyguard";
+    const rt = getRuntime(sid);
+    rt.store = store;
+
+    const { pi } = makePi();
+
+    // The span contextEntries (ledger source). CRITICAL: python3 is NOT in FILE_MUTATING_COMMANDS,
+    // so the heuristic ledger.modifiedFiles=[] / the bashSideEffects gap — exactly the BUG-004
+    // reproduction. (sed/cp/mv/tee ARE in FILE_MUTATING_COMMANDS and would NOT reproduce the gap.)
+    const contextEntries = [
+      msgEntry(user("rewrite b.ts via a script")),
+      msgEntry(
+        asstBash("p1", "python3 -c \"open('b.ts','w').write('agent-version')\""),
+      ),
+      msgEntry(result("p1")),
+      msgEntry(asst("final")),
+      msgEntry(result("final")),
+    ];
+    const { ctx } = makeCtx({ sessionId: sid, contextEntries });
+
+    // CAPTURE turn_start (REAL hook) → rt.snapshots?.get("turn").beforeRef.
+    await turnStartCaptureHandler(
+      { type: "turn_start", turnIndex: 0, timestamp: Date.now() },
+      ctx,
+    );
+    const turnCp = rt.snapshots?.get("turn");
+    expect(turnCp).toBeTruthy();
+    const beforeRef = (turnCp as RevertCheckpoint).beforeRef;
+    expect(beforeRef).toBeTruthy();
+
+    // THE REAL MUTATION — write b.ts directly (do NOT execute python3; the parse-only bashSideEffects
+    // heuristic is what we are exercising, and running an arbitrary python heredoc is brittle on CI).
+    writeFileSync(join(repoDir, "b.ts"), "agent-version\n");
+
+    // CAPTURE agent_end (REAL hook) → mutates the turn checkpoint's .afterRef in place.
+    await agentEndCaptureHandler({ type: "agent_end", messages: [] }, ctx);
+    const afterTurnCp = rt.snapshots?.get("turn");
+    expect(afterTurnCp).toBeTruthy();
+    const afterRef = (afterTurnCp as RevertCheckpoint).afterRef;
+    expect(afterRef).toBeTruthy();
+
+    // STORE MICRO-ASSERTIONS — pin the BUG-004 fix's data sources in isolation:
+    //   (a) changedPaths(beforeRef) — the NEW affected set — MUST include b.ts (the file restore would
+    //       touch), even though ledger.modifiedFiles missed it.
+    //   (b) dirtyCheck(afterRef, []) with an EMPTY path scope returns [] (mirrors the OLD heuristic's
+    //       behavior: no paths inspected ⇒ no drift ⇒ would CLOBBER the human edit). This is the guard
+    //       the BUG-004 fix replaced.
+    expect(await store.changedPaths(beforeRef!)).toContain("b.ts");
+    expect(await store.dirtyCheck(afterRef!, [])).toEqual([]);
+
+    // HUMAN EDIT — a concurrent edit DISTINCT from both "original" (pre-span) and "agent-version"
+    // (in-span). The dirty guard (now scoped to the changedPaths-derived affected set) MUST catch this
+    // drift and REFUSE the revert so the human edit survives.
+    writeFileSync(join(repoDir, "b.ts"), "HUMAN-EDIT\n");
+
+    // Confirm the NEW affected set catches the drift (this is what dirtyCheck receives at execute time).
+    expect(await store.dirtyCheck(afterRef!, ["b.ts"])).toContain("b.ts");
+
+    // DRIVE the REAL rewind tool. granularity MUST be "last_turn" (checkpoints capture once → no
+    // afterRef → the dirty guard is SKIPPED entirely; only last_turn runs it).
+    const res = await run(
+      pi,
+      ctx,
+      { note: VALID_NOTE, granularity: "last_turn", revert_file_changes: true },
+      "final",
+    );
+
+    // ASSERT the dirty guard REFUSED the file-revert (context rewind still proceeded — not a top-level
+    // refusal). The exact refusal clause from rewind.ts step 6b.
+    const text = firstText(res);
+    expect(text).toContain(
+      "file revert refused: 1 path(s) changed since the turn ended",
+    );
+    expect(text).not.toContain("Mulligan: refused");
+
+    // ASSERT the concurrent human edit SURVIVED (E30 — never silently clobbered).
+    expect(readFileSync(join(repoDir, "b.ts"), "utf8")).toBe("HUMAN-EDIT\n");
+  });
 });

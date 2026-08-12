@@ -181,7 +181,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Major Fix — Dirty Guard Affected Set from Snapshot Diff (BUG-004)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Derive the dirty-guard affected set from the store, not the heuristic ledger. Add a SnapshotStore.changedPaths(beforeRef) method that returns paths differing between beforeRef and the current tree (git: git diff --name-only; cas: hash-compare). Wire it into rewind.ts step 6b to replace ledger.modifiedFiles. This closes the E30 gap for python/node/perl/heredoc-modified files that are reverted by restore but never guarded by dirtyCheck.",
           "tasks": [
             {
@@ -246,7 +246,7 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Wire changedPaths into rewind.ts dirty guard + add E30 test for bash/python-modified file",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Replace the heuristic ledger.modifiedFiles with store.changedPaths(checkpoint.beforeRef) in rewind.ts step 6b. This makes the dirty guard inspect ALL files restore would touch, not just the heuristic subset. Also add an E30 integration test for a bash/python-modified file with a post-turn human edit.",
               "subtasks": [
                 {
@@ -273,7 +273,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "Add E30 dirty-guard integration test for bash/python-modified file with post-turn human edit",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
@@ -302,14 +302,14 @@
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Populate RestoreResult.skipped bucket for caps-degraded restores (BUG-005)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Both backends initialize result.skipped = [] but never push to it. Capture can write partial manifests when caps are exceeded. On restore, uncaptured files are silently absent. Track oversize/over-budget paths during capture, persist them as manifest metadata, and surface them in the skipped bucket on restore.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Track skipped/oversize paths during capture and surface on restore in both backends",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/008_c36fd26768ae/bugfix/001_83222ae5e11f/architecture/bug_fix_analysis.md §BUG-005. In src/snapshot/git.ts restore() (~line 650): `result.skipped = []` is initialized but never pushed to. In src/snapshot/cas.ts restore() (~line 749): same. The git backend's capture() aborts entirely on maxTotalBytes exceeded (returns null → no snapshot → nothing to restore). Oversize files are skipped via pathspec negation during capture's caps pre-walk (scanForCaps returns oversizePaths). The CAS backend's captureExplicitPaths/capture skip individual files on maxFileBytes/maxTotalBytes and mark partial=true. The CasManifest type (src/snapshot/cas.ts) has { version, label, turnIndex, ts, files } — no skipped field.\n2. INPUT: The CasManifest type in cas.ts (may need a new optional field). The scanForCaps result in git.ts (has oversizePaths). The capture() methods in both backends. The restore() methods in both backends. The RestoreResult.skipped bucket.\n3. LOGIC: CAS approach (simpler — capture is file-by-file): (a) Add an optional `skipped?: string[]` field to CasManifest. (b) In captureExplicitPaths and capture (cas mode), when a file is skipped due to maxFileBytes or maxTotalBytes, push its rel path to a local `skippedPaths: string[]` array. (c) Include `skipped: skippedPaths` in the manifest JSON when serializing. (d) In restore(), read manifest.skipped and push each to result.skipped (so the agent sees which files were uncaptured). Git approach: git capture is atomic (aborts on budget → null → no snapshot at all, so restore never runs → skipped is moot). For oversize files skipped via pathspec: the scanForCaps returns oversizePaths. These files are not in the tree. On restore, if a file is in the working tree but NOT in the beforeRef tree AND it's not a created-file (was present before the turn), it was skipped at capture. Detecting this on restore is fragile. SIMPLER for git: during capture, persist oversizePaths alongside the commit (e.g., as a ref note or a sidecar JSON). On restore, read them and push to result.skipped. OR: since git capture ABORTS on maxTotalBytes (returns null), the only skipped files are oversize ones. At restore time, a file that was oversize at capture is simply not in the tree. To detect: compare the beforeRef tree to the afterRef tree — files in afterRef but not beforeRef that are also not in the git diff output are... this is overcomplicated. PRAGMATIC for git: persist oversizePaths as a JSON sidecar file alongside the shadow repo (e.g., <shadowDir>/oversize/<commitSha>.json). On restore, read it and push to result.skipped. The rewind tool's success text already counts `skipped + failed` — with this fix, skipped > 0 when caps were hit. NOTE: for git this is genuinely minor — capture aborts on budget overrun, so the whole snapshot is absent (null) and restore never runs. The skipped bucket only matters for CAS (file-by-file partial). For git, focus on oversize files (which ARE skipped individually via pathspec negation but the snapshot still succeeds). For git, add a sidecar or reflog note. FOR SIMPLICITY: implement the CAS path fully (add skipped to manifest, surface on restore). For git, persist oversizePaths alongside the commit and surface on restore. Both approaches best-effort.\n4. OUTPUT: Both backends populate RestoreResult.skipped for files uncaptured due to caps. The rewind success text and the marker's revert.skipped flag now reflect E29 degradation.\n5. DOCS: [Mode A] Update CasManifest JSDoc (new skipped field) + JSDoc on restore() skipped bucket population in both backends. No user-facing/config/API surface change.",
