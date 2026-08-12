@@ -35,6 +35,17 @@
       // "autoOnBloat": false         // NOT in v1; reserved. Auto-shrink would risk data loss.
     },
 
+    "revert": {                      // v1.2: opt-in working-tree file restoration on rewind (@14-working-tree-revert.md)
+      "enabled": false,              // master opt-in — DEFAULT OFF (snapshot machinery fully inert until enabled)
+      "allowDeleteCreatedFiles": false, // global kill-switch on the destructive delete path (even when the agent asks)
+      "nonGitMode": "cas",          // "cas" (default, comprehensive whole-tree) | "explicit-paths" (conservative: write/edit only, bash excluded)
+      "storageDir": null,           // shadow-repo / CAS root; null → <sessionDir>/mulligan/. NEVER under cwd.
+      "maxFileBytes": 262144,        // per-file cap; 256 KB. ALL backends: skip+warn (fail-closed)
+      "maxTotalBytes": 33554432,     // per-session cap for the CAS backend; 32 MB
+      "maxSnapshotsPerTurn": 64,     // count cap; capture stops accepting new data beyond it
+      "excludeGlobs": [".git","node_modules","dist","build",".next",".venv","target"]  // snapshot excludes for BOTH backends (.gitignore is NOT used — gitignored files like .env ARE captured)
+    },
+
     "nudges": {
       "bloatReminder": true,          // tool_result annotation when a result exceeds threshold
       "perTurnDrift": true,           // context-annotation when a turn grew past threshold
@@ -77,6 +88,12 @@
 | `shrink.maxActive` | `32` | Bounds long-session filter cost and marker accumulation; the oldest shrink is retired when exceeded. Mirrors `rewind.maxDepth`. |
 | `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent this many consecutive fires (`@08-edge-cases.md` E15/E21). Stops dead markers from being walked every fire. |
 | `shrink.notifyMaxChars` | `2048` | Caps the replacement text shown to the operator via `ctx.ui.notify` when a shrink is recorded. Pure UI side-channel — **zero context cost** (the tool result itself stays terse). `@05-tools.md` §2. |
+| `revert.enabled` | `false` | v1.2 working-tree revert is opt-in by default — the snapshot machinery is fully inert until enabled (`@14`). The agent must additionally ask per-call. |
+| `revert.allowDeleteCreatedFiles` | `false` | Deletion is the one irreversible revert action, so it sits behind BOTH the per-call `delete_created_files` flag AND this global config gate. |
+| `revert.nonGitMode` | `"cas"` | Non-git capture strategy: `"cas"` (default — comprehensive whole-tree) or `"explicit-paths"` (conservative — only `write`/`edit` tool paths; bash not captured; the `pi-undo-redo` model). |
+| `revert.storageDir` | `null` | Root for the shadow repo / CAS store. `null` → `<sessionDir>/mulligan/`. MUST NOT resolve inside `cwd` (would pollute the workspace). |
+| `revert.maxFileBytes` / `maxTotalBytes` / `maxSnapshotsPerTurn` | `262144` / `33554432` / `64` | Bounds BOTH backends' storage; capture stops (best-effort degrade) beyond them. The git backend skips files > `maxFileBytes` (fail-closed) and stops capturing past `maxTotalBytes`. |
+| `revert.excludeGlobs` | `[.git, node_modules, …]` | Snapshot excludes for BOTH backends (`.gitignore` is deliberately NOT used — a gitignored `.env` is still wanted in a snapshot). Keeps capture off heavy/generated dirs. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
@@ -99,6 +116,7 @@
 - `ui.activeCheckpointBanner`: boolean (coerce with `!!`); invalid → default `true`.
 - `rewind.maxRetriesPerPrompt`: integer ≥ 1; non-integer or `<1` → default.
 - `rewind.abortContextFraction`: number in (0,1]; out of range or non-number → default.
+- `revert.*`: `enabled`/`allowDeleteCreatedFiles` booleans (coerce with `!!`); `nonGitMode` one of `"cas"`|`"explicit-paths"`; `storageDir` a string that, if set, MUST NOT resolve inside `cwd` (else → default); `maxFileBytes`/`maxTotalBytes`/`maxSnapshotsPerTurn` finite numbers `> 0`; `excludeGlobs` an array of strings (non-array → default list). Any failure → default for that field; never throw.
 - On any per-field validation failure: log a warn naming the field and the value, use the default, continue. **Never throw.**
 
 ## 5. Environment overrides (optional, v1.1 — not required for v1)

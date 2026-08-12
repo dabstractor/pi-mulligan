@@ -141,6 +141,17 @@ interface RewindMarker extends MulliganEnvelope {
   note: NoteInput;
   ledger: FileLedger;
   ts: number;                 // Date.now() at append
+  /** v1.2 working-tree revert result — present only when the agent requested revert AND `config.revert.enabled`
+   *  AND the granularity is supported (last_turn/checkpoint). `backend:"none"`/absent ⇒ revert did not run.
+   *  Audit-recoverable from /tree. See `@14-working-tree-revert.md`. */
+  revert?: {
+    revertedFiles: string[];        // paths restored to their pre-span content
+    deletedFiles: string[];         // span-created paths deleted (delete_created_files + allowDeleteCreatedFiles)
+    failedFiles: string[];          // paths that could not be restored/deleted (best-effort; logged)
+    refusedFiles: string[];         // paths the dirty guard refused to overwrite (post-turn drift detected) — revert skipped those
+    skipped: boolean;               // true when caps/partial snapshot degraded the restore
+    backend: "git" | "cas" | "none";
+  };
 }
 ```
 
@@ -270,7 +281,7 @@ interface MulliganConfig {
     perTurnDrift: boolean;           // context nudge; default true
     bloatThresholdBytes: number;     // default 16384 (in-context bytes of a single result; 16 KB)
     bloatThresholdBytesByTool?: Record<string, number>; // per-tool overrides; default { read: 24576 }
-    driftThresholdTokens: number;    // default 3000 (turn delta that triggers the nudge)
+    driftThresholdTokens: number;    // default 6000 (turn delta that triggers the nudge; see @09)
   };
   audit: {
     estimateConfidence: "low" | "medium" | "high"; // reported with estimates; default "medium"
@@ -289,6 +300,12 @@ interface SessionRuntime {
   seq: number;                       // monotonic marker counter; persisted INTO each marker
   tokenBaseline: number | null;      // for turn metric delta
   lastTurnIndex: number | null;
+  // v1.2 working-tree revert: active RevertCheckpoints keyed by capture label
+  // ("turn" | "checkpoint:<name>"). Reset on session_start; checkpoint refs persist across
+  // reload (E32 — resolved in v1.2 via shadow-repo protected refs + `mulligan:revert-checkpoint`).
+  snapshots?: Map<string, RevertCheckpoint>;
+  // NOTE: this is a PARTIAL summary — the live runtime also caches lastFiltered/
+  // lastFilterTs (@06 §7), aboveHighWater (@07 §5.2), etc. See runtime.ts + the owning docs.
 }
 ```
 

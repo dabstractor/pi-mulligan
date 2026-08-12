@@ -29,6 +29,11 @@ pi-mulligan/
 │   ├── tokens.ts               # PURE: estimateTokens, resultBytes, approxTokens
 │   ├── notes.ts                # PURE: validateNote, renderNote, renderBloatReminder, renderDriftNudge
 │   ├── nudges.ts               # tool_result annotator + turn_end metric + shouldNudge/injectNudge
+│   ├── snapshot/               # v1.2 working-tree revert: SnapshotStore + Git/CAS backends (@14-working-tree-revert.md)
+│   │   ├── store.ts            # interface + detectAndCreate() factory + AsyncMutex
+│   │   ├── git.ts              # GitBackend (external shadow repo: add/write-tree/commit-tree/update-ref; read-tree/checkout)
+│   │   ├── cas.ts              # CasBackend (content-addressed store + mtime-shortcircuit) + explicit-paths mode
+│   │   └── paths.ts            # PURE: resolveSafeWorkspacePath (reject .., NUL, .git/node_modules, abs-outside-workspace)
 │   └── tools/
 │       ├── rewind.ts
 │       ├── shrink.ts
@@ -122,12 +127,17 @@ pi-mulligan/
 - Implement the **active-checkpoint banner** (`@13` §5): a `reconcileBanner(ctx)` helper that calls `ctx.ui.setWidget("mulligan:active-checkpoint", lines|undefined, {placement:"aboveEditor"})` from the active-checkpoint set; invoke it from the command handlers, `session_start`, and (defense-in-depth) at the tail of the `context` handler. Guard with `ctx.hasUI`; honor `config.ui.activeCheckpointBanner`.
 - **Verify (integration):** F-ckptcmd, F-banner, F-useraudit, F-consent scenarios pass (`@10` §2.1).
 
+### Step 6c — Working-tree revert: `snapshot/` + rewind integration (v1.2; ~3–4 h)
+- Implement `snapshot/store.ts` (interface + `detectAndCreate` + `AsyncMutex`), `git.ts` (external shadow repo: `init` with external `GIT_DIR`/`GIT_WORK_TREE`; `add --all` + `write-tree` + `commit-tree` + `update-ref refs/mulligan/snapshots/*` capture; `read-tree` + `checkout --` restore — NO write command ever targets the source `.git`, only `rev-parse`/`ls-files` reads), `cas.ts` (content-addressed blobs + manifest + mtime/size short-circuit + the explicit-paths mode), `paths.ts` (pure path-safety). See `@14-working-tree-revert.md`.
+- Wire `turn_start` capture + `/mulligan_checkpoint` capture (only when `config.revert.enabled`); wire `store.restore` into `rewindExecute` step 6b (`@05` §1). Honor the §1 granularity scope (`last_turn`/`checkpoint` only).
+- **Verify:** `F-revert-git`, `F-revert-cas`, `F-revert-explicit`, `F-revert-failopen`, `F-revert-delete`, `F-revert-dirtyguard`, `F-revert-granularity`, `F-revert-reload` (`@10`); assert the user's `.git` is byte-identical (no new objects, no reflog/stash entry) and the shadow repo holds a protected ref that `retire()` clears; assert non-git CAS restore matches pre-span state; assert the dirty guard REFUSES (file in `refused`, context rewind still proceeds, nothing overwritten) when a file drifts after `agent_end`; assert explicit-paths mode reverts write/edit but NOT bash `sed` (warned); assert a locked file lands in `failed[]` without breaking the rewind; assert deletion is refused when `allowDeleteCreatedFiles` is off even with the flag set; assert reload still honors persisted refs.
+
 ### Step 7 — `nudges.ts` (1 h)
 - `tool_result` annotator (bloat reminder) + `turn_end` metric + the `context` nudge injection path.
 - **Verify (integration):** F-shrink-preventive and F-nudge-drift scenarios pass; assert `mulligan:nudge` is **never** persisted.
 
 ### Step 8 — `index.ts` wiring + edge pass (1 h)
-- Register all tools; attach all handlers; wire config. Run through `@08-edge-cases.md` as a checklist (E1–E20) with targeted tests/scenarios.
+- Register all tools; attach all handlers; wire config. Run through `@08-edge-cases.md` as a checklist (E1–E32) with targeted tests/scenarios.
 - **Verify:** F-reload (markers survive `--session-id` re-open); full TUI manual smoke (§10 §4).
 
 ### Step 9 — Polish

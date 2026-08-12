@@ -8,6 +8,14 @@
 > 3. **Drift nudge counted user prompts as bloat.** The rewind/shrink-prescribing nudge now measures **agent-attributable** growth only (user messages excluded).
 > Net: agent tools drop 5→4 (checkpoint removed); 3 human slash commands added (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`); a persistent **active-checkpoint banner** above the prompt box prevents the user from forgetting they have granted destructive power. `first:user` (the original task) remains unconditionally protected.
 
+> **v1.2 amendment (working-tree revert — opt-in file restoration).** Issue #1 surfaced a real gap: after a rewind, weaker models suffer "amnesia" and re-read entire files to reorient, *adding* more context than they just shed — the rewind's whole purpose defeated. v1.2 adds an **opt-in** capability for `mulligan_rewind` to also restore the working-tree files it mutated back to their pre-span state (full spec in `@14-working-tree-revert.md`):
+> 1. **Whole-tree snapshots at boundaries, not per-tool whack-a-mole** — mirrors how Claude Code and Cursor ship comprehensive undo (whole-working-set snapshots). A snapshot captures the entire working set, so it is tool-agnostic (`sed`/`awk`/`python` are all reverted equally — `npm`/`pip` installs persist because their target dirs are excluded).
+> 2. **Two pluggable backends** — `GitBackend` (preferred in a repo: an **external shadow repository** — nothing, not even a transient object, is written into the user's `.git`) and `CasBackend` (universal content-addressed store for non-git dirs; a peer, not a degraded fallback). Non-git offers a comprehensive whole-tree mode (default) and a conservative explicit-paths mode.
+> 3. **Off by default, explicit per-call ask** — `config.revert.enabled` (default `false`) + per-call `revert_file_changes` / `delete_created_files` flags; deletion gated by an additional config kill-switch.
+> 4. **Granularity scope** — supported at `last_turn` and `checkpoint` (boundary-granular snapshots); `last_tool_call_group` stays context-only (a group-granularity file revert would over-revert to turn-start — a documented mismatch, refused rather than silently performed).
+> 5. **Best-effort, fail-open, never touches git history** — pure working-tree restoration; ALL captured working-tree file state (any tool, incl. bash file commands) reverses on opt-in. Only non-filesystem effects (refs/commits, excluded deps, index, network/DB) and hard retry remain out of scope.
+> Net: one new component (SnapshotStore), two optional params on an existing tool, **no new agent tools**. Working-tree revert is orthogonal to the soft-delete view model — the session tree is still never mutated.
+
 ---
 
 ## 0. How to read this document
@@ -56,6 +64,7 @@ Mulligan gives the agent that missing primitive, and gives the human a narrow su
 - **Shrink** — replace a specific past tool result (or message) with a compact summary, persistently, in the view.
 - **Audit** — see a token breakdown of its own context (computed from the *filtered* view, not Pi's bookkeeping), so its rewind decisions are informed.
 - **Be nudged** — automatically, at near-zero token cost, when a tool result is bloated or **agent-attributable** turn growth is sustained (user messages excluded from the drift delta — v1.1).
+- **Revert working-tree files (opt-in, v1.2)** — when the agent explicitly asks, restore the working-tree files a `last_turn`/`checkpoint` rewind mutated back to their pre-span state, so the resumed attempt need not re-read them. Off by default; best-effort; never touches git history. See `@14-working-tree-revert.md`.
 
 **Human-owned** (v1.1; the human gains the ability to):
 
@@ -80,7 +89,7 @@ Mulligan gives the agent that missing primitive, and gives the human a narrow su
 
 - **Hard deletion** of messages. Mulligan never removes anything from disk; it only filters the view.
 - **Real tree branching** from an agent tool. Proven impossible (and redundant with `/tree`); see `@02-proven-constraints.md`.
-- **Hard retry / replay** of prior tool calls. Mulligan supports *soft* retry only (rewind + note + re-plan). Replaying tool calls is dangerous because hidden tool calls' **side effects persist on disk** (files written, commands run) and replay would compound them. See `@08-edge-cases.md`.
+- **Hard retry / replay** of prior tool calls. Mulligan supports *soft* retry only (rewind + note + re-plan). Replaying tool calls is dangerous because hidden tool calls' **side effects persist on disk** (files written, commands run) and replay would compound them. See `@08-edge-cases.md`. *(v1.2 amends the "side effects persist" half along the right axis: an opt-in working-tree revert restores **all captured working-tree file state** — from `write`/`edit` OR bash file commands (`sed`/`awk`/`cp`/`rm`) — see `@14-working-tree-revert.md`. Only effects that are not captured file state persist: git refs/commits, excluded dependency dirs (`node_modules`/`.venv`), the staged index, and network/DB/process effects. Hard retry remains unsupported; the session tree is still never mutated.)*
 - **Undo / un-rewind.** Agent-initiated rewinds are permanent. (A human who wants to explore hidden content uses Pi's native `/tree`.) See decision log in `@reference/HANDOFF.md`.
 - **Human-facing commands.** **Narrow v1.1 surface only** (see `@13-human-facing-surface.md`): `/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`, plus a persistent active-checkpoint banner. These are added precisely because two operations (destructive cross-prompt checkpoint rewind, and the audit bloat diagnostic) are human-owned by nature. The audit *trail* remains served by `/tree`; a general-purpose Mulligan command surface is still out of scope.
 - **Cross-session or cross-project rewind.** Mulligan operates within a single session only.
@@ -91,7 +100,7 @@ Mulligan gives the agent that missing primitive, and gives the human a narrow su
 ## 3. Design principles
 
 1. **Minimal surface.** One mechanism, two operations, two nudges, a few tools. If a feature can be done with Pi's existing UI, Mulligan does not add it.
-2. **Soft over hard.** Never mutate the session tree. Hide from the view; persist the originals. Recoverability and auditability are free byproducts.
+2. **Soft over hard.** Never mutate the session tree. Hide from the view; persist the originals. Recoverability and auditability are free byproducts. (v1.2's working-tree revert mutates only the *working tree* under explicit opt-in — the session tree remains append-only; see `@14-working-tree-revert.md`.)
 3. **Zero extra requests.** Anything that nudges the agent must ride an inference that was already happening. A feature that costs a model call per turn is, by definition, counter to the project's purpose.
 4. **Fail open.** Every handler is wrapped so that an exception becomes a logged no-op, never a broken agent turn.
 5. **The agent is the user.** Tool names, descriptions, and note contracts are optimized for the LLM's reliable use, not for human ergonomics.
@@ -110,6 +119,7 @@ Mulligan is a single Pi extension (one entry file, possibly split into internal 
 - **1 persistent UI banner (v1.1):** an active-checkpoint reminder rendered via `ctx.ui.setWidget(placement:"aboveEditor")`, reconciled every `context` fire.
 - **1 event-driven context filter:** a `context` handler that is the heart of the extension — it reads persisted *markers* and rewrites the message copy sent to the model.
 - **2 preventive hooks:** a `tool_result` annotator (bloated-result reminder) and a `turn_end`→`context` per-turn nudge (the drift delta is **agent-attributable** — user messages excluded).
+- **1 opt-in working-tree snapshot store (v1.2):** a backend-pluggable `SnapshotStore` (`GitBackend` via an external shadow repo, or `CasBackend` for non-git dirs) that captures the working set at `turn_start`/`agent_end`/checkpoint and restores files on an explicit `mulligan_rewind` revert request — **refusing on detected drift rather than clobbering**. Off by default; best-effort; orthogonal to the view model. See `@14-working-tree-revert.md`.
 
 All persistent state is stored as **Pi `CustomEntry`s** (via `pi.appendEntry`) — these do *not* participate in LLM context, which is exactly what we want for control state. The agent's self-authored notes are stored as **`CustomMessage`s** (via `pi.sendMessage`) — these *do* participate in context, which is what we want for the note the resumed model must read.
 
@@ -195,6 +205,7 @@ The full reasoning lives in `@reference/HANDOFF.md`. The locked decisions:
 | D8 | No human command; no session-tree mutation | Redundant with Pi's built-in `/tree`/`/compact`/`/fork` |
 | D9 | Checkpoint is user-owned; agent keeps rewind-to-checkpoint, legitimized by user opt-in (v1.1) | Checkpoint needs *foresight* only the user has (E23); moving the trigger to the user puts destructive cross-prompt power behind explicit consent (`@13` §1) |
 | D10 | Drift/shed-nudges measure agent-attributable growth only; user prompts exempt (v1.1) | A nudge that prescribes rewind/shrink must target content the agent can legitimately shed; user input is ground-truth, and nudging toward deleting it is both wrong and misaligned with the consent model (`@07` §2, principle 8) |
+| D11 | Working-tree revert is opt-in, whole-tree-snapshot, best-effort, git-history-safe (v1.2) | Comprehensive undo requires whole-tree snapshots (per-tool whack-a-mole misses `sed`/`awk`/`python`); the agent must explicitly ask (amnesia re-read defeats rewind otherwise); an external shadow repo captures state without touching the user's `.git` (cleaner than `git stash create`, which leaves reclaimable dangling objects behind); a pre-flight dirty guard refuses rather than clobbers concurrent edits; revert amends E5 along the right axis — ALL captured working-tree file state (any tool, incl. bash file commands) reverses on opt-in; only non-filesystem effects (refs/commits, excluded deps, index, network/DB) and hard retry remain out of scope. Full spec `@14-working-tree-revert.md` |
 
 > **D6 — amended (marker retraction):** agent `mulligan:rewind`/`mulligan:shrink` markers are **retractable**. Per `@08-edge-cases.md` E21, an agent MAY cancel any marker via `mulligan_cancel`, identifying it **by target** (the same hint shape `mulligan_shrink` uses — `by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`, resolved live each turn, robust to compaction) or by explicit `markerId`; the filter then skips it. This softens D6's "permanent" contract — a mistaken marker is no longer irrevocable. Retraction suppresses the marker going forward only; it does NOT undo on-disk side effects (D1/E5) or replay hidden content.
 >
@@ -225,6 +236,7 @@ Read in order for a complete specification. The omnibus = this master + every li
 11. File layout & build order — @11-build-order.md
 12. Glossary & references — @12-glossary.md
 13. Human-facing surface — slash commands, consent model, active-checkpoint banner (v1.1) — @13-human-facing-surface.md
+14. Working-tree revert — opt-in file restoration on rewind; SnapshotStore (git + CAS backends) (v1.2) — @14-working-tree-revert.md
 
 Reference artifacts (not part of the narrative, but proven and authoritative):
 

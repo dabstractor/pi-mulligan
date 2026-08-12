@@ -55,6 +55,7 @@ Four tools, each a thin wrapper: validate input → write the appropriate marker
 - **`tool_result`** — measures result size; if above the bloat threshold, appends a short reminder line to the result content (advisory, per D3). Optionally (off by default) records a candidate for auto-shrink.
 - **`turn_end`** — computes the turn's token delta (using cached "tokens at turn_start" minus "tokens at turn_end", or an estimate) and appends a `mulligan:turn-metric` entry consumed by the next `context` fire for the nudge.
 - **`session_start`** — initializes per-session in-memory caches (e.g., the running token baseline). No long-lived resources.
+- **`turn_start` (v1.2)** — when `config.revert.enabled`, captures a whole-working-tree snapshot tagged as the turn baseline (the `SnapshotStore` capture point — `@14` §5). Pi's own `git-checkpoint.ts` example uses this same `on("turn_start")` hook for `git stash` on turns, confirming the hook is real and idiomatic.
 
 ### 2.3 Pure helpers (`@06-context-filter.md`)
 
@@ -192,6 +193,11 @@ src/
     audit.ts
   nudges.ts           // tool_result annotator + turn_end metric + context nudge injection
   log.ts              // structured file logger (testability)
+  snapshot/             // v1.2 working-tree revert (@14-working-tree-revert.md)
+    store.ts            // SnapshotStore interface + detectAndCreate() factory + AsyncMutex
+    git.ts              // GitBackend: external shadow repo (add/write-tree/commit-tree/update-ref; read-tree/checkout)
+    cas.ts              // CasBackend (content-addressed store + mtime/size short-circuit) + explicit-paths mode
+    paths.ts            // PURE: resolveSafeWorkspacePath (reject .., NUL, .git/node_modules, abs-outside-workspace)
 ```
 
 Everything under `transforms.ts`/`ledger.ts`/`tokens.ts`/`notes.ts` is **pure and unit-testable without Pi**. The Pi-coupled files (`markers.ts`, `filter.ts`, `tools/*`, `nudges.ts`) are thin and exercised by the integration smoke tests.

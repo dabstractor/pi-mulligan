@@ -30,7 +30,7 @@
 ## E5. Rewinding a span that had side effects (writes/bash)
 - **Situation:** the rewound turn wrote files or ran mutating bash.
 - **Risk:** the resumed agent, not seeing that work in context, may redo it — compounding side effects (double `mkdir`, re-applied edit, duplicate commit).
-- **Behavior:** this is why the note's `true_current_state` + the deterministic `FileLedger` exist (D/D17). Additionally, when `config.rewind.requireMutationWarning` is true and the ledger's `modifiedFiles`/`bashSideEffects` is non-empty, the tool result appends a prominent warning, and the note's rendered form includes the `<files-modified>`/`<bash-side-effects>` blocks. The agent is told explicitly: *those effects persist on disk; do not blindly redo them.*
+- **Behavior:** this is why the note's `true_current_state` + the deterministic `FileLedger` exist (D/D17). Additionally, when `config.rewind.requireMutationWarning` is true and the ledger's `modifiedFiles`/`bashSideEffects` is non-empty, the tool result appends a prominent warning, and the note's rendered form includes the `<files-modified>`/`<bash-side-effects>` blocks. The agent is told explicitly: *those effects persist on disk; do not blindly redo them.* **(v1.2: when the agent requested working-tree revert and it succeeded, the FILE-STATE portion of these effects is restored — from any tool, including bash file commands — so the warning is reworded to name only the non-filesystem effects that still persist; see `@14-working-tree-revert.md`.)**
 - **Hard retry is never supported** (D1) — Mulligan does not replay tool calls. The resumed agent re-plans from the note.
 
 ## E6. Parallel tool mode: `mulligan_rewind` with siblings
@@ -148,6 +148,30 @@
 - **Risk:** the user loses track that their subsequent prompts are subject to deletion by the agent; the consent that legitimized the power becomes stale-but-still-armed.
 - **Behavior (REQUIRED, v1.1 — `@13` §5):** Mulligan maintains a **persistent above-prompt-box banner** via `ctx.ui.setWidget("mulligan:active-checkpoint", [lines], { placement:"aboveEditor" })` while ≥1 active checkpoint exists, cleared (`setWidget(key, undefined)`) when none remain. Each line names a checkpoint and states the agent may rewind across subsequent prompts back to it, with the revoke command. Refreshed on: checkpoint set, checkpoint revoke, checkpoint consumption (a rewind retires its label), `session_start` (so `/resume` restores it), and — defense-in-depth — every `context` fire (the filter already scans checkpoints; reconcile the banner from the active set). Guarded by `ctx.hasUI` (no-op in print/json); disablable via `config.ui.activeCheckpointBanner` (default `true`).
 - **Acceptance:** (a) after `/mulligan_checkpoint x`, the banner is visible above the prompt box and persists across turns; (b) after `/mulligan_checkpoint_revoke x` (or consumption), it updates/clears within one fire; (c) `/resume` of a session with an active checkpoint shows the banner on the first inference; (d) the banner is **never** injected into `event.messages` (UI-only — zero model-context cost).
+
+## E27. Working-tree revert fails best-effort (v1.2)
+- **Situation:** `mulligan_rewind` is called with `revert_file_changes`, but a file restore fails (locked, permission denied, unwritable).
+- **Behavior:** the failed path goes into `revert.failedFiles[]` (logged); the rewind STILL succeeds (context rewind + note unaffected). Revert is best-effort by contract (`@14` §6). Never throws (E13).
+
+## E28. No git AND no writable CAS storage (v1.2)
+- **Situation:** `config.revert.enabled` is on, but the working dir is not a git repo AND the CAS backend cannot initialize (unwritable session dir).
+- **Behavior:** `SnapshotStore.describe().backend === "none"` → revert is unavailable; a rewind with revert flags reports `"file revert unavailable (no git / storage unwritable) — context rewound only"`. Fail-open floor (`@14` §5).
+
+## E29. Snapshot caps exceeded (v1.2)
+- **Situation:** a turn's mutations exceed `revert.maxTotalBytes`/`maxSnapshotsPerTurn`.
+- **Behavior:** capture stops accepting new data; the snapshot is marked partial; restore degrades — uncaptured files land in `skipped[]` (revert ran for the rest). Rewind still succeeds.
+
+## E30. Concurrent/external modification — dirty guard REFUSES (v1.2)
+- **Situation:** a human or other process edits a file the agent also edited, after the agent's turn.
+- **Behavior:** the pre-flight dirty guard (`@14` §6) compares the current tree to the `agent_end` after-snapshot; any drifted affected path → the **whole file-revert is refused** (`refused[]`), the context rewind still proceeds, and nothing is overwritten. Post-turn drift (the common, checkpoint/cross-turn case) is caught; a concurrent edit *during* an active agent turn (before `agent_end`) is a documented limitation — the guard captures a just-in-time after-ref and cannot detect it. Never silently clobbers.
+
+## E31. Index/staged divergence after restore (v1.2 — documented, not "fixed")
+- **Situation:** the agent ran `git add` (bash — not reverted); restore then writes the working tree, leaving the index staged with the agent's now-reverted version.
+- **Behavior:** `git status` may show staged changes diverging from the working tree. This is correct: revert restores working-tree FILE state (from any tool) but does not touch the git index or refs — so a bash `sed -i` on a source file IS reverted, while a `git add` (index) is not. The user unstages with `git restore --staged`. Not a bug.
+
+## E32. Post-reload snapshot loss → RESOLVED in v1.2
+- **Situation:** the session is reloaded (`/resume`, restart) after a snapshot was captured.
+- **Behavior:** snapshot refs live on disk (shadow-repo protected refs / CAS manifests) and checkpoint refs are persisted (`mulligan:revert-checkpoint` control entries + the rewind marker's `revert` block), so reload re-reads the refs and the store still honors them. File-revert now **survives reload** for checkpoints and already-issued rewinds (previously a documented limitation; the shadow-repo model fixed it).
 
 ## Cross-references
 - Filter algorithms that implement these behaviors → `@06-context-filter.md`

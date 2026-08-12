@@ -56,6 +56,7 @@ Per granularity:
 2. `const leafId = ctx.sessionManager.getLeafId();`
 3. `pi.setLabel(leafId, \`mulligan:checkpoint:${name}\`);` — same label mechanism as v1 (`@04` §6). (Use the **last real `message` entry** on the branch, not a transient/non-context-producing leaf, per BUG-003 — walk `getBranch()` backwards to a context-producing entry.)
 4. (No provenance machinery — a checkpoint is just the label. Since only this command creates checkpoints, every checkpoint is user-owned by construction; nothing extra is persisted.)
+   - **4b. Working-tree snapshot (v1.2 — `@14` §5):** if `config.revert.enabled`, capture a whole-working-tree snapshot (via the `SnapshotStore`) tagged with the checkpoint name, so a later `mulligan_rewind(granularity:"checkpoint", revert_file_changes:true)` can restore files to this point. Best-effort; a capture failure is logged and never blocks checkpoint creation.
 5. **Fair-warning notify (REQUIRED):** `ctx.ui.notify("Mulligan: checkpoint '<name>' set. Until you revoke it, the agent may rewind across your subsequent prompts back to this point (your prompts after here can be hidden). Revoke with /mulligan_checkpoint_revoke <name>.", "warning")`. Guarded by `ctx.hasUI`.
 6. **Arm/refresh the banner (§5)** so the reminder is visible from this turn on.
 7. No content is injected into the model's context.

@@ -38,6 +38,10 @@
 - **Guardrail (v1.1)** — no rewind wipes user input; the only exception is a checkpoint rewind (the user opted in by setting it). `first:user` is never wiped. (`@13` §1.)
 - **Active-checkpoint banner (v1.1)** — the persistent above-prompt-box reminder (`ctx.ui.setWidget(placement:"aboveEditor")`) shown while a user-set checkpoint is armed, so the user does not forget they granted destructive cross-prompt rewind power. (`@13` §5, `@08` E26.)
 - **Agent-attributable delta (v1.1)** — the drift nudge's measured token growth excluding `user` messages; only content the agent produced counts as sheddable bloat. (D10, `@07` §2.)
+- **Working-tree revert (v1.2)** — the opt-in capability for `mulligan_rewind` to restore working-tree files it mutated back to their pre-span state, so the resumed attempt need not re-read them. Off by default; best-effort; never touches git history. (D11, `@14`.)
+- **SnapshotStore (v1.2)** — the backend-pluggable component that captures/restores the working set: `GitBackend` (external shadow repo) in a repo, `CasBackend` (content-addressed store, or the conservative explicit-paths mode) otherwise. (`@14` §2.)
+- **CasBackend (v1.2)** — the non-git `SnapshotStore` backend: a minimal content-addressed store (hash + blob + manifest) with a mtime/size short-circuit so steady-state capture is O(changed-files). (`@14` §4.)
+- **Shadow repository (v1.2)** — the `GitBackend`'s snapshot store: a separate git repo (external `GIT_DIR`, `GIT_WORK_TREE` = the user's tree) holding all snapshot objects/refs, so the user's `.git` is never written. Protected refs (`refs/mulligan/snapshots/*`) are retired explicitly. (`@14` §3.)
 
 ## References
 
@@ -72,7 +76,8 @@
 - **D8** No human command; no session-tree mutation. *(v1.1: amended — a narrow human slash-command surface + banner are added; session-tree mutation stays forbidden. Full spec `@13`.)*
 - **D9** (v1.1) Checkpoint is user-owned; the agent keeps rewind-to-checkpoint, legitimized by the user's opt-in. Checkpoint needs foresight only the user has (E23).
 - **D10** (v1.1) Drift/shed-nudges measure agent-attributable growth only; user prompts are exempt (ground-truth, never sheddable bloat).
+- **D11** (v1.2) Working-tree revert is opt-in, whole-tree-snapshot, best-effort, git-history-safe; amends E5 correctly — ALL captured working-tree file state (any tool, incl. bash file commands) reverses on opt-in; only non-filesystem effects (refs/commits, excluded deps, index, network/DB) and hard retry remain out of scope. Full spec `@14-working-tree-revert.md`.
 
 ---
 
-*End of specification. The omnibus document is `SPEC.md` + files `01`–`13` in index order, plus `reference/HANDOFF.md` and `reference/looper-smoke.proto.ts` as proven artifacts. (File `13` and the v1.1 amendments across `01`–`12` introduce the human-facing surface, consent model, active-checkpoint banner, and agent-attributable drift delta.)*
+*End of specification. The omnibus document is `SPEC.md` + files `01`–`14` in index order, plus `reference/HANDOFF.md` and `reference/looper-smoke.proto.ts` as proven artifacts. (File `13` and the v1.1 amendments across `01`–`12` introduce the human-facing surface, consent model, active-checkpoint banner, and agent-attributable drift delta; file `14` and the v1.2 amendments introduce opt-in working-tree revert via the SnapshotStore — `@14-working-tree-revert.md`.)*
