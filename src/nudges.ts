@@ -294,16 +294,16 @@ export function registerTurnEndMetric(pi: ExtensionAPI): void {
  * bloatHit survives ONLY in the no-delta fallback so a bloated result on turn 1 (before any baseline exists) still
  * nudges.
  *
- * SPEC-AMBIGUITY RESOLUTION (spec/07 §5.1, BUG-003 fix): spec/07 §5.1 gives three acceptance criteria —
- * (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire; (c) a single
- * large result with ~0 net growth does NOT fire. With the DEFAULT threshold LOWERED to 4000 (config.ts) and the
- * comparison changed from `>` to `>=`, the moving-average algorithm satisfies ALL THREE literally:
+ * OPERATOR + DEFAULT (spec/09 §3 is the authority; spec/07 §5.1 carries the acceptance criteria): spec/09 §3
+ * codifies driftThresholdTokens = 4000 with the comparison `>=` (and documents the `>` → `>=` change). The
+ * moving-average algorithm satisfies ALL THREE spec/07 §5.1 acceptance criteria at that default:
+ *   (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire;
+ *       (c) a single large result with ~0 net growth does NOT fire. Literally:
  *   (a) avg([8k,0.5k,0.5k])=3k >= 4k? No → no fire ✓
- *   (b) avg([4k,4k,4k])=4k   >= 4k? Yes → fire ✓   (was 4k > 6k → no fire — the BUG-003 violation)
+ *   (b) avg([4k,4k,4k])=4k   >= 4k? Yes → fire ✓
  *   (c) avg(~0)              >= 4k? No → no fire ✓
  * Chosen algorithm: MOVING AVERAGE vs threshold, DELTA-ONLY (bloat demoted to the no-delta fallback per
- * P4.M2.T1.S1 / spec/07 §5.1). The earlier "ILLUSTRATIVE" recharacterization of criterion (b) is RETIRED —
- * (b) is now a firm, satisfied acceptance criterion at the lowered default.
+ * spec/07 §5.1). spec/07 §5.1's firing condition uses `>=` to match this implementation and spec/09 §3.
  *
  * The bloat fallback uses `=== true` (not truthy) so a malformed metric — readMarkers casts raw session data, so
  * `bloatHit` could be undefined/non-boolean — fails safe to "no bloat". Delta values are guarded with
