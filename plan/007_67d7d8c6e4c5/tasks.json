@@ -213,7 +213,7 @@
       "type": "Phase",
       "id": "P2",
       "title": "Human-facing surface (new Pi surfaces: registerCommand + setWidget)",
-      "status": "Ready",
+      "status": "Complete",
       "description": "The three slash commands (/mulligan_checkpoint, /mulligan_checkpoint_revoke, /mulligan_audit) and the persistent active-checkpoint banner. Verified Pi surfaces: pi.registerCommand (types.d.ts:903), ctx.ui.setWidget (types.d.ts:97), ExtensionCommandContext extends ExtensionContext (types.d.ts:254). Depends on Phase 1 (rewind behavior finalized + checkpoint.ts still has reusable exports).",
       "milestones": [
         {
@@ -357,14 +357,14 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "Active-checkpoint banner + config knob",
-          "status": "Ready",
+          "status": "Complete",
           "description": "A persistent above-prompt-box reminder while >=1 user-set checkpoint is active (E26). Reconciled on set/revoke/consumption/session_start/every context fire. New config knob ui.activeCheckpointBanner (default true).",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "reconcileBanner + config knob + hooks",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add ui.activeCheckpointBanner to config. Create reconcileBanner(ctx) in a new src/banner.ts (or commands.ts) that reads active checkpoints and sets/clears the widget. Hook it into command handlers, session_start, and the contextHandler tail.",
               "subtasks": [
                 {
@@ -402,7 +402,7 @@
                   "type": "Subtask",
                   "id": "P2.M3.T1.S3",
                   "title": "Hook reconcileBanner into the refresh points (commands + session_start + contextHandler tail)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M3.T1.S2",
