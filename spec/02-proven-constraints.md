@@ -113,6 +113,14 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 
 **Implication for Mulligan:** Mulligan does not trigger any rebind operation, so this footgun does not bite us in normal operation. But the **audit** and **filter** code must always read fresh from `ctx.sessionManager.getEntries()` **inside the handler** on each invocation — never cache a session handle across turns. (The filter already does this by design.)
 
+## C13. The host validates tool args BEFORE `execute()` runs — and cannot coerce a JSON string into an object
+
+**Claim:** Pi's agent loop validates each tool call's arguments against the tool's typebox schema *before* it ever calls `execute()`. The validation is `Value.Convert` (which coerces **primitives only** — e.g. string→number) followed by a compiled `Check`. `Value.Convert` **never** turns a JSON-encoded string into an object. So when a model sends an OBJECT-typed parameter as a JSON string (e.g. `mulligan_shrink` with `target: "{\"by_tool_call_id\": \"call_bash_pclntab\"}"`), every `anyOf` arm fails ("must be object" ×3), the call is rejected pre-validation, and the tool body **never runs** — no `execute()`-level code can catch or repair it.
+
+**Evidence:** observed live in real sessions — a model called `mulligan_shrink` with `target` serialized as a JSON string; the host returned `Validation failed … target: must be object` and the shrink was **silently lost** (no marker written, no feedback to the agent). Verified that typebox `Value.Convert` (1.3.7 host-side and 1.3.11 repo-side) does not coerce string→object. The host's own built-in `edit` tool hits the **identical failure class** ("some models send edits as a JSON string instead of an array") and fixes it the same sanctioned way.
+
+**Implication for Mulligan:** any tool whose parameter schema contains an OBJECT-typed field MUST defend against this at the `ToolDefinition.prepareArguments` hook — the **one sanctioned place that runs before schema validation**. A tool cannot "just try/catch in `execute()`": by the time `execute()` would run, the args have already been rejected. The defense lives in `src/prepare-args.ts` (`prepareObjectArgs<T>(keys)`) and is wired into the three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`); see `@05-tools.md` "Shared tool conventions" and `@08-edge-cases.md` E27. Scalar-only tools (`mulligan_audit`) are immune. **Do not** add a new object-typed tool parameter without also wiring a `prepareArguments` shim, or that parameter will silently die on the models that exhibit this — the failure is invisible because the call never reaches the tool body.
+
 ---
 
 ## Summary table — what a Mulligan tool may and may not do
@@ -131,6 +139,7 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 | Branch the tree | ❌ | command-context only (C3) + unreachable (C2) |
 | Dispatch a slash command | ❌ | extension messages bypass dispatch (C2) |
 | Mutate `ctx.sessionManager` | ❌ | `ReadonlySessionManager` (C1) |
+| Tolerate a JSON-string-encoded OBJECT param | ✅ (REQUIRED for object params) | `ToolDefinition.prepareArguments` shim — `prepareObjectArgs` (C13); the tool body cannot self-defend |
 
 ---
 
@@ -138,3 +147,4 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 
 - Prerequisite surfaces → `@01-pi-context-internals.md`
 - How Mulligan uses the reachable surfaces → `@03-architecture.md`
+- The `prepareArguments` shim that defends object params against C13 → `@05-tools.md` (Shared tool conventions), `@08-edge-cases.md` E27
