@@ -1,8 +1,10 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
+import { homedir } from "node:os";
 import {
   resolveSafeWorkspacePath,
   normalizeRelPath,
   isDangerousWorkspaceRel,
+  isForbiddenRoot,
   DANGEROUS_DIRS,
 } from "../src/snapshot/paths.js";
 
@@ -126,6 +128,57 @@ describe("composition — the backend gate flow (normalizeRelPath → isDangerou
   });
 });
 
+describe("isForbiddenRoot — spec/14 §2 SAFETY INVARIANT + §10 (task P1.M1.T1.S1)", () => {
+  // Canonical matrix: plan/009_1ecb4b3cb372/architecture/test_strategy.md §test/paths.test.ts.
+  // Pure predicate — no module state, no beforeEach.
+
+  it("(a) the user's home → true (condition a; os.homedir() is dynamic — do not hardcode)", () => {
+    expect(isForbiddenRoot(homedir())).toBe(true);
+  });
+
+  it("(b) the filesystem root '/' → true (condition b)", () => {
+    expect(isForbiddenRoot("/")).toBe(true);
+  });
+
+  it("(c) depth-1 system dirs → true (condition c: dirname==='/')", () => {
+    // The named spec examples:
+    expect(isForbiddenRoot("/home")).toBe(true);
+    expect(isForbiddenRoot("/etc")).toBe(true);
+    expect(isForbiddenRoot("/usr")).toBe(true);
+    expect(isForbiddenRoot("/var")).toBe(true);
+    // Plus the other depth-1 dirs the check ALSO covers (comprehensive, not just the named list):
+    expect(isForbiddenRoot("/bin")).toBe(true);
+    expect(isForbiddenRoot("/sbin")).toBe(true);
+    expect(isForbiddenRoot("/opt")).toBe(true);
+    expect(isForbiddenRoot("/tmp")).toBe(true);
+    expect(isForbiddenRoot("/root")).toBe(true);
+    expect(isForbiddenRoot("/srv")).toBe(true); // any depth-1 name
+  });
+
+  it("(d) degenerate input '' and '.' → true (defensive condition d; NOT caught by dirname)", () => {
+    expect(isForbiddenRoot("")).toBe(true);
+    expect(isForbiddenRoot(".")).toBe(true); // dirname(".") === "." ≠ "/"
+  });
+
+  it("(e) depth-≥-2 NON-home paths → false (plausibly a real project)", () => {
+    expect(isForbiddenRoot("/home/user/projects/foo")).toBe(false);
+    expect(isForbiddenRoot("/home/dustin/myproject")).toBe(false);
+    // "/home/dustin" is depth-2 and NOT forbidden by the depth rule — BUT on a box whose homedir() is
+    // exactly /home/dustin, condition (a) makes it true. Assert false ONLY when it is provably ≠ home
+    // (the intent: a depth-2 non-home path is allowed). PRP Task 4 GOTCHA: never hardcode a home guess.
+    if (homedir() !== "/home/dustin") {
+      expect(isForbiddenRoot("/home/dustin")).toBe(false);
+    }
+    expect(isForbiddenRoot("/opt/foo")).toBe(false);     // depth-2 under a system dir — allowed by design
+    expect(isForbiddenRoot("/var/lib/foo")).toBe(false); // homedir-proof depth-2 path (green on any box)
+  });
+
+  it("(f) is pure + deterministic (same input → same output across calls)", () => {
+    expect(isForbiddenRoot("/etc")).toBe(isForbiddenRoot("/etc"));
+    expect(isForbiddenRoot("/home/dustin/myproject")).toBe(isForbiddenRoot("/home/dustin/myproject"));
+  });
+});
+
 describe("types — export contract", () => {
   it("(type) the three functions + const have the documented signatures", () => {
     expectTypeOf<Parameters<typeof resolveSafeWorkspacePath>>().toEqualTypeOf<[string, string]>();
@@ -134,6 +187,8 @@ describe("types — export contract", () => {
     expectTypeOf<ReturnType<typeof normalizeRelPath>>().toEqualTypeOf<string>();
     expectTypeOf<Parameters<typeof isDangerousWorkspaceRel>>().toEqualTypeOf<[string]>();
     expectTypeOf<ReturnType<typeof isDangerousWorkspaceRel>>().toEqualTypeOf<boolean>();
+    expectTypeOf<Parameters<typeof isForbiddenRoot>>().toEqualTypeOf<[string]>();
+    expectTypeOf<ReturnType<typeof isForbiddenRoot>>().toEqualTypeOf<boolean>();
     expectTypeOf<typeof DANGEROUS_DIRS>().toMatchTypeOf<readonly string[]>();
   });
 });
