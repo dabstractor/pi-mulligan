@@ -57,6 +57,7 @@ import { appendRewindMarker, leaveNote, type RewindMarkerInput } from "../marker
 import { validateNote, renderNote, NOTE_INVALID_REASON, type NoteInput } from "../notes.js";
 import { extractFileLedger, type FileLedger } from "../ledger.js";
 import { getConfig, type Granularity } from "../config.js"; // GOTCHA #14: read ONCE at the top of execute
+import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `note` coercion (host edit.js precedent)
 import { getRuntime, type SessionRuntime } from "../runtime.js"; // [P4.M1.T2.S3] latch rewindRefusedTurnIndex
 import { readMarkers } from "../filter.js"; // [P4.M1.T2.S3] readMarkers(ctx).metric?.turnIndex (precedent: audit.ts L51)
 import {
@@ -731,6 +732,10 @@ export function makeRewindTool(pi: ExtensionAPI): ToolDefinition<typeof RewindPa
     label: "Mulligan Rewind",
     description: REWIND_DESC, // spec/05 §5 VERBATIM
     parameters: RewindParams,
+    // Same string-encoded-object failure class as mulligan_shrink: the `note` OBJECT param can arrive as a
+    // JSON string; the host validates BEFORE execute() and Value.Convert cannot coerce string→object, so
+    // prepareArguments restores the call pre-validation (host edit.js precedent).
+    prepareArguments: prepareObjectArgs<RewindArgs>(["note"]),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return rewindExecute(pi, toolCallId, params, signal, onUpdate, ctx); // pi captured via closure
     },

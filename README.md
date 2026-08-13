@@ -273,6 +273,12 @@ A second validation pass (v1.1) found and fixed four more edge-case bugs (2 Majo
 - **BUG-003 (Minor)** — the `mulligan_audit` "Active markers" checkpoint clause now appends ` (user-set)` and singularizes the count (spec/13 §4 step 3), so the human sees exactly what they have armed.
 - **BUG-004 (Minor)** — the rewind depth guard (`rewind.maxDepth`) now counts only **active** markers, excluding those retired by `mulligan_cancel` (spec/05 §1 step 4 "count active"), so the cancel-then-retry workflow is no longer blocked at 5 cumulative rewinds.
 
+### Resolved bugs — field reports (BUG-001)
+
+Field-reported bugs (observed in real sessions, as opposed to validation-pass finds). All have regression tests; see VERIFICATION.md "Bug-fix remediation pass — field reports" for the full engineering record.
+
+- **BUG-001 (Major)** — some models send OBJECT-typed tool parameters as a JSON-encoded *string* (observed live: `mulligan_shrink` with `target: "{\"by_tool_call_id\": \"call_bash_pclntab\"}"`). The host validates tool args **before** the tool body runs and cannot coerce string→object, so the call died with `Validation failed … target: must be object` and the shrink was silently lost. Fixed via the sanctioned `ToolDefinition.prepareArguments` pre-validation shim (host `edit` tool precedent) on all three object-param tools: `mulligan_shrink` (`target`), `mulligan_cancel` (`target`), `mulligan_rewind` (`note`). Proper-object calls are unchanged.
+
 ---
 
 ## 8. License

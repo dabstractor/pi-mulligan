@@ -60,6 +60,7 @@ import { resolveShrinkTarget } from "../transforms.js"; // Pi-free (0 imports) �
 import type { ShrinkTarget } from "../transforms.js"; // structurally identical to markers.ts ShrinkTarget
 import type { MessageLike } from "../transforms.js";
 import { getConfig } from "../config.js"; // GOTCHA #10: read ONCE per execute
+import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
 
 // ── Parameter schema (spec/05 §2 — Typebox, VERBATIM incl. the 3-arm target union + descriptions) ────
 
@@ -357,6 +358,12 @@ export function makeShrinkTool(pi: ExtensionAPI): ToolDefinition<typeof ShrinkPa
     label: "Mulligan Shrink",
     description: SHRINK_DESC, // spec/05 §5 VERBATIM
     parameters: ShrinkParams,
+    // Some models send the OBJECT-typed `target` as a JSON-ENCODED STRING (observed live:
+    // target:"{\"by_tool_call_id\": \"call_bash_pclntab\"}"). The host validates args BEFORE execute() runs
+    // and Value.Convert cannot coerce string→object, so without this shim every anyOf arm fails ("must be
+    // object" ×3) and the call is dead on arrival. prepareArguments is the sanctioned pre-validation hook
+    // (host edit.js precedent for the identical failure class).
+    prepareArguments: prepareObjectArgs<ShrinkArgs>(["target"]),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return shrinkExecute(pi, toolCallId, params, signal, onUpdate, ctx); // pi captured via closure
     },

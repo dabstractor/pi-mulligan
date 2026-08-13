@@ -231,3 +231,19 @@ prior round's "BUG-001 through BUG-006" table above — each remediation round r
 | BUG-007 | Minor | `mulligan_checkpoint` (src/tools/checkpoint.ts) had NO `getConfig().enabled` gate (its header documented the omission as intentional) → wrote a label when disabled, violating spec E14 | Add `getConfig().enabled` gate as step 0 inside the try (before name validation); refuses byte-identical "Mulligan: refused — Mulligan is disabled." (no label written) | test/tools/checkpoint.test.ts (config-disabled describe, 2 tests) |
 
 `npm test` → **974 passed, 0 failed** (post-round-2; the v1.0 DoD `671 passed` and round-1 `956 passed` above are prior baselines, preserved as accurate history).
+
+## Bug-fix remediation pass — field reports: BUG-001
+
+A bug observed in a real session (field report, not a validation-pass find): the host Pi runtime rejected a
+`mulligan_shrink` call with `Validation failed for tool "mulligan_shrink": target: must be object (×3) +
+must match a schema in anyOf`, because the model sent `target` as a JSON-encoded **string**
+(`"{\"by_tool_call_id\": \"call_bash_pclntab\"}"`) instead of an object. Fixed via the sanctioned
+`ToolDefinition.prepareArguments` pre-validation shim (the host's own `edit` tool uses the identical hook for
+the identical failure class). Verified end-to-end against the REAL host pipeline (pi-agent-core
+`prepareToolCallArguments` → pi-ai `validateToolArguments`) and the literal field-report arguments.
+
+| Bug | Severity | Root cause | Fix applied | Regression test added |
+|-----|----------|------------|-------------|-----------------------|
+| BUG-001 | Major | The host validates tool args **before** `execute()` runs (pi-agent-core agent-loop → pi-ai `validateToolArguments`: `Value.Convert` + compiled `Check`). TypeBox `Value.Convert` coerces primitives only — it never turns a JSON string into an object (verified on typebox 1.3.7 host-side and 1.3.11 repo-side) — so when a model sends an OBJECT param as a JSON string, every `anyOf` arm fails ("must be object") and the call is dead on arrival; the tool body never runs and cannot intervene. | New `src/prepare-args.ts` `prepareObjectArgs<T>(keys)` shim: JSON-parses each listed key's value when it is a string, replacing it with the parsed value ONLY if that value is a non-null non-array object (malformed JSON / arrays / scalars pass through for an honest schema error). Wired into the three object-param tools via `prepareArguments`: `mulligan_shrink` (`target`), `mulligan_cancel` (`target` — structurally identical union), `mulligan_rewind` (`note`). checkpoint/audit take scalars only → immune → no shim. | `test/prepare-args.test.ts` (23 tests): helper unit tests (coerce/idempotent/malformed/non-object JSON/multi-key/pass-through/identity-return) + per-tool regression tests running the exact host pipeline (`prepareArguments` → `Value.Convert` → `Compile.Check`) on the literal field-report args, all three union arms, malformed/non-object JSON, markerId-only cancel calls, and proper-object passthrough. Additionally verified end-to-end against the REAL host `validateToolArguments` + a verbatim copy of agent-loop `prepareToolCallArguments` (throwaway e2e test, deleted after passing). |
+
+`npm test` → **1067 passed, 0 failed** (post-field-report; prior baselines `671` / `956` / `974` above preserved as accurate history).
