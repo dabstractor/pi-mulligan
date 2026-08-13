@@ -1,0 +1,165 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Detection safety hardening (remove upward repo discovery; enforce realpath(cwd) root)",
+      "status": "Planned",
+      "description": "A focused safety retrofit of the v1.2 working-tree-revert feature. Remove ALL upward git repo discovery (rev-parse --show-toplevel / --git-dir / --absolute-git-dir) from detection and init. Enforce realpath(cwd) as the workspace root with no upward traversal anywhere. Add a forbidden-root refusal at detection and a defense-in-depth restore() re-check in both backends. This closes the most severe failure mode in the subsystem: upward traversal once resolved the workspace to $HOME, causing restore() to revert/delete the entire home tree.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Code: pure helper + detection rewrite + GitBackend rewrite + restore guards + unit tests",
+          "status": "Planned",
+          "description": "Implement all source changes (R1–R4) with their unit tests (R5a–R5c) riding with the work (implicit TDD). Each subtask produces verified, test-passing code. The isForbiddenRoot helper (T1) is the foundation that unblocks the rest.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Add isForbiddenRoot pure predicate to paths.ts",
+              "status": "Planned",
+              "description": "Add a pure, fs-free string predicate to src/snapshot/paths.ts that determines whether a workspace root is forbidden (home directory, system root, depth-1 system dir, or empty). This is the shared logic both detectAndCreate and the restore() guards call. Requirement R1 + unit tests R5a.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Implement isForbiddenRoot in paths.ts + unit tests in paths.test.ts",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.140", "h2.141", "h2.142", "h2.150"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: src/snapshot/paths.ts is a PURE module (only imports node:path currently). It contains resolveSafeWorkspacePath, normalizeRelPath, isDangerousWorkspaceRel, and DANGEROUS_DIRS. The module header (lines 17, 45) already documents that an 'fs.realpathSync complement runs in the snapshot backends' but NO isForbiddenRoot predicate exists yet. Adding it here is consistent with the module's documented intent. The predicate is pure (no fs calls) — os.homedir() reads an env var, not the filesystem.\n2. INPUT: An absolute, canonicalized path string (the realpath of the workspace root). Example callers pass the result of fs.realpathSync(cwd).\n3. LOGIC: Add `import { homedir } from \"node:os\"` and add `dirname` to the existing `node:path` import. Implement `export function isForbiddenRoot(root: string): boolean` that returns true iff ANY of: (a) root === os.homedir(); (b) root === \"/\"; (c) dirname(root) === \"/\" (catches depth-1 system dirs: /home, /etc, /usr, /var, /bin, /sbin, /opt, /tmp, /root — per spec §10's named examples and the spec's 'too shallow to be a real project' = depth ≤ 1 criterion); (d) root === \"\" or root === \".\" (defensive). Return false for any other path (depth ≥ 2, not home). Add unit tests in test/paths.test.ts: os.homedir() → true; \"/\" → true; \"/home\", \"/etc\", \"/usr\", \"/var\" → true; \"/home/user/projects/foo\" → false; \"\" → true; \".\" → true; \"/home/dustin/myproject\" → false. The existing test/paths.test.ts already tests resolveSafeWorkspacePath/normalizeRelPath/isDangerousWorkspaceRel — append the new describe block.\n4. OUTPUT: Exported `isForbiddenRoot(root: string): boolean` — a pure boolean predicate consumed by detectAndCreate (P1.M1.T2.S1), GitBackend.restore (P1.M1.T3.S2), and CasBackend.restore (P1.M1.T4.S1). No side effects.\n5. DOCS: [Mode A] Add JSDoc on isForbiddenRoot citing @spec/14 §2 SAFETY INVARIANT + §10 Testing safety clause. State the exact predicate (home / `/` / depth-1 via dirname===\"/\" / empty). This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Rewrite detectAndCreate in store.ts to lexical + forbidden-root model",
+              "status": "Planned",
+              "description": "Replace the `git rev-parse --git-dir` probe in detectAndCreate with the spec's detection tree: realpath canonicalization → forbidden-root gate → lexical existsSync(.git) check → backend selection. Remove the execFile rev-parse call entirely. Requirement R2 + unit tests R5b.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Rewrite detectAndCreate detection logic + rework store.test.ts detectAndCreate block",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.140", "h2.141", "h2.142", "h2.150", "h3.82"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: src/snapshot/store.ts detectAndCreate (lines 437–481) currently issues `await execFile(\"git\", [\"rev-parse\", \"--git-dir\"], { cwd })` at line ~446. The execFile/promisify/execFileCb imports at the top are used ONLY by detectAndCreate — after removing the rev-parse call, check if execFile is used elsewhere in the file; if not, remove the dead imports. Doc comments at lines 254, 263, 408, 437 describe 'the ONLY git command run against the user's repo here' — all must be rewritten. NoOpStore (line ~357) already has a `reason` string constructor — the forbidden-root reason slots in as `new NoOpStore(\"workspace root is forbidden (home/system root); revert refused\")`. The RestoreResult interface (line 195) has `refused: string[]`. Current imports: `access, mkdir, constants` from node:fs/promises, `resolve, relative, isAbsolute` from node:path. New imports needed: `realpathSync, existsSync` from node:fs, `join` from node:path, `isForbiddenRoot` from ./paths.js. The outer try/catch (E28 fail-open) MUST be preserved — detectAndCreate NEVER rejects.\n2. INPUT: cwd: string, revertConfig: MulliganConfig[\"revert\"], sessionDir?: string|null (unchanged signature). The isForbiddenRoot predicate from P1.M1.T1.S1.\n3. LOGIC: (1) Canonicalize: `let root: string; try { root = realpathSync(cwd); } catch { return new NoOpStore(\"workspace root could not be resolved (path does not exist or is unreadable)\"); }` — fail-safe, never throws. (2) Forbidden-root gate: `if (isForbiddenRoot(root)) return new NoOpStore(\"workspace root is forbidden (home/system root); revert refused\");` — BEFORE any backend selection. (3) Git detection = lexical: `if (existsSync(join(root, \".git\"))) → GitBackend(root, …)` — no rev-parse, no upward walk. `.git` may be a file (worktree/submodule) or dir — existsSync covers both. Use the SAME dynamic-import pattern (non-literal specifier `\"./git.js\"`). (4) Else → CAS branch (unchanged: resolveStorageDir, mkdir -p, W_OK check → CasBackend or NoOpStore). Use the SAME dynamic-import pattern (`\"./cas.js\"`). (5) PASS `root` (canonical), NOT raw `cwd`, to BOTH backend constructors. (6) Outer try/catch preserved for E28 fail-open. Rewrite ALL doc comments referencing rev-parse (detectAndCreate decision tree, the GitBackendCtor interface doc, the section header comment at line ~253). Rework test/store.test.ts detectAndCreate describe block (line 279+): replace rev-parse exit-code stubs with real temp dirs — (a) temp dir WITH .git → backend === \"git\"; (b) temp dir WITHOUT .git → backend === \"cas\"; (c) detectAndCreate(os.homedir(), …) → backend === \"none\"; (d) detectAndCreate(\"/\", …) → backend === \"none\"; (e) storage-unwritable → none (unchanged); (f) subdir whose PARENT has .git but subdir does NOT → cas (proves no upward walk). Assert NO git rev-parse call recorded by exec fake (if one exists — detection no longer uses exec at all, so this assertion may shift to 'exec fake is never called during detection'). The config object REVERT_CFG (lines 19–30 of test) is reused.\n4. OUTPUT: detectAndCreate returns SnapshotStore with workspace root = realpath(cwd) in both GitBackend and CasBackend. No git command issued against the user's repo. detectAndCreate($HOME, …) and detectAndCreate(\"/\", …) → NoOpStore. Consumed by index.ts (session_start) unchanged.\n5. DOCS: [Mode A] Rewrite the detectAndCreate doc-comment decision tree (store.ts lines ~408, 437) — remove 'read-only rev-parse'; state the lexical .git check + forbidden-root gate + realpath(cwd) root. Cite @spec/14 §2 Detection + SAFETY INVARIANT. Also update the section header comment at line ~253 that says 'This is the ONLY git I/O in detection (a read-only git rev-parse --git-dir)'. This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "Rewrite GitBackend init/keying/guarantee + add restore guard in git.ts",
+              "status": "Planned",
+              "description": "Remove every rev-parse call against the user's repo from GitBackend. Re-anchor the workspace root to realpath(cwd). Remove the sourceGitDir field. Update the shadow keying to launch-directory. Rewrite guarantee #1. Add the restore() forbidden-root guard. Requirement R3 + R4 (git.ts part) + unit tests R5c.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Rewrite constructor + ensureInit + remove sourceGitDir + update docs + rework git.test.ts",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.140", "h2.141", "h2.142", "h2.143", "h2.150", "h3.82"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: src/snapshot/git.ts — Constructor (line ~235): `this.cwd = resolve(cwd)` — resolve does NOT resolve symlinks. The sourceGitDir field (lines 215–217: `private sourceGitDir!: string;`) exists ONLY to record the rev-parse result; nothing else reads it — DELETE entirely. ensureInit() (lines 282–293) issues `rev-parse --show-toplevel` + `--absolute-git-dir` against this.cwd, then sets `this.repoRoot = top || this.cwd` (THE HAZARD) and `this.sourceGitDir = gitDir`. shadowKey() (lines 139–141) hashes repoRoot via sha256(repoRoot).slice(0,16) — the function is unchanged but repoRoot is now realpath(cwd). Class header comment (lines 37–51) describes guarantee #1 as 'The ONLY command run against the source repo is the READ-ONLY git rev-parse' — must be rewritten. The 'REPO-ROOT KEYING' doc section must be rewritten as 'LAUNCH-DIRECTORY KEYING'. shadowEnv() uses GIT_DIR=shadowDir + GIT_WORK_TREE=repoRoot — unchanged mechanism. has() uses rev-parse --verify against shadowEnv() — UNCHANGED (targets shadow repo, NOT user repo). Current imports: existsSync from node:fs (already imported), join/resolve from node:path. NEW imports needed: realpathSync from node:fs, isForbiddenRoot from ./paths.js.\n2. INPUT: cwd: string (already canonicalized by detectAndCreate's realpathSync, but constructor must defense-in-depth realpath it). The isForbiddenRoot predicate from P1.M1.T1.S1.\n3. LOGIC: (1) Constructor: change `this.cwd = resolve(cwd)` to `this.cwd = realpathSafe(cwd)` where realpathSafe wraps `try { return realpathSync(cwd); } catch { return resolve(cwd); }` (module-private helper — defense-in-depth fallback since detectAndCreate already canonicalized; direct test construction may pass non-canonical paths). (2) ensureInit rewrite: DELETE the two rev-parse exec calls. Set `this.repoRoot = this.cwd` unconditionally — no upward discovery, no `top || cwd` fallback. DELETE `this.sourceGitDir = gitDir`. Keep `this.shadowDir = join(this.storageDir, shadowKey(this.repoRoot))` (now hashing realpath(cwd)). Keep the `git init --bare` idempotent block (existsSync gate). (3) shadowKey doc: rewrite to 'keyed by realpath(cwd) (launch directory)' and drop the 'subdirectory launches share one shadow repo' rationale. (4) Class header guarantee #1: rewrite to 'No command of any kind — read or write — is ever issued against the user's git.' Remove all mention of 'read-only rev-parse against the source repo'. (5) Rework test/git.test.ts: remove the rev-parse --show-toplevel/--absolute-git-dir canned-stdout stubs from the recording exec fake; update expectedShadow to key by realpath(cwd); the 'five guarantees' test (line ~232) now asserts ZERO commands run without the shadow env (was: 'only rev-parse is the exception'). The exec fake must NOT match any rev-parse pattern for non-shadow commands.\n4. OUTPUT: GitBackend with repoRoot === realpath(cwd), no sourceGitDir field, zero commands against the user's git, shadow repo keyed by launch directory. Consumed by detectAndCreate (P1.M1.T2.S1) and rewindExecute (unchanged). shadowEnv()/capture()/dirtyCheck()/has() mechanism unchanged.\n5. DOCS: [Mode A] JSDoc on ensureInit (cite @spec/14 §3 + SAFETY INVARIANT), class header comment (guarantee #1), shadowKey doc — all rewritten to reflect 'no command against user git' + 'realpath(cwd) root' + 'launch-directory keying'. This rides WITH the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S2",
+                  "title": "Add restore() forbidden-root entry guard in git.ts + test",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T3.S1"],
+                  "prd_selectors": ["h2.142", "h2.143", "h2.146", "h2.150"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: src/snapshot/git.ts restore() entry (line ~746) currently has NO root guard. The method acquires the mutex, creates a RestoreResult, calls ensureInit(), then proceeds to read-tree/checkout. The RestoreResult interface (store.ts line 195) has `refused: string[]`. The spec §2 SAFETY INVARIANT says: 'restore() MUST additionally re-check this invariant at its entry and refuse (returning {refused:true} with zero filesystem mutation) if the resolved root is forbidden — a last line of defense independent of detection.'\n2. INPUT: this.cwd (already realpath'd by constructor from P1.M1.T3.S1). The isForbiddenRoot predicate from P1.M1.T1.S1.\n3. LOGIC: At the TOP of restore(), immediately AFTER `const release = await this.mutex.acquire()` and BEFORE `this.ensureInit()` / any fs/git mutation, add: `if (isForbiddenRoot(this.cwd)) { release(); return { reverted: [], deleted: [], failed: [], skipped: [], refused: [this.cwd] }; }`. This returns a RestoreResult with `refused` populated with the offending root and all other buckets empty — ZERO filesystem mutation. Add a test in test/git.test.ts: construct a GitBackend with cwd = os.homedir() (or a forbidden root), call restore(ref, opts), assert result.refused is non-empty AND no read-tree/checkout/unlink was recorded by the exec fake (the exec fake's call log must be empty for write commands). The restore() guard is tested INDEPENDENTLY of ensureInit (the guard fires before ensureInit runs, so no rev-parse stubs are needed for this test).\n4. OUTPUT: GitBackend.restore() refuses forbidden roots with zero mutation — defense in depth independent of detection. RestoreResult shape: { refused: [root], reverted: [], deleted: [], failed: [], skipped: [] }.\n5. DOCS: [Mode A] JSDoc on restore() citing @spec/14 §2 SAFETY INVARIANT ('last line of defense independent of detection') + §6 (restore semantics). This rides WITH the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T4",
+              "title": "Add restore() forbidden-root entry guard in cas.ts",
+              "status": "Planned",
+              "description": "Add a defense-in-depth forbidden-root guard at the top of CasBackend.restore(), mirroring the git.ts guard. Requirement R4 (cas.ts part).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T4.S1",
+                  "title": "Add restore() entry guard + constructor realpath in cas.ts + test",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.142", "h2.144", "h2.146", "h2.150"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: src/snapshot/cas.ts — Constructor (line ~263): `this.cwd = resolve(cwd)` — same issue as git.ts, resolve does not resolve symlinks. restore() entry (line ~1004) has NO root guard — it acquires the mutex, creates a RestoreResult, then reads the manifest. The CasBackend uses this.fs (DI seam from node:fs/promises) for file ops. Current imports: does NOT import existsSync. Uses join/resolve/dirname from node:path. Imports from ./paths.js: normalizeRelPath, isDangerousWorkspaceRel, resolveSafeWorkspacePath. NEW imports needed: realpathSync from node:fs, isForbiddenRoot from ./paths.js.\n2. INPUT: this.cwd (will be realpath'd by constructor change). The isForbiddenRoot predicate from P1.M1.T1.S1.\n3. LOGIC: (1) Constructor: change `this.cwd = resolve(cwd)` to `this.cwd = realpathSafe(cwd)` using the same module-private realpathSafe pattern as git.ts (try realpathSync → catch → fallback resolve(cwd)). (2) restore() guard: at the TOP, immediately AFTER `const release = await this.mutex.acquire()` and BEFORE any manifest read/fs write, add: `if (isForbiddenRoot(this.cwd)) { release(); return { reverted: [], deleted: [], failed: [], skipped: [], refused: [this.cwd] }; }`. Returns RestoreResult with refused populated, all else empty — zero fs mutation. (3) Add a test in test/cas.test.ts: construct a CasBackend with cwd = os.homedir(), call restore(ref, opts), assert result.refused is non-empty AND no readFile/writeFile/unlink was recorded by the DI fs fake.\n4. OUTPUT: CasBackend.restore() refuses forbidden roots with zero mutation. Constructor uses realpath for canonical cwd. Defense in depth independent of detection — parity with git.ts (P1.M1.T3.S2).\n5. DOCS: [Mode A] JSDoc on restore() citing @spec/14 §2 SAFETY INVARIANT ('last line of defense independent of detection') + §6 (restore semantics). This rides WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Integration verification + changeset-level documentation (Mode B)",
+          "status": "Planned",
+          "description": "Run the full integration suite to confirm no regression for real git/cas projects. Add the subdirectory-not-promoted assertion (the core safety property). Then sync cross-cutting changeset-level documentation (README safety paragraph + stale-reference sweep) that only makes sense once all M1 code lands.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Integration verification: run revert-*.test.ts suite + add subdirectory-not-promoted assertion",
+              "status": "Planned",
+              "description": "Verify the full integration test suite passes with the new lexical .git detection. Add one new test case proving a subdirectory launch under a git repo is NOT promoted to the parent (stays cas). Requirement R5d.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Run integration suite + add subdir-not-promoted assertion to revert-edge.test.ts",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M1.T3.S2", "P1.M1.T4.S1"],
+                  "prd_selectors": ["h2.150", "h2.122", "h2.142"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/integration/revert-git.test.ts creates a real git repo (.git present) and asserts store.describe().backend === \"git\" (lines 380, 531, 615). revert-cas.test.ts, revert-explicit.test.ts, revert-edge.test.ts similarly create real git/non-git dirs. With lexical .git detection these should still pass unchanged. The test's OWN use of `git rev-parse --show-toplevel` (revert-git.test.ts line ~116) is test-harness logic (resolving the temp repo root for setup), NOT production code — it is unaffected and should remain. revert-edge.test.ts is the natural home for edge-case safety assertions.\n2. INPUT: All M1 source changes must be complete (detectAndCreate rewrite, GitBackend rewrite, CasBackend guard, isForbiddenRoot helper). The integration tests exercise detectAndCreate + capture + restore end-to-end against real filesystems and real git repos.\n3. LOGIC: (1) Run `npm test` — the FULL suite (unit + integration) must be green. If any integration test fails, investigate whether it's a legitimate regression or a test that relied on the old rev-parse behavior (unlikely — the tests assert backend type which is preserved). (2) Add a new test case to test/integration/revert-edge.test.ts: create a temp git repo (parent with .git), create a SUBDIRECTORY inside it that has NO .git, call detectAndCreate(subdirPath, …), assert backend === \"cas\" (NOT \"git\"). This proves the subdirectory is not promoted to the parent git repo — the core safety property. If adding to revert-edge.test.ts is awkward due to its structure, create a focused new test block; either way the assertion MUST exist. (3) Confirm no `git rev-parse` is issued during detection by checking that detection works in environments where git is absent (or by reviewing that the code path no longer calls execFile).\n4. OUTPUT: Full test suite green. A passing assertion proving subdirectory-under-git-parent → cas (never promoted). Definition of Done criterion #5 and #6 satisfied.\n5. DOCS: none — no user-facing/config/API surface change in this test-only subtask."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Sync changeset-level documentation (Mode B)",
+              "status": "Planned",
+              "description": "Cross-cutting documentation that spans the whole changeset. Update README.md with the safety guarantee. Sweep all source and docs for stale v1.2-detection language (rev-parse, show-toplevel, sourceGitDir, repo-root-keyed, share one shadow repo) that should have been removed by the implementing subtasks. This is the FINAL task — it depends on every implementing subtask.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Add safety paragraph to README.md working-tree-revert section",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M1.T3.S2", "P1.M1.T4.S1", "P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.140", "h2.142", "h2.143"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md (40KB) has a working-tree-revert (v1.2) section. The feature touches the working tree, not the session tree. The project's existing framing describes the revert feature's safety properties (shadow repo isolation, etc.). This paragraph adds the NEW safety guarantee: no upward discovery, realpath(cwd) root, forbidden-root refusal, no command against user .git.\n2. INPUT: All M1 source changes complete. The spec §2 SAFETY INVARIANT text (h2.142) and §3 GitBackend guarantee #1 (h2.143) define the safety properties to document.\n3. LOGIC: In README.md's working-tree-revert section, add a short SAFETY paragraph stating: (a) the workspace root is realpath(cwd) with NO upward git discovery; (b) home/system-root directories are refused (backend → none); (c) NO command of any kind (read or write) is issued against the user's .git — the shadow repo is the only git that receives commands. Mirror the project's existing framing style. Keep it concise (3–5 sentences).\n4. OUTPUT: README.md updated with the safety guarantee paragraph. Definition of Done criterion #7 (part 1) satisfied.\n5. DOCS: [Mode B] This IS the changeset-level documentation task. The README paragraph summarizes the entire R1–R4 changeset."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S2",
+                  "title": "Stale-reference sweep across README.md + src/snapshot/*",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M1.T3.S2", "P1.M1.T4.S1", "P1.M2.T1.S1", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h2.142", "h2.143"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The implementing subtasks (T1–T4) should have already updated all in-file doc comments they touched (Mode A). This subtask is the CATCH-ALL sweep to find any references that slipped through. The spec §2 SAFETY INVARIANT text itself MENTIONS the old behavior by name ('upward traversal (rev-parse --show-toplevel) once resolved…') to explain the hazard — that reference is INTENTIONAL and stays. Only references OUTSIDE the SAFETY INVARIANT's explanatory 'why' text should be removed.\n2. INPUT: All M1 source changes complete + README updated (P1.M2.T2.S1).\n3. LOGIC: Run `grep -rn` across README.md AND src/snapshot/*.ts for these stale terms: 'rev-parse' (outside shadow-repo has() calls and the SAFETY INVARIANT explanation), 'show-toplevel', 'absolute-git-dir', 'sourceGitDir', 'read-only rev-parse', 'repo-root-keyed', 'share one shadow repo', 'repo-root-keyed sharing'. For each hit: if it's in the SAFETY INVARIANT's explanatory text (explaining WHY the old behavior was removed) → KEEP it. If it's a stale description of CURRENT behavior → REWRITE it to reflect realpath(cwd) + no-command-against-user-git. Specifically check: store.ts doc comments (should have been rewritten by T2.S1), git.ts class header + shadowKey doc (should have been rewritten by T3.S1), and any README references to the old detection mechanism. Also grep test/ for stale assertions about rev-parse being issued against the user repo — these should have been reworked by T2.S1/T3.S1 but verify.\n4. OUTPUT: No stale v1.2-detection language survives outside the SAFETY INVARIANT's intentional explanatory text. Definition of Done criterion #7 (part 2) satisfied.\n5. DOCS: [Mode B] This IS the changeset-level documentation sweep. It verifies all Mode A doc updates landed correctly and catches stragglers."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
