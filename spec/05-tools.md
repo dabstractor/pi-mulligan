@@ -7,6 +7,7 @@
 - Every tool result `content` is `[{ type: "text", text: "…" }]`.
 - Tools are **write-only w.r.t. the message list** (they never read/transform `event.messages`); `mulligan_audit` is the single read-only exception and even it does not persist.
 - Descriptions are written for the LLM: they state *when* to use the tool and *what* it accomplishes, in plain language, with the cost/benefit framing that nudges correct use.
+- **Object-typed parameters require a `prepareArguments` shim (REQUIRED).** Some models send an OBJECT param as a JSON-encoded *string*; the host validates args **before** `execute()` and cannot coerce string→object, so an undefended object param makes the call die pre-validation with the transform silently lost (proven constraint C13; edge case E27). The three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`) — MUST register `prepareArguments: prepareObjectArgs<T>([key])` from `src/prepare-args.ts`; it JSON-parses a string-valued object param back into an object pre-validation, passing everything else through untouched. Scalar-only tools (`mulligan_audit`) are immune and set no shim. **Adding a new object-typed parameter without the shim reintroduces field-reported BUG-001 silently** (the failure is invisible — the call never reaches `execute()`).
 
 ---
 
@@ -302,7 +303,7 @@ pi.registerCommand("mulligan_checkpoint_revoke", { description: "Revoke a checkp
 pi.registerCommand("mulligan_audit",             { description: "Show a token/bloat breakdown of the current context.", handler: auditCommand });
 ```
 
-Each tool `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the three tool factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. (v1.1: `makeCheckpointTool` is removed — checkpoint is now a human command.) The summary block above shows the equivalent object-literal form for readability.
+Each tool `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the three tool factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. (v1.1: `makeCheckpointTool` is removed — checkpoint is now a human command.) The summary block above shows the equivalent object-literal form for readability. In the real factory form, the three object-param factories additionally set a `prepareArguments` shim (`prepareObjectArgs`) on rewind/shrink/cancel — see "Shared tool conventions" above and C13/E27; `mulligan_audit` takes only scalars and sets none. (Omitted from the readable block because it is a host-compatibility concern, not part of the tool's behavioral contract.)
 
 The three `registerCommand` handlers are `(args: string, ctx: ExtensionCommandContext) => Promise<void>`; they capture `pi` via closure at registration. They are **write-only w.r.t. the model's context** — none injects into `event.messages`. Full command contracts: `@13-human-facing-surface.md`.
 
@@ -318,3 +319,4 @@ The three `registerCommand` handlers are `(args: string, ctx: ExtensionCommandCo
 - Persisted shapes written by these tools → `@04-data-model.md`
 - How the filter consumes the markers → `@06-context-filter.md`
 - Edge cases & refusal conditions → `@08-edge-cases.md`
+- Proven host constraint requiring the `prepareArguments` shim on object params → `@02-proven-constraints.md` C13 (see also `@08-edge-cases.md` E27)

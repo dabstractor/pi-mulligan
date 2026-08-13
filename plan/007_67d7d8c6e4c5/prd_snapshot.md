@@ -536,6 +536,14 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 
 **Implication for Mulligan:** Mulligan does not trigger any rebind operation, so this footgun does not bite us in normal operation. But the **audit** and **filter** code must always read fresh from `ctx.sessionManager.getEntries()` **inside the handler** on each invocation — never cache a session handle across turns. (The filter already does this by design.)
 
+## C13. The host validates tool args BEFORE `execute()` runs — and cannot coerce a JSON string into an object
+
+**Claim:** Pi's agent loop validates each tool call's arguments against the tool's typebox schema *before* it ever calls `execute()`. The validation is `Value.Convert` (which coerces **primitives only** — e.g. string→number) followed by a compiled `Check`. `Value.Convert` **never** turns a JSON-encoded string into an object. So when a model sends an OBJECT-typed parameter as a JSON string (e.g. `mulligan_shrink` with `target: "{\"by_tool_call_id\": \"call_bash_pclntab\"}"`), every `anyOf` arm fails ("must be object" ×3), the call is rejected pre-validation, and the tool body **never runs** — no `execute()`-level code can catch or repair it.
+
+**Evidence:** observed live in real sessions — a model called `mulligan_shrink` with `target` serialized as a JSON string; the host returned `Validation failed … target: must be object` and the shrink was **silently lost** (no marker written, no feedback to the agent). Verified that typebox `Value.Convert` (1.3.7 host-side and 1.3.11 repo-side) does not coerce string→object. The host's own built-in `edit` tool hits the **identical failure class** ("some models send edits as a JSON string instead of an array") and fixes it the same sanctioned way.
+
+**Implication for Mulligan:** any tool whose parameter schema contains an OBJECT-typed field MUST defend against this at the `ToolDefinition.prepareArguments` hook — the **one sanctioned place that runs before schema validation**. A tool cannot "just try/catch in `execute()`": by the time `execute()` would run, the args have already been rejected. The defense lives in `src/prepare-args.ts` (`prepareObjectArgs<T>(keys)`) and is wired into the three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`); see `@05-tools.md` "Shared tool conventions" and `@08-edge-cases.md` E27. Scalar-only tools (`mulligan_audit`) are immune. **Do not** add a new object-typed tool parameter without also wiring a `prepareArguments` shim, or that parameter will silently die on the models that exhibit this — the failure is invisible because the call never reaches the tool body.
+
 ---
 
 ## Summary table — what a Mulligan tool may and may not do
@@ -554,6 +562,7 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 | Branch the tree | ❌ | command-context only (C3) + unreachable (C2) |
 | Dispatch a slash command | ❌ | extension messages bypass dispatch (C2) |
 | Mutate `ctx.sessionManager` | ❌ | `ReadonlySessionManager` (C1) |
+| Tolerate a JSON-string-encoded OBJECT param | ✅ (REQUIRED for object params) | `ToolDefinition.prepareArguments` shim — `prepareObjectArgs` (C13); the tool body cannot self-defend |
 
 ---
 
@@ -561,6 +570,7 @@ Mulligan has **no commands** and **never calls `pi.sendUserMessage`**. This is n
 
 - Prerequisite surfaces → `@01-pi-context-internals.md`
 - How Mulligan uses the reachable surfaces → `@03-architecture.md`
+- The `prepareArguments` shim that defends object params against C13 → `@05-tools.md` (Shared tool conventions), `@08-edge-cases.md` E27
 3. Architecture — the unified marker + context-event design — # 03 — Architecture
 
 > This document specifies the **shape** of Mulligan: its components, their responsibilities, how data flows between them, and why this shape (and not the alternatives that were rejected). The precise data shapes are in `@04-data-model.md`; the algorithms are in `@06-context-filter.md` and `@07-preventive-and-nudges.md`.
@@ -1091,6 +1101,7 @@ The logger is the primary observability surface in non-TUI modes and is what the
 - Every tool result `content` is `[{ type: "text", text: "…" }]`.
 - Tools are **write-only w.r.t. the message list** (they never read/transform `event.messages`); `mulligan_audit` is the single read-only exception and even it does not persist.
 - Descriptions are written for the LLM: they state *when* to use the tool and *what* it accomplishes, in plain language, with the cost/benefit framing that nudges correct use.
+- **Object-typed parameters require a `prepareArguments` shim (REQUIRED).** Some models send an OBJECT param as a JSON-encoded *string*; the host validates args **before** `execute()` and cannot coerce string→object, so an undefended object param makes the call die pre-validation with the transform silently lost (proven constraint C13; edge case E27). The three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`) — MUST register `prepareArguments: prepareObjectArgs<T>([key])` from `src/prepare-args.ts`; it JSON-parses a string-valued object param back into an object pre-validation, passing everything else through untouched. Scalar-only tools (`mulligan_audit`) are immune and set no shim. **Adding a new object-typed parameter without the shim reintroduces field-reported BUG-001 silently** (the failure is invisible — the call never reaches `execute()`).
 
 ---
 
@@ -1386,7 +1397,7 @@ pi.registerCommand("mulligan_checkpoint_revoke", { description: "Revoke a checkp
 pi.registerCommand("mulligan_audit",             { description: "Show a token/bloat breakdown of the current context.", handler: auditCommand });
 ```
 
-Each tool `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the three tool factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. (v1.1: `makeCheckpointTool` is removed — checkpoint is now a human command.) The summary block above shows the equivalent object-literal form for readability.
+Each tool `execute` is `(toolCallId, params, signal, onUpdate, ctx) => Promise<ToolResult>` and delegates to its `tools/*.ts` module, which in turn uses `markers.ts` (write) and the pure helpers (read/resolve). Keep `execute` bodies thin. NOTE: `index.ts` uses the **factory form** for the three tool factories — `pi.registerTool(makeRewindTool(pi))`, `makeShrinkTool(pi)`, `makeCancelTool(pi)` — capturing `pi` via closure (their `execute()` needs `pi` for `appendXxxMarker(pi, …)` but does not receive it). `auditTool` is a plain const. (v1.1: `makeCheckpointTool` is removed — checkpoint is now a human command.) The summary block above shows the equivalent object-literal form for readability. In the real factory form, the three object-param factories additionally set a `prepareArguments` shim (`prepareObjectArgs`) on rewind/shrink/cancel — see "Shared tool conventions" above and C13/E27; `mulligan_audit` takes only scalars and sets none. (Omitted from the readable block because it is a host-compatibility concern, not part of the tool's behavioral contract.)
 
 The three `registerCommand` handlers are `(args: string, ctx: ExtensionCommandContext) => Promise<void>`; they capture `pi` via closure at registration. They are **write-only w.r.t. the model's context** — none injects into `event.messages`. Full command contracts: `@13-human-facing-surface.md`.
 
@@ -1402,6 +1413,7 @@ The three `registerCommand` handlers are `(args: string, ctx: ExtensionCommandCo
 - Persisted shapes written by these tools → `@04-data-model.md`
 - How the filter consumes the markers → `@06-context-filter.md`
 - Edge cases & refusal conditions → `@08-edge-cases.md`
+- Proven host constraint requiring the `prepareArguments` shim on object params → `@02-proven-constraints.md` C13 (see also `@08-edge-cases.md` E27)
 6. The context filter — the core algorithm (granularities, pairing, composition) — # 06 — The context filter (core algorithm)
 
 > This is the heart of Mulligan. It specifies, in implementable detail, how the `context` event handler transforms `event.messages` given the persisted markers. **All transform logic lives in pure functions** (`transforms.ts`) that take `(messages, marker, config)` and return a new array — fully unit-testable without Pi. The `context` handler itself (`filter.ts`) is thin glue: read markers, call the pure pipeline, return `{ messages }`, fail-open on any error.
@@ -1931,7 +1943,7 @@ Both nudges are driven by pure helpers (`renderBloatReminder`, `renderDriftNudge
 These refine Nudge B (§2) to cut false positives and catch slow accumulation. Both ride the existing `context` event (D4 — zero extra requests).
 
 ### 5.1 Windowed drift signaling (REQUIRED)
-`shouldNudge` MUST smooth the per-turn delta over a rolling window of the last `config.nudges.driftWindowTurns` turns (default 3) before comparing to `driftThresholdTokens` — fire when the *windowed* (moving-average, or M-of-N) delta crosses the threshold, NOT on a single turn's raw delta. Rationale (live use): a single heavy turn is routinely legitimate (reading several source files; the user pasting reference docs to read) — *sustained* growth over a window is the actionable signal. The turn metric (`@04-data-model.md` §5) carries the raw per-turn delta; the window is computed in the filter from the last N `mulligan:turn-metric` entries on the branch. The firing condition is **delta-only when delta data is available**: `avg(window.deltaTokens) > driftThresholdTokens`. The earlier `|| bloatHit` arm is **dropped** — it fired the drift nudge on any single large tool result, redundant with Nudge A (already co-located on that result) and a known stuck-turn-loop amplifier (it produced the live-observed `~0k tokens / N bloated results` self-contradiction). `bloatHit` remains a firing condition *only* in the no-delta fallback: a window with zero finite deltas fires iff any metric has `bloatHit` (first turn / post-reload). Acceptance: (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire; (c) a single large result (>threshold) with ~0 net growth does NOT fire the drift nudge even though it does trigger Nudge A.
+`shouldNudge` MUST smooth the per-turn delta over a rolling window of the last `config.nudges.driftWindowTurns` turns (default 3) before comparing to `driftThresholdTokens` — fire when the *windowed* (moving-average, or M-of-N) delta crosses the threshold, NOT on a single turn's raw delta. Rationale (live use): a single heavy turn is routinely legitimate (reading several source files; the user pasting reference docs to read) — *sustained* growth over a window is the actionable signal. The turn metric (`@04-data-model.md` §5) carries the raw per-turn delta; the window is computed in the filter from the last N `mulligan:turn-metric` entries on the branch. The firing condition is **delta-only when delta data is available**: `avg(window.deltaTokens) >= driftThresholdTokens`. The earlier `|| bloatHit` arm is **dropped** — it fired the drift nudge on any single large tool result, redundant with Nudge A (already co-located on that result) and a known stuck-turn-loop amplifier (it produced the live-observed `~0k tokens / N bloated results` self-contradiction). `bloatHit` remains a firing condition *only* in the no-delta fallback: a window with zero finite deltas fires iff any metric has `bloatHit` (first turn / post-reload). Acceptance: (a) a single 8k-token turn amid small turns does NOT fire; (b) three ~4k turns in a row DO fire; (c) a single large result (>threshold) with ~0 net growth does NOT fire the drift nudge even though it does trigger Nudge A.
 
 > **v1.1 note (D10 — `deltaTokens` is agent-attributable).** Because Phase 1 now excludes `user` messages from `now`, a large **user-supplied** input never inflates the drift delta. Concretely: the user pasting a 50k-token reference doc does NOT trip the drift nudge — it is ground-truth input, not agent bloat. The **high-water signal** (§5.2) still measures *total* filtered context and will still fire on such a paste (correctly — the window genuinely is filling), but its prescription is pure awareness, not rewind/shrink. This cleanly separates "the agent should shed something" (delta, agent-attributable) from "the window is getting full" (high-water, total).
 
@@ -2091,9 +2103,17 @@ The drift nudge (§2) MUST NOT fire for a turn in which the agent already issued
 - **Behavior (REQUIRED, v1.1 — `@13` §5):** Mulligan maintains a **persistent above-prompt-box banner** via `ctx.ui.setWidget("mulligan:active-checkpoint", [lines], { placement:"aboveEditor" })` while ≥1 active checkpoint exists, cleared (`setWidget(key, undefined)`) when none remain. Each line names a checkpoint and states the agent may rewind across subsequent prompts back to it, with the revoke command. Refreshed on: checkpoint set, checkpoint revoke, checkpoint consumption (a rewind retires its label), `session_start` (so `/resume` restores it), and — defense-in-depth — every `context` fire (the filter already scans checkpoints; reconcile the banner from the active set). Guarded by `ctx.hasUI` (no-op in print/json); disablable via `config.ui.activeCheckpointBanner` (default `true`).
 - **Acceptance:** (a) after `/mulligan_checkpoint x`, the banner is visible above the prompt box and persists across turns; (b) after `/mulligan_checkpoint_revoke x` (or consumption), it updates/clears within one fire; (c) `/resume` of a session with an active checkpoint shows the banner on the first inference; (d) the banner is **never** injected into `event.messages` (UI-only — zero model-context cost).
 
+## E27. Model sends an OBJECT param as a JSON-encoded string (REQUIRED; pre-validation shim)
+
+- **Situation:** some models serialize an object-typed tool parameter as a JSON *string* rather than an object — e.g. `mulligan_shrink` called with `target: "{\"by_tool_call_id\": \"call_bash_pclntab\"}"` instead of the object form. (Why the tool body cannot intervene, and why this is distinct from a normal validation error: `@02-proven-constraints.md` C13 — the host validates args **before** `execute()` runs.)
+- **Risk:** the host's `Value.Convert` + compiled `Check` cannot coerce string→object, so the call dies pre-validation with `Validation failed … target: must be object` and the requested transform (shrink / rewind / cancel) is **silently lost** — no marker is written, no error reaches the agent to course-correct. On models that exhibit this, the undefended object-param tools are effectively unusable.
+- **Required behavior (REQUIRED):** every tool whose schema has an OBJECT-typed parameter MUST register a `ToolDefinition.prepareArguments` shim that JSON-parses each listed key's value when it is a string, replacing it with the parsed value **only if** that value is a non-null, non-array object (the only shape an object-typed schema accepts). Malformed JSON, arrays, and scalars are passed through untouched so the host's normal validation still reports them honestly (clear schema errors, never a silent swallow). Implementation: `src/prepare-args.ts` `prepareObjectArgs<T>(keys)`, wired into the three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`, whose union is structurally identical to shrink's). Scalar-only tools (`mulligan_audit`) are immune and carry no shim.
+- **Acceptance:** (a) a JSON-string object param on any of the three tools is accepted and behaves identically to a proper-object call; (b) a proper-object call is unchanged; (c) a malformed JSON string, or a JSON value that is an array/scalar/null, is **not** coerced — it fails validation with a clear schema error; (d) the shim never throws (E13); (e) regression tests run the exact host pipeline (`prepareArguments` → `Value.Convert` → `Compile.Check`) on the literal field-report args, all three `anyOf` arms, markerId-only cancel calls (no `target` → pass-through), and proper-object passthrough.
+
 ## Cross-references
 - Filter algorithms that implement these behaviors → `@06-context-filter.md`
 - Tool refusal conditions → `@05-tools.md`
+- Proven host-validation constraint underpinning E27 → `@02-proven-constraints.md` C13
 - Config knobs referenced (maxDepth, maxRetriesPerPrompt, abortContextFraction, thresholds, protect) → `@09-configuration.md`
 9. Configuration — settings schema & defaults — # 09 — Configuration
 
@@ -2139,7 +2159,7 @@ The drift nudge (§2) MUST NOT fire for a turn in which the agent already issued
       "bloatThresholdBytesByTool": {  // OPTIONAL per-tool overrides (keyed by toolName); fall back to bloatThresholdBytes
         "read": 24576                 // 24 KB — large source-file reads are routine and legitimate
       },                              // (bash is intentionally omitted: it uses the 16 KB global to stay sensitive)
-      "driftThresholdTokens": 6000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
+      "driftThresholdTokens": 4000,   // windowed turn-token delta → drift nudge (see @07 §5.1)
       "driftWindowTurns": 3,          // rolling window for §5.1 windowed drift signaling
       "highWaterFraction": 0.7        // §5.2 edge-triggered high-water signal (fraction of context window)
     },
@@ -2178,7 +2198,7 @@ The drift nudge (§2) MUST NOT fire for a turn in which the agent already issued
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
 | `nudges.bloatThresholdBytesByTool` | `{ "read": 24576 }` | `bash` is the primary bloat surface, so it is intentionally NOT listed — it falls back to the 16 KB global to stay maximally sensitive. `read` of a large source file is normal, so it gets a higher 24 KB bar. Resolution: look up `event.toolName` in the map; on miss (including `bash`), use `bloatThresholdBytes`. |
-| `nudges.driftThresholdTokens` | `6000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Raised from 3000 after live use showed 3k false-positived on routine multi-file reads; the §5.1 windowing is what makes 6k a quiet, accurate trip point. |
+| `nudges.driftThresholdTokens` | `4000` | Windowed (`@07-preventive-and-nudges.md` §5.1) per-turn token delta that triggers the drift nudge. Lowered from 6000 with the comparison changed from `>` to `>=` (BUG-003 fix): at 6000 with strict `>`, §5.1 criterion (b) — three ~4k turns in a row fire — never held (`avg([4k,4k,4k])=4k` > 6000 is false). At 4000 with `>=`, all three §5.1 acceptance criteria hold: (a) a single 8k turn amid small turns averages <4000 → no fire; (b) three ~4k turns average ~4000 >= 4000 → fire; (c) a single large result with ~0 net growth averages ~0 → no fire. |
 | `nudges.driftWindowTurns` | `3` | Rolling window over which the drift delta is smoothed before thresholding (`@07` §5.1). Turns a noisy single-turn signal into a sustained-growth signal. |
 | `nudges.highWaterFraction` | `0.7` | Fraction of the context window at which the §5.2 high-water annotation fires (edge-triggered). Catches slow steady accumulation the delta nudge misses. |
 | `audit.estimateConfidence` | `"medium"` | Honest default; token estimates are approximate. |

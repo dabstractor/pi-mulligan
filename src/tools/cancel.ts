@@ -65,6 +65,7 @@ import { resolveShrinkTarget } from "../transforms.js"; // NEW (S2) — pure res
 import type { ShrinkTarget } from "../transforms.js"; // NEW (S2) — ≡ markers.ts ShrinkTarget ≡ CancelParams.target
 import type { MessageLike } from "../transforms.js"; // NEW (S2) — Pi-free structural message type
 import { getConfig } from "../config.js"; // GOTCHA: read getConfig() ONCE per execute
+import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
 
 // ── Parameter schema (spec/05 §5 — Typebox, VERBATIM incl. the markerId description) ──────────────────
 
@@ -458,6 +459,11 @@ export function makeCancelTool(pi: ExtensionAPI): ToolDefinition<typeof CancelPa
     label: "Mulligan Cancel",
     description: CANCEL_DESC, // spec/05 §5 VERBATIM
     parameters: CancelParams,
+    // Same string-encoded-object failure class as mulligan_shrink (the `target` union is STRUCTURALLY
+    // IDENTICAL — see CancelParams comment): the host validates BEFORE execute() and Value.Convert cannot
+    // coerce a JSON string into an object, so prepareArguments restores the call pre-validation.
+    // markerId-only calls carry no `target` → the shim passes them through untouched.
+    prepareArguments: prepareObjectArgs<CancelArgs>(["target"]),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return cancelExecute(pi, toolCallId, params, signal, onUpdate, ctx); // pi captured via closure
     },
