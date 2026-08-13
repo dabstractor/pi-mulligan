@@ -41,6 +41,7 @@ import {
   chmodSync,
   readdirSync,
   statSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -659,5 +660,39 @@ describe("F-revert-* edge integration (spec/14 §6 + §2 / spec/08 E32)", () => 
     const revert2 = lastMarker.data.revert as { backend?: string; revertedFiles?: string[] } | undefined;
     expect(revert2?.backend).toBe("git");
     expect(revert2?.revertedFiles).toEqual(expect.arrayContaining(["a.ts"]));
+  });
+
+  // ── F-revert-subdir-not-promoted (spec/14 §2 SAFETY INVARIANT — no upward repo discovery) ───────
+  // The core detection-safety property, exercised end-to-end against a REAL git repo + real fs: a
+  // subdirectory launch whose PARENT contains a .git is NEVER promoted to the parent's git repo.
+  // detectAndCreate uses LEXICAL existsSync(join(cwd, ".git")) + realpath(cwd) — NO `git rev-parse
+  // --show-toplevel` / upward walk (spec/14 §2). If it DID walk up, git would resolve the subdir to
+  // the parent's repo root → GitBackend → restore() would target the PARENT tree (the historical
+  // $HOME-deletion hazard). Asserting backend === "cas" here is the behavioral proof that upward
+  // discovery is gone. (The unit-level "no rev-parse recorded" assertion lives in test/store.test.ts,
+  // landed by P1.M1.T2.S1; this is the integration-level proof. spec/14 §10 Safety clause. P1.M2.T1.S1.)
+  it("F-revert-subdir-not-promoted: a subdir under a git parent (no own .git) → cas (NOT git) — no upward discovery (spec/14 §2 SAFETY INVARIANT)", async () => {
+    if (!(await gitAvailable())) {
+      console.warn("[revert-edge] git not on PATH — skipping F-revert-subdir-not-promoted");
+      return;
+    }
+    // PARENT: a real git repo (.git present) — the directory detection must NOT walk up into.
+    const parentRepo = await makeRepo("rev-subdir-parent-");
+    dirs.push(parentRepo);
+    // SUBDIR: a fresh directory INSIDE the parent that has NO .git of its own. mkdtempSync under the
+    // parent creates it with no .git (no new import — mkdtempSync is already used by makeRepo/makeStorage).
+    const subdir = mkdtempSync(join(parentRepo, "sub-"));
+    dirs.push(subdir);
+    // Sanity (structural precondition): the parent IS a git repo; the subdir is NOT itself one.
+    expect(existsSync(join(parentRepo, ".git"))).toBe(true);
+    expect(existsSync(join(subdir, ".git"))).toBe(false);
+    // Detect on the SUBDIR. realpath(subdir) is depth ≥ 2 (not forbidden) and has no .git → CAS.
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    setConfig({ revert: { enabled: true, storageDir } });
+    const store = await detectAndCreate(subdir, getConfig().revert);
+    // THE assertion: lexical detection → "cas". If upward discovery existed, git would find the
+    // parent's .git and return "git". "cas" (not "none") also confirms it isn't spuriously refused.
+    expect(store.describe().backend).toBe("cas");
   });
 });

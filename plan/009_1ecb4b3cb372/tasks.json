@@ -150,14 +150,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Integration verification: run revert-*.test.ts suite + add subdirectory-not-promoted assertion",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify the full integration test suite passes with the new lexical .git detection. Add one new test case proving a subdirectory launch under a git repo is NOT promoted to the parent (stays cas). Requirement R5d.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Run integration suite + add subdir-not-promoted assertion to revert-edge.test.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -186,7 +186,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add safety paragraph to README.md working-tree-revert section",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
