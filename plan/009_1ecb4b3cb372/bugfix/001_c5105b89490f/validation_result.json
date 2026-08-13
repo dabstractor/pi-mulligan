@@ -1,0 +1,1 @@
+{ "hasIssues": false, "issueCount": 0, "summary": "PRD BUG-001 (delete_created_files deleting pre-existing oversize files) is already fixed in both backends via skip-record spare + defense-in-depth current-size guard; independently reproduced on real fs; 1411/1411 tests pass, tsc clean." }
