@@ -232,13 +232,17 @@ At `last_tool_call_group`, the file revert is ignored and the tool returns the n
 
 ### Git-safety guarantee
 
-In a git repo the backend uses an **external shadow repository**: its `GIT_DIR` lives under `config.revert.storageDir` (one shadow repo per source worktree), and its `GIT_WORK_TREE` points at the user's working tree. The user's `.git` is **never written — not even a transient/dangling object.** The only command ever run against the user's git is the read-only `git rev-parse` (to resolve repo root/gitdir). The five git-safety guarantees (`spec/14` §3):
+In a git repo the backend uses an **external shadow repository**: its `GIT_DIR` lives under `config.revert.storageDir` (one shadow repo per source worktree), and its `GIT_WORK_TREE` points at the user's working tree. The user's `.git` is **never written — not even a transient/dangling object**, and — because the workspace root is resolved as `realpath(cwd)` with no upward discovery (see Workspace-root safety below) — **no command of any kind, read or write, is ever issued against it.** The five git-safety guarantees (`spec/14` §3):
 
 1. **No ref-moving or write command is ever issued against the user's git** — every write (`add`, `write-tree`, `commit-tree`, `update-ref`, `read-tree`, `checkout`, `gc`) targets the shadow repo. Forbidden everywhere: `commit`, `reset`, `checkout <branch>`, `merge`, `stash`, `rebase` against the source.
 2. **The user's `.git` is never written — not even a dangling object.** This is strictly cleaner than a `git stash create`-in-source design: there is nothing to reclaim from the user's repo because nothing was ever put there. `git status`, `git log`, `git stash list`, and the reflog of the source repo are byte-for-byte unaffected.
 3. **Restore writes only working-tree files.** The source index and all source refs are never touched.
 4. **`delete_created_files` only deletes files the span created** (present now, absent from the before-snapshot), behind the per-call flag **and** `config.revert.allowDeleteCreatedFiles`.
 5. **Pre-flight refuse-on-dirty** (below): if any affected path drifted since the after-snapshot, the **whole file-revert is refused** — never a silent clobber.
+
+### Workspace-root safety
+
+The snapshot subsystem never walks up the tree to find an enclosing repository. The workspace root is always `realpath(cwd)` — exactly the directory the session was launched in — resolved lexically, with **no upward git discovery** (no `rev-parse --show-toplevel` / `--git-dir` / `--absolute-git-dir`), so a subdirectory launch can never be silently promoted to a parent directory. If `realpath(cwd)` is the user's home directory, the filesystem root (`/`), or any depth-1 system directory (`/home`, `/etc`, `/usr`, `/var`, `/bin`, …), the backend is **refused** and revert is unavailable (backend `"none"`; the rewind still proceeds with just the note). Because the root needs no `rev-parse` to resolve it, **no command of any kind — read or write — is ever issued against the user's `.git`**: the external shadow repo is the only git that receives any command. `restore()` additionally re-checks this invariant at its entry and refuses (zero filesystem mutation) if the root is forbidden — a last line of defense independent of detection. (`spec/14` §2 SAFETY INVARIANT; §3 git-safety guarantee #1.)
 
 ### Dirty-guard behavior
 

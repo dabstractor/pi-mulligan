@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Detection safety hardening (remove upward repo discovery; enforce realpath(cwd) root)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "A focused safety retrofit of the v1.2 working-tree-revert feature. Remove ALL upward git repo discovery (rev-parse --show-toplevel / --git-dir / --absolute-git-dir) from detection and init. Enforce realpath(cwd) as the workspace root with no upward traversal anywhere. Add a forbidden-root refusal at detection and a defense-in-depth restore() re-check in both backends. This closes the most severe failure mode in the subsystem: upward traversal once resolved the workspace to $HOME, causing restore() to revert/delete the entire home tree.",
       "milestones": [
         {
@@ -143,7 +143,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Integration verification + changeset-level documentation (Mode B)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Run the full integration suite to confirm no regression for real git/cas projects. Add the subdirectory-not-promoted assertion (the core safety property). Then sync cross-cutting changeset-level documentation (README safety paragraph + stale-reference sweep) that only makes sense once all M1 code lands.",
           "tasks": [
             {
@@ -179,14 +179,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Sync changeset-level documentation (Mode B)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Cross-cutting documentation that spans the whole changeset. Update README.md with the safety guarantee. Sweep all source and docs for stale v1.2-detection language (rev-parse, show-toplevel, sourceGitDir, repo-root-keyed, share one shadow repo) that should have been removed by the implementing subtasks. This is the FINAL task — it depends on every implementing subtask.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add safety paragraph to README.md working-tree-revert section",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -207,7 +207,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S2",
                   "title": "Stale-reference sweep across README.md + src/snapshot/*",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
