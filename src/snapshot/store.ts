@@ -1,10 +1,8 @@
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import { access, mkdir, constants } from "node:fs/promises";
-import { resolve, relative, isAbsolute } from "node:path";
+import { realpathSync, existsSync } from "node:fs";
+import { resolve, relative, isAbsolute, join } from "node:path";
 import type { MulliganConfig } from "../config.js";
-
-const execFile = promisify(execFileCb);
+import { isForbiddenRoot } from "./paths.js";
 
 /**
  * The backend-pluggable working-tree snapshot STORE contract + the serialization primitive for the
@@ -32,7 +30,8 @@ const execFile = promisify(execFileCb);
  *   `AsyncMutex`. store.ts EXPORTS both; it does NOT make the interface async, and it does NOT use
  *   the mutex itself.
  * - Leaves clean room for `detectAndCreate()` (P2.M1.T1.S2, the NEXT task — the factory does
- *   git-detection I/O via `child_process`; it APPENDS to this same file). store.ts does NOT define
+ *   git-detection via a LEXICAL existsSync('.git') check + a forbidden-root gate; it APPENDS to this
+ *   same file). store.ts does NOT define
  *   it (GOTCHA #3), nor any backend implementation.
  * - Consumers: `GitBackend` (git.ts, P2.M2.T1), `CasBackend` (cas.ts, P2.M3.T1) `implements
  *   SnapshotStore` + construct `new AsyncMutex()`; `rewindExecute` (rewind.ts, P4.M2.T1.S2)
@@ -251,8 +250,10 @@ export class AsyncMutex {
 // ─────────────────────────────────────────────────────────────────────────────
 // S2 (P2.M1.T1.S2) — detectAndCreate() factory + NoOpStore + module-private helpers.
 // APPENDED below the S1 exports (SnapshotStore / RestoreOpts / RestoreResult / AsyncMutex), which are
-// UNCHANGED. This is the ONLY git I/O in detection (a read-only `git rev-parse --git-dir`); all writes
-// live in the SHADOW repo inside GitBackend (P2.M2.T1). spec/14 §2 ("Detection"), spec/14 §8.
+// UNCHANGED. Detection is LEXICAL + PURE-SYNC: `realpathSync(cwd)` → `isForbiddenRoot` gate →
+// `existsSync(join(root,'.git'))`. It issues NO git command of ANY kind against the user's repo (no
+// rev-parse, read or write — spec/14 §2 SAFETY INVARIANT). All git writes live in the SHADOW repo
+// inside GitBackend (P2.M2.T1). spec/14 §2 ('Detection'), spec/14 §8.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -260,8 +261,10 @@ export class AsyncMutex {
  * exists ONLY to type the forward-compat dynamic-import cast below (not a public contract; P2.M2 may
  * widen `implements` details freely as long as the ctor takes `(cwd, revertConfig, sessionDir?)`).
  * `sessionDir?` is used ONLY when `storageDir` is null, to resolve `<sessionDir>/mulligan/`.
- * Repo-root resolution happens INSIDE GitBackend (its own `rev-parse --show-toplevel`); detectAndCreate
- * only proves the workspace is a git repo, it does NOT locate the repo root.
+ * detectAndCreate passes the CANONICAL workspace root (`realpath(cwd)`); GitBackend keys its shadow
+ * repo on THAT launch directory (never an upward-walked repo root — spec/14 §2 SAFETY INVARIANT).
+ * detectAndCreate selects the git backend by a LEXICAL `existsSync(join(root, '.git'))` check — it
+ * issues NO git command against the user's repo.
  */
 interface GitBackendCtor {
   new (
@@ -347,7 +350,7 @@ function summarize(msg: string): string {
  * (revert unavailable), `dirtyCheck` is an async no-op returning `[]` (no drift info), `restore` is an
  * async no-op returning the 5 empty buckets (nothing was done), `has` is an async no-op returning
  * false, `retire` is an async no-op void. `describe()` stays sync (pure metadata). detectAndCreate is
- * ASYNC (it awaits execFile + import + mkdir); the store it returns exposes the async interface.
+ * ASYNC (it awaits realpathSync + a dynamic import + mkdir); the store it returns exposes the async interface.
  *
  * EXPORTED so the rewind tool (rewindExecute, P4.M2.T1.S2) can read `store.describe().backend` and
  * skip the file-revert branch when it is "none", and so tests + index.ts (P3.M1.T2) can observe the
@@ -404,13 +407,16 @@ export class NoOpStore implements SnapshotStore {
  * session_start and caches the result on SessionRuntime (PRD h2.142 "Detection, cached per session").
  * The rewind tool (rewindExecute, P4.M2.T1) then operates on whatever store it is handed — mode-agnostic.
  *
- * DECISION TREE (spec/14 §2 "Detection" + work-item contract step 3):
- *   1. `git rev-parse --git-dir` (read-only — the ONLY git command run against the user's repo here;
- *      NEVER a write) exit 0 ⇒ `GitBackend` (P2.M2.T1). git missing / non-zero ⇒ not git, fall through.
- *   2. resolve storageDir (revertConfig.storageDir ?? `<sessionDir>/mulligan/`), `mkdir -p`, check
- *      `W_OK`. Writable ⇒ `CasBackend` (P2.M3.T1). Unwritable ⇒ `NoOpStore`.
- *   3. ANY thrown error (bad cwd, missing git binary, dynamic-import failure, backend ctor throw)
- *      ⇒ `NoOpStore`. **detectAndCreate NEVER rejects** (E28 fail-open is the contract).
+ * DECISION TREE (spec/14 §2 'Detection' + SAFETY INVARIANT; Mode A doc rides with this work):
+ *   1. Canonicalize: root = realpathSync(cwd). Throw (ENOENT/unreadable) ⇒ NoOpStore ('could not be
+ *      resolved') — fail-safe, never propagates.
+ *   2. Forbidden-root gate: isForbiddenRoot(root) (home / `/` / depth-1 system dir / degenerate)
+ *      ⇒ NoOpStore ('workspace root is forbidden … revert refused') — BEFORE any backend selection.
+ *   3. Git detection = LEXICAL: existsSync(join(root, '.git')) (.git may be a file or dir) ⇒ GitBackend.
+ *      NO upward git discovery is ever performed; rev-parse --show-toplevel/--git-dir/--absolute-git-dir
+ *      are FORBIDDEN in detection (spec/14 §2). Workspace root is ALWAYS realpath(cwd) — never walked up.
+ *   4. Else ⇒ CAS branch: resolveStorageDir + mkdir -p + W_OK. Writable ⇒ CasBackend; unwritable ⇒ NoOpStore.
+ *   5. ANY remaining thrown error ⇒ NoOpStore. detectAndCreate NEVER rejects (E28 fail-open).
  *
  * FORWARD-COMPATIBILITY (the crux): git.ts (P2.M2.T1) and cas.ts (P2.M3.T1) DO NOT EXIST yet. A
  * static `import { GitBackend } from "./git.js"` makes `tsc --noEmit` FAIL today and rollup/vitest
@@ -440,25 +446,31 @@ export async function detectAndCreate(
   sessionDir?: string | null,
 ): Promise<SnapshotStore> {
   try {
-    // (1) git detection — NARROW try/catch so its catch unambiguously means ONLY "not git"
-    //     (non-zero exit OR `git` binary absent → execFile rejects). Read-only rev-parse: no writes.
+    // (1) Canonicalize the workspace root. Fail-safe: realpathSync throws on ENOENT/unreadable → NoOpStore.
+    //     NEVER propagates (spec/14 §2 SAFETY INVARIANT: workspace root = realpath(cwd)).
+    let root: string;
     try {
-      await execFile("git", ["rev-parse", "--git-dir"], { cwd });
-      // exit 0 ⇒ is a git repo ⇒ construct the GitBackend (P2.M2.T1).
-      const spec = "./git.js"; // NON-LITERAL specifier → not statically resolved by tsc/rollup
-      const mod = (await import(spec)) as { GitBackend: GitBackendCtor };
-      return new mod.GitBackend(cwd, revertConfig, sessionDir);
+      root = realpathSync(cwd);
     } catch {
-      // not git — fall through to the CAS branch.
+      return new NoOpStore(
+        "workspace root could not be resolved (path does not exist or is unreadable)",
+      );
     }
-
-    // (2) resolve storage dir + writability check. DISTINCT-reason variant: a NARROW catch around
-    //     just mkdir+access yields the crisp "not writable" reason (vs a generic fail-open message).
-    const storageDir = resolveStorageDir(
-      revertConfig.storageDir,
-      sessionDir,
-      cwd,
-    );
+    // (2) Forbidden-root gate — BEFORE any backend selection (spec/14 §2 SAFETY INVARIANT + §10).
+    if (isForbiddenRoot(root)) {
+      return new NoOpStore(
+        "workspace root is forbidden (home/system root); revert refused",
+      );
+    }
+    // (3) Git detection = LEXICAL. .git may be a file (worktree/submodule) or dir — existsSync covers both.
+    //     NO rev-parse, NO upward walk. Workspace root is realpath(cwd), full stop (spec/14 §2).
+    if (existsSync(join(root, ".git"))) {
+      const spec = "./git.js"; // NON-LITERAL specifier (forward-compat cast) — not statically resolved by tsc/rollup
+      const mod = (await import(spec)) as { GitBackend: GitBackendCtor };
+      return new mod.GitBackend(root, revertConfig, sessionDir); // ← root (canonical), NOT cwd
+    }
+    // (4) CAS branch — flow unchanged; resolveStorageDir + mkdir -p + W_OK (spec/14 §2, §8).
+    const storageDir = resolveStorageDir(revertConfig.storageDir, sessionDir, root); // ← root
     try {
       await mkdir(storageDir, { recursive: true }); // mkdir -p (idempotent — recursive:true)
       await access(storageDir, constants.W_OK); // rejects if not writable
@@ -466,13 +478,12 @@ export async function detectAndCreate(
       // non-git AND storage not writable ⇒ NoOpStore with the distinct reason.
       return new NoOpStore("no git repo and storage dir not writable");
     }
-    // writable ⇒ construct the CasBackend (P2.M3.T1).
     const spec = "./cas.js"; // NON-LITERAL specifier → not statically resolved by tsc/rollup
     const mod = (await import(spec)) as { CasBackend: CasBackendCtor };
-    return new mod.CasBackend(cwd, revertConfig, sessionDir);
+    return new mod.CasBackend(root, revertConfig, sessionDir); // ← root (canonical), NOT cwd
   } catch (err) {
-    // (3) E28 fail-open — ANY error (unwritable storage already handled above; this catches import
-    //     failure, backend ctor throw, bad cwd, etc.). detectAndCreate NEVER rethrows.
+    // (5) E28 fail-open — ANY error (import failure, backend ctor throw, bad cwd, etc.).
+    //     detectAndCreate NEVER rethrows (spec/14 E28).
     const msg = err instanceof Error ? err.message : String(err);
     return new NoOpStore(summarize(msg));
   }

@@ -42,14 +42,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Rewrite detectAndCreate in store.ts to lexical + forbidden-root model",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Replace the `git rev-parse --git-dir` probe in detectAndCreate with the spec's detection tree: realpath canonicalization → forbidden-root gate → lexical existsSync(.git) check → backend selection. Remove the execFile rev-parse call entirely. Requirement R2 + unit tests R5b.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Rewrite detectAndCreate detection logic + rework store.test.ts detectAndCreate block",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -76,7 +76,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Rewrite constructor + ensureInit + remove sourceGitDir + update docs + rework git.test.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"

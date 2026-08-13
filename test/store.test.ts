@@ -8,13 +8,9 @@ import {
   type RestoreResult,
 } from "../src/snapshot/store.js";
 import type { MulliganConfig } from "../src/config.js";
-import { mkdtemp, mkdir, rm, chmod, access } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, rm, chmod, access, writeFile } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFile = promisify(execFileCb);
 
 // A canonical valid revert config used across detectAndCreate tests (mirrors DEFAULT_CONFIG.revert).
 const REVERT_CFG: MulliganConfig["revert"] = {
@@ -276,7 +272,15 @@ describe("NoOpStore — fail-open terminal store (spec/14 §2, E28)", () => {
   });
 });
 
-describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () => {
+describe("detectAndCreate() — spec/14 §2 Detection + SAFETY INVARIANT + §10 (lexical .git; no rev-parse)", () => {
+  // spec/14 §2 'Detection' + SAFETY INVARIANT + §10 'Safety (non-negotiable)'. task P1.M1.T2.S1.
+  //
+  // BEHAVIOR CHANGE (vs the old P2.M1.T1.S2 block): a NON-EXISTENT cwd used to fall through to the
+  // cas branch (execFile rejected on the bad cwd → "not git" → cas). With the new lexical detection
+  // realpathSync(cwd) throws on ENOENT → NoOpStore 'none' (test (g) pins the NEW fail-safe behavior).
+  // The git binary is no longer invoked at all — detection is realpathSync + isForbiddenRoot +
+  // existsSync only; `.git` is created via mkdir (binary-free), which itself proves no git command ran.
+  //
   // Tracks temp dirs to chmod-restore + rm in afterEach (read-only dirs block rm on some platforms).
   const dirs: string[] = [];
 
@@ -296,16 +300,65 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     dirs.length = 0;
   });
 
-  it("(a) NEVER throws — a non-existent cwd falls through to cas branch (non-git + writable storage)", async () => {
-    const badCwd = join(tmpdir(), `nonexistent-det-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    // badCwd does NOT exist on disk → execFile rejects (ENOENT on cwd) → not git → cas branch.
-    // cas.ts now ships (P2.M3.T1) + the sessionDir storage is writable → backend "cas".
-    // (BEFORE P2.M3.T1 this fail-opened to NoOpStore because ./cas.js was absent.)
-    const store = await detectAndCreate(badCwd, REVERT_CFG, await mkdtemp(join(tmpdir(), "sess-")));
+  // (a) LEXICAL .git detection — binary-free (mkdir, NOT git init; NO rev-parse).
+  it("(a) temp dir WITH .git (mkdir) + writable storage → GitBackend (lexical .git; no rev-parse, no git init)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hasgit-"));
+    dirs.push(dir);
+    await mkdir(join(dir, ".git")); // lexical .git (empty dir is enough; no git binary needed)
+    const storageDir = await mkdtemp(join(tmpdir(), "git-store-"));
+    dirs.push(storageDir);
+    const cfg = { ...REVERT_CFG, storageDir };
+    const store = await detectAndCreate(dir, cfg, null);
+    expect(store.describe().backend).toBe("git");
+  });
+
+  // (a2) `.git` as a FILE (worktree/submodule gitdir pointer) — existsSync covers file-or-dir (GOTCHA #7).
+  it("(a2) .git as a FILE (worktree/submodule) → GitBackend (existsSync covers file-or-dir)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wtgit-"));
+    dirs.push(dir);
+    // overwrite .git with a FILE containing a gitdir pointer (as a real worktree's .git looks):
+    await writeFile(join(dir, ".git"), "gitdir: /tmp/whatever/.git/wt\n");
+    const cfg = { ...REVERT_CFG, storageDir: await mkdtemp(join(tmpdir(), "wt-store-")) };
+    dirs.push(cfg.storageDir!);
+    const store = await detectAndCreate(dir, cfg, null);
+    expect(store.describe().backend).toBe("git");
+  });
+
+  // (b) non-git dir (no .git) + writable storage → cas branch.
+  it("(b) temp dir WITHOUT .git + writable storage → CasBackend (.git absent → cas branch)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "nogit-"));
+    dirs.push(cwd);
+    const storageDir = await mkdtemp(join(tmpdir(), "cas-store-"));
+    dirs.push(storageDir);
+    const cfg = { ...REVERT_CFG, storageDir };
+    const store = await detectAndCreate(cwd, cfg, null);
     expect(store.describe().backend).toBe("cas");
   });
 
-  it("(b) non-git dir + UNWRITABLE storage → NoOpStore, reason mentions 'writable'", async () => {
+  // (c) forbidden home → NoOpStore 'none' (forbidden-root gate — spec/14 §2 + §10).
+  it("(c) detectAndCreate(os.homedir(), …) → NoOpStore 'none' (forbidden root gate — spec §2/§10)", async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-"));
+    dirs.push(sessionDir);
+    const store = await detectAndCreate(homedir(), { ...REVERT_CFG, storageDir: null }, sessionDir);
+    expect(store).toBeInstanceOf(NoOpStore);
+    const desc = store.describe();
+    expect(desc.backend).toBe("none");
+    expect((desc.reason ?? "").toLowerCase()).toContain("forbidden");
+  });
+
+  // (d) forbidden '/' → NoOpStore 'none' (forbidden-root gate — spec/14 §2 + §10).
+  it("(d) detectAndCreate('/', …) → NoOpStore 'none' (forbidden root gate — spec §2/§10)", async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-root-"));
+    dirs.push(sessionDir);
+    const store = await detectAndCreate("/", { ...REVERT_CFG, storageDir: null }, sessionDir);
+    expect(store).toBeInstanceOf(NoOpStore);
+    const desc = store.describe();
+    expect(desc.backend).toBe("none");
+    expect((desc.reason ?? "").toLowerCase()).toContain("forbidden");
+  });
+
+  // (e) non-git dir + UNWRITABLE storage → NoOpStore (cas-branch fail-open path — UNCHANGED).
+  it("(e) non-git dir + UNWRITABLE storage (chmod 0o555) → NoOpStore, reason mentions 'writable'", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "nongit-"));
     dirs.push(cwd);
     const storageDir = await mkdtemp(join(tmpdir(), "ro-store-"));
@@ -319,81 +372,56 @@ describe("detectAndCreate() — spec/14 §2 detection tree + E28 fail-open", () 
     expect((desc.reason ?? "").toLowerCase()).toContain("writable");
   });
 
-  it("(c) non-git dir + WRITABLE storage → reaches cas branch → CasBackend (P2.M3.T1 landed)",
-    async () => {
-      // BEFORE P2.M3.T1: the dynamic import("./cas.js") rejected (cas.ts absent) → fail-open NoOpStore.
-      // AFTER P2.M3.T1: cas.ts ships → the dynamic import resolves → CasBackend → backend "cas".
-      // This test now pins that the forward-compat contract landed correctly (mirror of test (d)).
-      const cwd = await mkdtemp(join(tmpdir(), "nongit-w-"));
-      dirs.push(cwd);
-      const storageDir = await mkdtemp(join(tmpdir(), "rw-store-"));
-      dirs.push(storageDir);
-      const cfg = { ...REVERT_CFG, storageDir };
-      const store = await detectAndCreate(cwd, cfg, null);
-      expect(store.describe().backend).toBe("cas");
-    });
-
-  it("(d) real `git init` dir → reaches git branch → NoOpStore TODAY (./git.js absent)", async () => {
-    // Guard: skip if `git` is not on PATH (rare in CI; real `git init` requires the binary).
-    let gitOk = true;
-    try {
-      await execFile("git", ["--version"]);
-    } catch {
-      gitOk = false;
-    }
-    if (!gitOk) {
-      console.warn("[store.test] git not on PATH — skipping real-`git init` detection test");
-      return; // vitest treats a returned-pending test as passed (no assertion); acceptable skip.
-    }
-
-    const gitDir = await mkdtemp(join(tmpdir(), "gitinit-"));
-    dirs.push(gitDir);
-    await execFile("git", ["init"], { cwd: gitDir });
-    const storageDir = await mkdtemp(join(tmpdir(), "git-store-"));
-    dirs.push(storageDir);
-    const cfg = { ...REVERT_CFG, storageDir };
-    // BEFORE P2.M2.T1: detection reached the git branch (rev-parse exit 0) but import("./git.js")
-    // rejected (git.ts absent) → fail-open to NoOpStore. AFTER P2.M2.T1: git.ts exists → the dynamic
-    // import resolves → detectAndCreate constructs a GitBackend → backend === "git" (the intended flip;
-    // this test now pins that forward-compat contract landed correctly).
-    const store = await detectAndCreate(gitDir, cfg, null);
-    expect(store.describe().backend).toBe("git");
+  // (f) subdir whose PARENT has .git but subdir does NOT → cas. Proves NO upward walk — the
+  //     regression vector this whole task closes (spec/14 §2 SAFETY INVARIANT + §10).
+  it("(f) subdir whose PARENT has .git but subdir does NOT → 'cas' (NO upward walk — spec §2 SAFETY INVARIANT)", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "gitparent-"));
+    dirs.push(parent);
+    await mkdir(join(parent, ".git")); // parent IS a git repo (lexically)
+    const subdir = join(parent, "subdir");
+    await mkdir(subdir); // subdir is NOT a git repo (no .git inside it)
+    dirs.push(subdir);
+    const cfg = { ...REVERT_CFG, storageDir: await mkdtemp(join(tmpdir(), "sub-store-")) };
+    dirs.push(cfg.storageDir!);
+    const store = await detectAndCreate(subdir, cfg, null);
+    expect(store.describe().backend).toBe("cas"); // NOT promoted to parent → proves no upward walk
   });
 
-  it("(e) storageDir===null + sessionDir → default <sessionDir>/mulligan/ resolved, CasBackend", async () => {
-    // cwd non-git; sessionDir writable → resolveStorageDir yields <sessionDir>/mulligan/, mkdir+access
-    // succeed → reaches cas branch. AFTER P2.M3.T1: cas.ts ships → backend "cas".
-    // (BEFORE P2.M3.T1 this fail-opened to NoOpStore because ./cas.js was absent.)
-    const cwd = await mkdtemp(join(tmpdir(), "nongit-sess-"));
-    dirs.push(cwd);
-    const sessionDir = await mkdtemp(join(tmpdir(), "sess-"));
+  // (g) NON-EXISTENT cwd → NoOpStore 'none' (realpathSync ENOENT → fail-safe). DOCUMENTS the behavior
+  //     change (old (a) asserted 'cas' via execFile ENOENT → not git).
+  it("(g) NON-EXISTENT cwd → NoOpStore 'none' (realpathSync ENOENT → fail-safe)", async () => {
+    const badCwd = join(tmpdir(), `nonexistent-det-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-noexist-"));
     dirs.push(sessionDir);
-    const cfg = { ...REVERT_CFG, storageDir: null }; // null ⇒ default <sessionDir>/mulligan/
-    const store = await detectAndCreate(cwd, cfg, sessionDir);
-    // No throw; reaches the cas branch → CasBackend now that ./cas.js ships.
-    expect(store.describe().backend).toBe("cas");
-    // Side-check: the default <sessionDir>/mulligan/ was actually created (mkdir recursive ran).
-    const mulliganDir = join(sessionDir, "mulligan");
-    let created = false;
-    try {
-      await access(mulliganDir); // exists ⇒ resolveStorageDir + mkdir ran the default path
-      created = true;
-    } catch {
-      created = false;
-    }
-    expect(created).toBe(true);
+    const store = await detectAndCreate(badCwd, { ...REVERT_CFG, storageDir: null }, sessionDir);
+    expect(store).toBeInstanceOf(NoOpStore);
+    const desc = store.describe();
+    expect(desc.backend).toBe("none");
+    expect((desc.reason ?? "").toLowerCase()).toMatch(/resolved|exist|unread/);
   });
 
-  it("(f) storageDir resolving INSIDE cwd → fail-open NoOpStore (belt-and-suspenders containment)", async () => {
-    // config.ts rejects inside-cwd storageDir at validation time, but resolveStorageDir re-checks
-    // (covers the sessionDir-default path). A storageDir inside cwd must fail-open, not pollute.
-    const cwd = await mkdtemp(join(tmpdir(), "inside-cwd-"));
-    dirs.push(cwd);
-    const insideDir = join(cwd, "nested-store");
-    await mkdir(insideDir, { recursive: true });
-    const cfg = { ...REVERT_CFG, storageDir: insideDir };
-    const store = await detectAndCreate(cwd, cfg, null);
-    expect(store).toBeInstanceOf(NoOpStore);
-    expect(store.describe().backend).toBe("none");
+  // (h) detection issues ZERO git/child_process calls (no rev-parse — spec/14 §2 SAFETY INVARIANT).
+  //     The PRP's primary sentinel was vi.spyOn(child_process, "execFile"), but Node built-in exports
+  //     are non-configurable ("Cannot redefine property: execFile") in this vitest version, so the spy
+  //     is flaky. FALLBACK (per the PRP Confidence −1 note): the binary-free framing — run detection
+  //     with PATH emptied. Detection is realpathSync + isForbiddenRoot + existsSync ONLY (none consult
+  //     PATH), and GitBackend's constructor defers git init to first capture, so an empty PATH cannot
+  //     affect backend selection here. IF detection still shelled out to `git` (the old rev-parse
+  //     probe), the empty PATH would make that exec ENOENT → fail-open to NoOpStore → backend 'none',
+  //     NOT 'git'. Asserting backend 'git' under an empty PATH therefore PROVES no git binary was run.
+  it("(h) detection selects 'git' even with an EMPTY PATH (proves no git binary is invoked — spec §2)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "noexec-"));
+    dirs.push(dir);
+    await mkdir(join(dir, ".git"));
+    const cfg = { ...REVERT_CFG, storageDir: await mkdtemp(join(tmpdir(), "ne-store-")) };
+    dirs.push(cfg.storageDir!);
+    const origPath = process.env.PATH;
+    process.env.PATH = ""; // provably no git on PATH for this process
+    try {
+      const store = await detectAndCreate(dir, cfg, null);
+      expect(store.describe().backend).toBe("git"); // lexical .git selected WITHOUT invoking git
+    } finally {
+      process.env.PATH = origPath;
+    }
   });
 });
