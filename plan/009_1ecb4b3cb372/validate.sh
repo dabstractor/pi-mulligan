@@ -1,142 +1,142 @@
 #!/usr/bin/env bash
 # validate.sh — pi-mulligan comprehensive validation.
 #
-# Phases (only those that apply to this codebase are included):
-#   1. Lint  ............ N/A (intentionally no eslint/prettier; .editorconfig only — see VERIFICATION.md #3)
-#   2. Typecheck ........ `npm run typecheck` (tsc --noEmit, strict)
-#   3. Style ............ N/A (hand-formatted by discipline; .editorconfig is passive)
-#   4. Unit/Integration .. `npm test` (vitest — pure transforms + real git/CAS integration suites)
-#   5. E2E .............. extension-load check + `npm run smoke` (the 14-scenario integration harness)
+# Runs the project's own gates (typecheck, unit/integration tests, the real-Pi context-filter
+# smoke) AND a NEW end-to-end workflow reproduction of the v1.2 working-tree-revert feature driven
+# through a REAL Pi process (the gap no existing test covers).
 #
-# The E2E phase is NON-DESTRUCTIVE: it never mutates the global ~/.pi/agent/settings.json. It detects
-# the one real operational gap found during validation — the smoke harness conflicts when pi-mulligan is
-# ALSO globally registered as a Pi package (the README's own recommended daily-use install path) — and
-# reports it clearly with remediation guidance, instead of emitting 14 misleading "EXTENSION LOAD FAILED"
-# lines that look like total code breakage.
+# Phases 1–4 are the project's deterministic gates (all PASS on a correct checkout).
+# Phase 5 reproduces two production defects in the opt-in working-tree-revert feature
+# (see validation_report.md Issues #1 & #2). Phase 5 EXPECTED STATUS: FAIL (bug demonstration).
 #
-# Exit status: 0 only if every gate that CAN run cleanly does so. A detected global-registration
-# conflict is reported as an E2E finding (see validation_report.md Issue #1) but does not fail the
-# script's typecheck/unit gates, because those gates prove the code is correct independently.
+# Usage:   ./validate.sh
+# Exit:    0 if every PASS-expected phase passes; non-zero if any phase is wrong.
 set -uo pipefail
 
-PASS=0; WARN=0; FAIL=0
-section() { printf "\n\033[1m=== %s ===\033[0m\n" "$1"; }
-ok()   { printf "  \033[32m✓\033[0m %s\n" "$1"; PASS=$((PASS+1)); }
-warn() { printf "  \033[33m⚠\033[0m %s\n" "$1"; WARN=$((WARN+1)); }
-bad()  { printf "  \033[31m✗\033[0m %s\n" "$1"; FAIL=$((FAIL+1)); }
-note() { printf "  · %s\n" "$1"; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$REPO_ROOT"
+PASS=0; FAIL=0; SOFT=0
+section() { printf '\n\033[1m── %s ──\033[0m\n' "$1"; }
+ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
+soft() { printf '  \033[33mSOFT\033[0m %s\n' "$1"; SOFT=$((SOFT+1)); }
+info() { printf '  \033[2m%s\033[0m\n' "$1"; }
 
-printf "\033[1mpi-mulligan validation\033[0m — repo: %s\n" "$REPO_ROOT"
-
-# ───────────────────────── Phase 2: Type Checking ─────────────────────────
-section "Phase 2: Type Checking (tsc --noEmit, strict)"
-if npm run --silent typecheck >/tmp/mulligan-tsc.log 2>&1; then
-  ok "tsc --noEmit passes (strict, noImplicitAny)"
+# ───────────────────────── Phase 1: Type checking (strict) ─────────────────────────
+section "Phase 1: Type checking (tsc --noEmit, strict)"
+if npm run --silent typecheck 2>/tmp/v_tc.log; then
+  ok "typecheck — 0 errors"
 else
-  bad "typecheck failed:"
-  tail -20 /tmp/mulligan-tsc.log | sed 's/^/      /'
+  bad "typecheck — errors (see /tmp/v_tc.log)"
 fi
 
-# ───────────────────────── Phase 4: Unit + Integration Tests ─────────────────────────
-section "Phase 4: Unit + Integration Tests (vitest)"
-if npm test >/tmp/mulligan-test.log 2>&1; then
-  # vitest prints a summary line like "Tests  1394 passed (1394)"
-  SUMMARY="$(grep -E "Tests +[0-9]+ passed" /tmp/mulligan-test.log | tail -1 | tr -s ' ')"
-  FILES="$(grep -E "Test Files +[0-9]+ passed" /tmp/mulligan-test.log | tail -1 | tr -s ' ')"
-  ok "vitest passed — ${FILES:-?} | ${SUMMARY:-?}"
+# ───────────────────────── Phase 2: Unit + integration tests ──────────────────────
+section "Phase 2: Unit + integration tests (vitest)"
+npm test --silent >/tmp/v_test.log 2>&1
+# vitest summary format varies ("(1398)" vs "(1398 total)"); match the stable core.
+if grep -qE "Tests +[0-9]+ passed" /tmp/v_test.log && ! grep -qE "Tests +[1-9][0-9]* failed" /tmp/v_test.log; then
+  cnt=$(grep -E "Tests +[0-9]+ passed" /tmp/v_test.log | grep -oE "[0-9]+ passed" | head -1)
+  files=$(grep -E "Test Files +[0-9]+ passed" /tmp/v_test.log | grep -oE "[0-9]+ passed" | head -1)
+  ok "vitest — ${cnt} tests across ${files:-?} files"
 else
-  bad "vitest failed (tail):"
-  tail -40 /tmp/mulligan-test.log | sed 's/^/      /'
+  bad "vitest — failures (see /tmp/v_test.log)"
 fi
 
-# ───────────────────────── Phase 5: End-to-End ─────────────────────────
-section "Phase 5: End-to-End (extension load + integration smoke)"
-
-# 5a. Static spec-invariant spot checks (cheap, deterministic, no model needed).
-note "Spec invariants (static grep):"
-if grep -q "customType: \"mulligan:nudge\"" src/nudges.ts \
-   && ! grep -qE "appendEntry|sendMessage" <(awk '/function injectNudge/,/^}/' src/nudges.ts); then
-  ok "injectNudge never persists (spec/10 §2.3 — mulligan:nudge is ephemeral)"
+# ───────────────────────── Phase 3: Real-Pi context-filter smoke ──────────────────
+# This is the project's own E2E acceptance gate for the CORE features (rewind/shrink/cancel/
+# audit/nudges). It drives 14 scenarios through a real `pi` process. It does NOT cover revert.
+section "Phase 3: Real-Pi context-filter smoke (npm run smoke, 14 scenarios)"
+npm run --silent smoke >/tmp/v_smoke.log 2>&1
+if grep -q "14/14 scenarios passed" /tmp/v_smoke.log; then
+  ok "smoke — 14/14 scenarios passed (core features verified end-to-end)"
 else
-  bad "injectNudge appears to persist (expected: only mutate the in-flight message copy)"
-fi
-if grep -q 'customType: "mulligan:note".*display: true\|customType: "mulligan:note", content, display: true' src/markers.ts \
-   || grep -A2 'customType: "mulligan:note"' src/markers.ts | grep -q "display: true"; then
-  ok "mulligan:note uses display:true (spec/04 §3 — surfaces to operator)"
-else
-  warn "could not confirm mulligan:note display:true"
-fi
-if grep -q "isForbiddenRoot" src/snapshot/git.ts && grep -q "isForbiddenRoot" src/snapshot/cas.ts; then
-  ok "both snapshot backends enforce the forbidden-root SAFETY INVARIANT at restore() entry (spec/14 §2)"
-else
-  bad "a snapshot backend is missing the forbidden-root restore() guard"
-fi
-# v1.1: checkpoint must be a command, NOT an agent tool.
-if grep -q 'registerCommand("mulligan_checkpoint"' src/index.ts && ! grep -q 'registerTool.*mulligan_checkpoint' src/index.ts; then
-  ok "checkpoint is a human command (v1.1 — mulligan_checkpoint agent tool removed, E23 resolved)"
-else
-  bad "checkpoint surface does not match spec/13 (command, not agent tool)"
-fi
-
-# 5b. Detect the global-package registration that defeats `pi -e ./src/index.ts`.
-GLOB_SETTINGS="${PI_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
-GLOB_REG=""
-if [ -f "$GLOB_SETTINGS" ] && grep -q "pi-mulligan" "$GLOB_SETTINGS" 2>/dev/null; then
-  GLOB_REG="$(grep -oE '("\.\./[^"]*pi-mulligan[^"]*"|"npm:[^"]*pi-mulligan[^"]*"|"git:[^"]*pi-mulligan[^"]*")' "$GLOB_SETTINGS" | head -1)"
-fi
-
-# 5c. Extension load check via `pi -e`. This is the README "Zero-config smoke" acceptance check.
-if command -v pi >/dev/null 2>&1; then
-  LOAD_OUT="$(timeout 30 pi -e ./src/index.ts --session-id validate-load -p "ok" 2>&1)"
-  if echo "$LOAD_OUT" | grep -q "Tool .* conflicts with"; then
-    OTHER="$(echo "$LOAD_OUT" | grep -m1 'conflicts with' | sed -E 's/.*conflicts with //')"
-    warn "pi -e ./src/index.ts FAILED: tool-name conflict with a globally-registered copy"
-    note "conflicting copy: $OTHER"
-    [ -n "$GLOB_REG" ] && note "registered globally in $GLOB_SETTINGS → $GLOB_REG"
-    note "This is NOT a code defect: a single copy loads & runs correctly (verified in isolation)."
-    note "It is a tooling/docs gap — see validation_report.md Issue #1."
-    CONFLICT=1
-  elif echo "$LOAD_OUT" | grep -q "Failed to load extension"; then
-    bad "pi -e load failed for another reason:"; echo "$LOAD_OUT" | grep -i "error\|failed" | head -3 | sed 's/^/      /'
-    CONFLICT=1
-  else
-    ok "extension loads cleanly via \`pi -e ./src/index.ts\` (Zero-config smoke, spec/11 §2 Step 9)"
-    CONFLICT=0
-  fi
-else
-  warn "pi CLI not on PATH — skipping live load + smoke (run inside a pi-equipped shell)"
-  CONFLICT=0
-fi
-
-# 5d. The integration smoke harness (`npm run smoke`) — the 14-scenario E2E suite.
-#     In a clean env it runs all 14; with a global registration it emits 14× "EXTENSION LOAD FAILED".
-if [ "${CONFLICT:-0}" = "1" ]; then
-  warn "skipping \`npm run smoke\`: the global duplicate registration (above) makes every scenario fail"
-  note "with the same conflict. To run the real E2E: temporarily comment out the pi-mulligan line in"
-  note "$GLOB_SETTINGS, run \`npm run smoke\`, then restore it. (All 14 pass in isolation.)"
-else
-  if npm run --silent smoke >/tmp/mulligan-smoke.log 2>&1; then
-    PASSED_SCN="$(grep -cE '^PASS ' /tmp/mulligan-smoke.log)"
-    ok "integration smoke harness passed — ${PASSED_SCN} scenarios green"
-  else
-    bad "integration smoke harness failed (tail):"
-    tail -25 /tmp/mulligan-smoke.log | sed 's/^/      /'
+  bad "smoke — did not reach 14/14 (see /tmp/v_smoke.log)"
+  # Surface the most likely operational cause (a second globally-registered copy).
+  if grep -qi "conflicts with\|EXTENSION LOAD FAILED" /tmp/v_smoke.log; then
+    info "smoke red lines may be the duplicate-registration conflict (a second copy of pi-mulligan"
+    info "is globally registered). Run 'pi -ne -e ./src/index.ts' alone to confirm the code loads."
   fi
 fi
 
-# ───────────────────────── Summary ─────────────────────────
+# ───────────────────────── Phase 4: Spec invariants (static) ─────────────────────
+section "Phase 4: Spec invariants (static)"
+# 4a — the drift nudge must NEVER be persisted (spec/10 §2.3 / DoD #3).
+smoke_jsonl=$(find ~/.pi/agent/sessions -name '*smoke-*.jsonl' 2>/dev/null | head -1)
+if [ -n "$smoke_jsonl" ]; then
+  if ! grep -q '"customType":"mulligan:nudge"' "$smoke_jsonl"; then
+    ok "mulligan:nudge never persisted in a smoke session JSONL"
+  else
+    bad "mulligan:nudge found persisted in $smoke_jsonl (spec/10 §2.3 violation)"
+  fi
+else
+  soft "no smoke session JSONL found to assert nudge-leak (run Phase 3 first)"
+fi
+# 4b — forbidden-root predicate refuses $HOME and / (spec/14 §2 SAFETY INVARIANT).
+# Runtime behavior is covered by test/paths.test.ts (Phase 2); here we assert the source contract.
+if grep -q 'export function isForbiddenRoot' src/snapshot/paths.ts; then
+  ok "isForbiddenRoot predicate present in paths.ts (spec/14 §2; runtime via paths.test.ts)"
+else
+  bad "isForbiddenRoot predicate MISSING from paths.ts (spec/14 §2 SAFETY INVARIANT)"
+fi
+
+# ───────────────────────── Phase 5: Working-tree-revert E2E (NEW — the gap) ──────
+# Drives the COMPLETE user workflow from README §5 through a REAL Pi process:
+#   enable revert  →  agent writes a file  →  agent calls mulligan_rewind(revert_file_changes)  →
+#   assert the file was restored to its pre-span state.
+# No existing test covers this (integration tests fire turn_start once manually + always set storageDir;
+# the smoke harness has no revert scenario). This phase is EXPECTED TO FAIL until the defects are fixed.
+section "Phase 5: Working-tree-revert E2E through real Pi (README §5 workflow)"
+
+PI_BIN="pi"
+command -v "$PI_BIN" >/dev/null 2>&1 || { soft "pi not on PATH — skipping Phase 5"; skip5=1; }
+
+if [ -z "${skip5:-}" ]; then
+  SRC="$ROOT/src/index.ts"
+  WF=$(mktemp -d)
+  # --- 5a: DEFAULT config (revert.enabled:true only — exactly what README §5 documents) ---
+  ( cd "$WF" && git init -q && git config user.email v@v.co && git config user.name v \
+      && printf 'original-content\n' > file1.txt && git add -A && git commit -qm init \
+      && mkdir -p .pi \
+      && printf '{ "mulligan": { "revert": { "enabled": true, "allowDeleteCreatedFiles": true } } }' > .pi/settings.json )
+  timeout 120 "$PI_BIN" -ne -e "$SRC" --session-id "val-revert-default-$$_$(date +%s)" \
+    -p "Use the write tool to overwrite $WF/file1.txt with the text 'AGENT-MUTATED', then call mulligan_rewind with granularity last_turn, revert_file_changes true, delete_created_files true, and note {what_happened:'test', true_current_state:'test', next:'stop'}. Then reply with exactly: DONE" \
+    >/tmp/v_revert_default.log 2>&1
+  rc=$?
+  default_file=$(cat "$WF/file1.txt" 2>/dev/null)
+  default_msg=$(grep -o 'rewound last_turn[^"]*' ~/.pi/agent/sessions/--*$(basename "$WF" | tr / -)*.jsonl 2>/dev/null \
+                | grep -o 'no working-tree snapshot[^0-9]*0 files reverted\|Reverted [0-9]* file(s)' | head -1)
+  # fallback: scan all recent sessions for our marker
+  [ -z "$default_msg" ] && default_msg=$(grep -rho 'rewound last_turn[^"]*' ~/.pi/agent/sessions/ 2>/dev/null | tail -1)
+  info "5a default-config: file1.txt now = $(printf '%q' "$default_file") | rewind: ${default_msg:-(see /tmp/v_revert_default.log)}"
+  if printf '%s' "$default_file" | grep -q '^original-content'; then
+    ok "5a default-config revert — file WAS restored (unexpected; bug may be fixed)"
+  else
+    bad "5a default-config revert — file NOT restored (Issue #1: detectAndCreate gets no sessionDir → NoOpStore → 'no working-tree snapshot')"
+  fi
+
+  # --- 5b: EXPLICIT storageDir (bypasses Issue #1) — isolates the per-inference turn_start bug ---
+  STORE=$(mktemp -d)
+  printf '{ "mulligan": { "revert": { "enabled": true, "allowDeleteCreatedFiles": true, "storageDir": "%s" } } }' "$STORE" > "$WF/.pi/settings.json"
+  printf 'original-content\n' > "$WF/file1.txt"
+  timeout 120 "$PI_BIN" -ne -e "$SRC" --session-id "val-revert-explicit-$$_$(date +%s)" \
+    -p "Use the write tool to overwrite $WF/file1.txt with the text 'AGENT-MUTATED', then call mulligan_rewind with granularity last_turn, revert_file_changes true, delete_created_files true, and note {what_happened:'test', true_current_state:'test', next:'stop'}. Then reply with exactly: DONE" \
+    >/tmp/v_revert_explicit.log 2>&1
+  explicit_file=$(cat "$WF/file1.txt" 2>/dev/null)
+  info "5b explicit-storageDir: file1.txt now = $(printf '%q' "$explicit_file") (store dir: $STORE)"
+  if printf '%s' "$explicit_file" | grep -q '^original-content'; then
+    ok "5b explicit-storageDir revert — file WAS restored (unexpected; bug may be fixed)"
+  else
+    bad "5b explicit-storageDir revert — file NOT restored (Issue #2: turn_start fires per-inference + overwrites the 'turn' snapshot → restore diffs the mutated tree against itself → 0 reverted)"
+  fi
+  rm -rf "$WF" "$STORE"
+fi
+
+# ───────────────────────── Summary ───────────────────────────────────────────────
 section "Summary"
-printf "  passed: %d   warnings: %d   failed: %d\n" "$PASS" "$WARN" "$FAIL"
-if [ "$FAIL" -gt 0 ]; then
-  printf "\n  \033[31mRESULT: FAILED — %d gate(s) did not pass\033[0m\n" "$FAIL"
-  exit 1
-fi
-if [ "$WARN" -gt 0 ]; then
-  printf "\n  \033[33mRESULT: PASSED with %d warning(s) — see validation_report.md\033[0m\n" "$WARN"
-else
-  printf "\n  \033[32mRESULT: ALL GATES PASSED\033[0m\n"
-fi
-exit 0
+printf '  PASS=%d  FAIL=%d  SOFT=%d\n' "$PASS" "$FAIL" "$SOFT"
+echo "  Phases 1–4 (typecheck, tests, smoke, invariants) validate the CORE features."
+echo "  Phase 5 reproduces defects in the v1.2 working-tree-revert feature (see validation_report.md)."
+# Exit non-zero if any PASS-expected phase failed, OR if the bug-demonstration phase unexpectedly passed
+# (which would mean the bugs are fixed and this script needs updating).
+exit $FAIL

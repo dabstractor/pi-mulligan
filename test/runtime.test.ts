@@ -35,6 +35,7 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
       snapshots: new Map(),
+      captureArmed: true, // VALIDATION-FIX #2 — armed so turn_start (no prior agent_start) captures
       pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003
     });
   });
@@ -160,6 +161,7 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
       snapshots: new Map(),
+      captureArmed: true, // VALIDATION-FIX #2 — armed so turn_start (no prior agent_start) captures
       pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003
     });
   });

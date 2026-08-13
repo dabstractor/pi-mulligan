@@ -36,6 +36,7 @@
  */
 import type {
   TurnStartEvent,
+  AgentStartEvent,
   AgentEndEvent,
   ToolCallEvent,
   ExtensionContext,
@@ -164,7 +165,17 @@ export async function turnStartCaptureHandler(
     if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
     const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
     if (!rt.store) return; // store not created (config off / T2.S1 not wired)
-    rt.pendingExplicitPaths = []; // [P1.M3.T1.S2 / BUG-003] fresh per-turn accumulator (clear before capture)
+    // [VALIDATION-FIX #2] Per-inference `turn_start` overwrote the pre-span "turn" snapshot with the
+    // POST-MUTATION tree (GC wiped it + capture re-stamped it), so a mid-loop rewind restored 0 files.
+    // Fix: the GC + capture sequence runs ONLY when `captureArmed` is true (the first turn_start of a
+    // message, OR the legacy single-shot contract when agent_start did not fire). Subsequent per-inference
+    // turn_starts return EARLY — no GC, no capture, no pendingExplicitPaths wipe — preserving the pre-span
+    // snapshot (and the explicit-paths accumulator tool_call is building) for the whole loop. agent_start
+    // (the per-user-message boundary) is the authoritative capture site + sets captureArmed=false; this
+    // turn_start path is the backward-compatible fallback.
+    if (rt.captureArmed === false) return; // an in-progress snapshot exists for this agent loop — do NOT touch it
+    rt.captureArmed = false; // consumed — subsequent turn_starts this loop skip (undefined also → false)
+    rt.pendingExplicitPaths = []; // [P1.M3.T1.S2 / BUG-003] fresh accumulator (only on the capturing turn_start)
     // (1) GC FIRST — prompt-boundary reclamation (drop all turn/* refs + reclaim + clear in-memory).
     await gcTurnSnapshots(rt);
     // (2) THEN CAPTURE — snapshot the working set now → the turn's before-ref.
@@ -201,6 +212,82 @@ export async function turnStartCaptureHandler(
  */
 export function registerTurnStartCapture(pi: ExtensionAPI): void {
   pi.on("turn_start", turnStartCaptureHandler);
+}
+
+/**
+ * agentStartCaptureHandler — [VALIDATION-FIX #2] the per-USER-MESSAGE capture hook. Pi fires `turn_start`
+ * once PER INFERENCE (spec/01 §6: a turn = one model inference + its tools), not once per user message, so
+ * the original turn_start-only capture was OVERWRITTEN on each inference → a mid-loop rewind read the
+ * POST-MUTATION snapshot and restored 0 files. `agent_start` fires once per user message (BEFORE any
+ * inference), making it the correct prompt boundary for the pre-span "before" snapshot + the prompt-boundary
+ * GC pass (spec/14 §5 "at each new prompt … BEFORE capturing the new turn's snapshot").
+ *
+ * Flow: GC FIRST (gcTurnSnapshots — drop all prior turns' turn/* refs + reclaim + clear in-memory), THEN
+ * capture("turn") → rt.snapshots, THEN set `rt.captureArmed=false` so the subsequent per-inference
+ * turn_starts SKIP re-capturing (preserving this pre-span snapshot for the whole agent loop).
+ *
+ * NEVER throws (E27): the WHOLE body is ONE try/catch → log + return. Read sessionId FIRST so the catch can
+ * log it. Self-guards on config.revert.enabled (layer 1) + rt.store + backend!=="none" (NoOpStore). Best-effort:
+ * a capture/GC failure is logged and the message proceeds (the before-ref is simply absent → file-revert
+ * degrades to skipped). Mirrors turnStartCaptureHandler's gate order exactly.
+ *
+ * @param event { type:"agent_start" } — carries no payload this handler uses.
+ * @param ctx   the Pi ExtensionContext (sessionManager.getSessionId read FRESH — C12).
+ */
+export async function agentStartCaptureHandler(
+  event: AgentStartEvent,
+  ctx: ExtensionContext,
+): Promise<void> {
+  let sessionId = "";
+  try {
+    sessionId = ctx.sessionManager.getSessionId(); // FRESH (C12); first so the catch can log it
+    if (!getConfig().revert.enabled) return; // layer-1 gate — FIRST check
+    const rt = getRuntime(sessionId); // STRING arg, not ctx (GOTCHA #5)
+    if (!rt.store) return; // store not created (config off / T2.S1 not wired)
+    // (1) GC FIRST — prompt-boundary reclamation (drop all turn/* refs + reclaim + clear in-memory).
+    await gcTurnSnapshots(rt);
+    // (2) THEN CAPTURE — snapshot the working set NOW (pre-any-inference) → the message's before-ref.
+    const backend = rt.store.describe().backend;
+    if (backend === "none") {
+      rt.captureArmed = false; // still consume the arm so turn_start doesn't retry on a NoOpStore
+      return;
+    }
+    rt.pendingExplicitPaths = []; // fresh per-message accumulator (clear before capture)
+    const beforeRef = await rt.store.capture("turn");
+    if (beforeRef) {
+      rt.snapshots?.set("turn", {
+        label: "turn",
+        backend, // narrowed to "git"|"cas" by the !=="none" guard above (RevertCheckpoint.backend)
+        beforeRef,
+        turnIndex: -1, // sentinel: agent_start carries no turnIndex (turn_start's capture stamps the real one)
+        ts: Date.now(),
+      });
+    }
+    // [VALIDATION-FIX #2] consume the arm so per-inference turn_starts this loop do NOT overwrite the
+    // pre-span snapshot. (Set regardless of capture success — a null capture is a caps/IO failure; a
+    // retry on the next inference would still hold a stale-or-empty ref, not the pre-span state.)
+    rt.captureArmed = false;
+  } catch (e) {
+    // FAIL-OPEN (E27): log + return — the message is NEVER broken by a capture/GC failure.
+    try {
+      log("error", "capture.agent_start", sessionId, { error: String(e) });
+    } catch {
+      /* log() never throws, but be safe */
+    }
+  }
+}
+
+/**
+ * registerAgentStartCapture — arm the [VALIDATION-FIX #2] `agent_start` capture hook. index.ts (step 5)
+ * calls this once at startup: `registerAgentStartCapture(pi);`. Unconditional registration — the gate
+ * lives INSIDE the handler (free when revert is off). The handler needs no `pi` (reads rt.store,
+ * getConfig, getRuntime, log — all module globals), so it is registered DIRECTLY (mirrors
+ * registerTurnStartCapture).
+ *
+ * @param pi the Pi ExtensionAPI (on() lives here).
+ */
+export function registerAgentStartCapture(pi: ExtensionAPI): void {
+  pi.on("agent_start", agentStartCaptureHandler);
 }
 
 /**
@@ -255,8 +342,12 @@ export async function agentEndCaptureHandler(
       // references must see the update.
       const existing = rt.snapshots?.get("turn");
       if (existing) existing.afterRef = afterRef;
-      // else: no "turn" entry (turn_start didn't fire / capture null / GC'd) → nothing to annotate → no-op.
+      // else: no "turn" entry (agent_start/turn_start didn't fire / capture null / GC'd) → nothing to annotate → no-op.
     }
+    // [VALIDATION-FIX #2] re-arm capture so the NEXT user message's first turn_start (or agent_start)
+    // captures a fresh pre-span snapshot. Set UNCONDITIONALLY at agent_end (the message boundary) so a
+    // stale captureArmed=false from this loop can't suppress the next message's capture.
+    rt.captureArmed = true;
     // capture returned null → no-op (afterRef stays unset; the rewind's dirty guard degrades gracefully).
   } catch (e) {
     // FAIL-OPEN (E27): log + return — the turn is NEVER broken by an after-capture failure.

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   readdir,
   stat,
+  mkdir,
   unlink as fsUnlink,
   rm as fsRm,
 } from "node:fs/promises";
@@ -305,6 +306,19 @@ export class GitBackend implements SnapshotStore {
       // SAFETY INVARIANT). this.cwd was already canonicalized by realpathSafe() in the constructor.
       this.repoRoot = this.cwd;
       this.shadowDir = join(this.storageDir, shadowKey(this.repoRoot)); // keyed by launch dir
+      // [VALIDATION-FIX #1b] Ensure the storageDir PARENT exists before `git init --bare`. The CAS
+      // branch (detectAndCreate) already mkdir -p's its storage dir, but the git branch never did, so a
+      // default-config sessionDir (<sessionDir>/mulligan/) or an explicit storageDir whose parent does
+      // not yet exist made `git init --bare` fail (`fatal: Invalid path …: No such file or directory`).
+      // BEST-EFFORT: recursive:true is idempotent (no-op if the dir already exists). A failure is swallowed
+      // (the subsequent `git init --bare` will surface a real create-failure via the existing error path;
+      // swallowing here keeps the unit tests' mock-exec environment — where storageDir is a fake path and
+      // mkdir would EACCES — working, since the mock git init succeeds regardless).
+      try {
+        await mkdir(this.storageDir, { recursive: true });
+      } catch {
+        /* best-effort — proceed to git init --bare (its failure is handled by capture's error path) */
+      }
       // lazily init the SHADOW repo (idempotent — skip if it already exists on disk).
       //     `git init --bare` needs ONLY GIT_DIR (git forbids GIT_WORK_TREE on a bare init — it is
       //     meaningless for a bare repo). The work-tree association is established per-command later

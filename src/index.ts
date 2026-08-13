@@ -12,6 +12,7 @@ import { registerFilterHandler } from "./filter.js";
 import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
 import {
   registerTurnStartCapture,
+  registerAgentStartCapture,
   registerAgentEndCapture,
   registerToolCallCapture,
   gcTurnSnapshots,
@@ -88,8 +89,14 @@ export default function (pi: ExtensionAPI): void {
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart
   registerBloatReminder(pi); // pi.on("tool_result", bloatReminderHandler) — Nudge A
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
-  registerTurnStartCapture(pi); // pi.on("turn_start", …) — v1.2 working-tree revert prompt-boundary
-  // GC + capture("turn"). Self-guards on revert.enabled (fail-open).
+  registerTurnStartCapture(pi); // pi.on("turn_start", …) — v1.2 working-tree revert: captures the
+  // pre-span "turn" snapshot on the FIRST inference of a message (captureArmed gate) so a mid-loop
+  // mulligan_rewind(revert_file_changes) restores the PRE-mutation tree (VALIDATION-FIX #2). Self-guards
+  // on revert.enabled (fail-open).
+  registerAgentStartCapture(pi); // pi.on("agent_start", …) — [VALIDATION-FIX #2] v1.2 working-tree
+  // revert: the per-USER-MESSAGE prompt boundary. Runs the prompt-boundary GC + captures("turn") BEFORE
+  // any inference (the true pre-span state) and sets captureArmed=false so per-inference turn_starts do
+  // not overwrite it. Self-guards on revert.enabled (fail-open).
   registerAgentEndCapture(pi); // pi.on("agent_end", …) — v1.2 working-tree revert: capture("turn-after")
   // for the dirty guard (E30). Self-guards on revert.enabled (fail-open).
   registerToolCallCapture(pi); // [P1.M3.T1.S2 / BUG-003] pi.on("tool_call", …) — capture pre-write file
@@ -135,7 +142,16 @@ export default function (pi: ExtensionAPI): void {
     if (!getConfig().revert.enabled) return; // layer-1 gate (default false → zero capture, zero storage)
     try {
       const rt = getRuntime(sid); // the FRESH runtime resetRuntime just (re)created (store undefined, empty snapshots)
-      rt.store = await detectAndCreate(ctx.cwd, getConfig().revert); // create + cache (NEVER rejects → NoOpStore)
+      // [VALIDATION-FIX #1] Thread the session dir so the documented default config
+      // (revert.enabled:true with NO explicit storageDir) actually creates a real backend instead of
+      // silently becoming NoOpStore. detectAndCreate resolves storageDir=null → `<sessionDir>/mulligan/`
+      // (spec/14 §8). getSessionDir() points under ~/.pi/agent/sessions/ (OUTSIDE cwd — the containment
+      // guard in resolveStorageDir still enforces this). NEVER rejects → NoOpStore on any error (E28).
+      rt.store = await detectAndCreate(
+        ctx.cwd,
+        getConfig().revert,
+        ctx.sessionManager.getSessionDir(),
+      );
       await gcTurnSnapshots(rt); // REUSE capture.ts's pass — gc() drops all turn/* refs on disk + clears in-memory
       // [P1.M2.T1.S1/S2 / spec/14 §5 / E32] BUG-002 fix: rebuild rt.snapshots from the persisted
       // mulligan:revert-checkpoint control entries that /mulligan_checkpoint wrote (commands.ts step 4b).

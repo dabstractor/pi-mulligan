@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   TurnStartEvent,
+  AgentStartEvent,
   AgentEndEvent,
   ToolCallEvent,
   ExtensionAPI,
@@ -14,6 +15,8 @@ import type { SnapshotStore } from "../src/snapshot/store.js";
 import {
   turnStartCaptureHandler,
   registerTurnStartCapture,
+  agentStartCaptureHandler,
+  registerAgentStartCapture,
   gcTurnSnapshots,
   rebuildCheckpointSnapshots,
   agentEndCaptureHandler,
@@ -368,6 +371,159 @@ describe("turnStartCaptureHandler — capture result", () => {
     const turn = rt.snapshots?.get("turn");
     expect(turn).toBeDefined();
     expect(turn?.beforeRef).toBe("ref-abc123");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// [VALIDATION-FIX #2] agent_start + the multi-inference overwrite regression
+// ══════════════════════════════════════════════════════════════════════════════════════════
+
+describe("registerAgentStartCapture — arms pi.on('agent_start', agentStartCaptureHandler)", () => {
+  it("registers the agent_start handler", () => {
+    const { handlers, pi } = makePi();
+    registerAgentStartCapture(pi);
+    expect(handlers["agent_start"]).toBeTypeOf("function");
+  });
+});
+
+describe("agentStartCaptureHandler — gating", () => {
+  it("no-ops when rt.store is undefined (does not throw)", async () => {
+    const rt = getRuntime("as-no-store");
+    expect(rt.store).toBeUndefined();
+    await expect(
+      agentStartCaptureHandler(
+        { type: "agent_start" } as AgentStartEvent,
+        makeCtx({ sessionId: "as-no-store" }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+  });
+
+  it("no-ops (no capture) when rt.store.describe().backend === 'none' (NoOpStore)", async () => {
+    const store = makeStore({ backend: "none" });
+    const rt = getRuntime("as-noop");
+    rt.store = store;
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "as-noop" }),
+    );
+    expect(rt.snapshots?.get("turn")).toBeUndefined();
+    expect(rt.captureArmed).toBe(false); // consumed even on NoOpStore (no retry on later turn_starts)
+  });
+});
+
+describe("agentStartCaptureHandler — capture result", () => {
+  it("runs GC THEN captures('turn') → rt.snapshots.get('turn').beforeRef; sets captureArmed=false", async () => {
+    const store = makeStore({ backend: "git", captureRef: "pre-span-sha" });
+    const rt = getRuntime("as-cap");
+    rt.store = store;
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "as-cap" }),
+    );
+    const turn = rt.snapshots?.get("turn");
+    expect(turn?.beforeRef).toBe("pre-span-sha");
+    expect(turn?.backend).toBe("git");
+    expect(rt.captureArmed).toBe(false); // consumed → subsequent turn_starts skip
+    // GC ran BEFORE capture (ordered).
+    expect(store.calls.indexOf("gc")).toBeLessThan(
+      store.calls.indexOf("capture:turn"),
+    );
+  });
+});
+
+describe("[VALIDATION-FIX #2] the per-inference turn_start overwrite regression", () => {
+  // Reproduces the report's Issue #2: a real Pi session fires turn_start once PER INFERENCE. The
+  // original turnStartCaptureHandler re-captured 'turn' on every inference, so by the time a
+  // mid-loop mulligan_rewind(revert_file_changes) ran the snapshot held the POST-MUTATION state and
+  // restore reverted 0 files. The fix: agent_start captures the pre-span state once per message and
+  // sets captureArmed=false; subsequent turn_starts skip (do NOT re-capture / re-GC).
+  it("a second turn_start does NOT overwrite the pre-span snapshot (captureArmed gate)", async () => {
+    const store = makeStore({ backend: "git", captureRef: "pre-span-sha" });
+    const rt = getRuntime("overwrite");
+    rt.store = store;
+    // Simulate a real message: agent_start (capture pre-span) → inference 1 → turn_start #2 → rewind.
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "overwrite" }),
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("pre-span-sha");
+    expect(store.calls.filter((c) => c === "capture:turn")).toHaveLength(1);
+
+    // turn_start #2 (a later inference in the SAME message) must NOT re-capture or re-GC.
+    await turnStartCaptureHandler(
+      makeEvent(1),
+      makeCtx({ sessionId: "overwrite" }),
+    );
+    // The snapshot is UNCHANGED — still the pre-span ref (the bug would have re-stamped it).
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("pre-span-sha");
+    // Still exactly ONE capture + ONE gc (turn_start #2 added neither).
+    expect(store.calls.filter((c) => c === "capture:turn")).toHaveLength(1);
+    expect(store.calls.filter((c) => c === "gc")).toHaveLength(1);
+    expect(rt.captureArmed).toBe(false);
+  });
+
+  it("turn_start #2 does NOT wipe the snapshot via gcTurnSnapshots (no GC on a skipped turn_start)", async () => {
+    // gcTurnSnapshots deletes in-memory turn/* keys; if turn_start #2 ran it, the pre-span snapshot
+    // would be gone even without a re-capture. The gate returns BEFORE GC, so the snapshot survives.
+    const store = makeStore({ backend: "git", captureRef: "pre-span-sha" });
+    const rt = getRuntime("no-wipe");
+    rt.store = store;
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "no-wipe" }),
+    );
+    // Pre-seed a second turn/* entry to prove GC did NOT run on turn_start #2 (it would have dropped it).
+    rt.snapshots?.set("turn-extra", {
+      label: "turn-extra",
+      backend: "git",
+      beforeRef: "x",
+      turnIndex: -1,
+      ts: Date.now(),
+    });
+    await turnStartCaptureHandler(
+      makeEvent(1),
+      makeCtx({ sessionId: "no-wipe" }),
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("pre-span-sha");
+    expect(rt.snapshots?.get("turn-extra")).toBeDefined(); // survived — GC did NOT run
+  });
+
+  it("agent_end re-arms captureArmed so the NEXT message's agent_start captures fresh", async () => {
+    const store = makeStore({ backend: "git", captureRef: "pre-span-sha" });
+    const rt = getRuntime("rearm");
+    rt.store = store;
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "rearm" }),
+    );
+    expect(rt.captureArmed).toBe(false);
+    // agent_end re-arms for the next message.
+    await agentEndCaptureHandler(
+      { type: "agent_end", messages: [] } as AgentEndEvent,
+      makeCtx({ sessionId: "rearm" }),
+    );
+    expect(rt.captureArmed).toBe(true);
+    // The next agent_start captures a fresh pre-span snapshot.
+    await agentStartCaptureHandler(
+      { type: "agent_start" } as AgentStartEvent,
+      makeCtx({ sessionId: "rearm" }),
+    );
+    expect(store.calls.filter((c) => c === "capture:turn")).toHaveLength(2);
+  });
+
+  it("legacy single-shot contract: turn_start alone (no prior agent_start) still captures", async () => {
+    // Backward compatibility: a Pi build that omits agent_start, or the revert integration tests that
+    // drive turnStartCaptureHandler directly once, must still capture (captureArmed defaults true).
+    const store = makeStore({ backend: "git", captureRef: "single-shot-sha" });
+    const rt = getRuntime("legacy");
+    rt.store = store;
+    await turnStartCaptureHandler(
+      makeEvent(0),
+      makeCtx({ sessionId: "legacy" }),
+    );
+    expect(rt.snapshots?.get("turn")?.beforeRef).toBe("single-shot-sha");
+    expect(rt.captureArmed).toBe(false); // consumed
   });
 });
 

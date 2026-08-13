@@ -1,5 +1,5 @@
 {
   "hasIssues": true,
-  "issueCount": 1,
-  "summary": "Code is correct (typecheck + 1394 tests + 14/14 smoke in isolation pass); the only finding is that `npm run smoke` and the README 'Zero-config smoke' fail with a misleading tool-name conflict whenever pi-mulligan is also globally registered (the README's recommended install path) — a tooling/docs gap, not a code defect."
+  "issueCount": 2,
+  "summary": "Core features pass all gates (1398 tests, 14/14 smoke, clean typecheck); 2 major defects found in the v1.2 working-tree-revert feature via real-Pi E2E — default-config store is silently disabled (sessionDir never passed to detectAndCreate) and per-inference turn_start overwrites the pre-span snapshot so revert restores 0 files."
 }

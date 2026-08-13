@@ -424,4 +424,31 @@ describe("detectAndCreate() — spec/14 §2 Detection + SAFETY INVARIANT + §10 
       process.env.PATH = origPath;
     }
   });
+
+  // ── [VALIDATION-FIX #1] the default-config sessionDir regression ──────────────────────────
+  // Reproduces the report's Issue #1: with the documented default config (revert.enabled:true, NO
+  // explicit storageDir) index.ts used to call detectAndCreate WITHOUT sessionDir, so both backends
+  // threw "no storage dir" → NoOpStore → revert silently inert. The fix threads sessionDir at the
+  // call site; these tests pin that detectAndCreate honors a sessionDir default (git + cas).
+  it("(VALIDATION-FIX #1a) git workspace + storageDir:null + sessionDir → GitBackend (NOT NoOpStore)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sess-git-"));
+    dirs.push(dir);
+    await mkdir(join(dir, ".git"));
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-dir-git-"));
+    dirs.push(sessionDir);
+    // storageDir:null — the documented default; sessionDir must drive <sessionDir>/mulligan/.
+    const cfg = { ...REVERT_CFG, storageDir: null };
+    const store = await detectAndCreate(dir, cfg, sessionDir);
+    expect(store.describe().backend).toBe("git"); // NOT 'none' (the bug)
+  });
+
+  it("(VALIDATION-FIX #1b) non-git workspace + storageDir:null + sessionDir → CasBackend (NOT NoOpStore)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "sess-cas-"));
+    dirs.push(cwd);
+    const sessionDir = await mkdtemp(join(tmpdir(), "sess-dir-cas-"));
+    dirs.push(sessionDir);
+    const cfg = { ...REVERT_CFG, storageDir: null };
+    const store = await detectAndCreate(cwd, cfg, sessionDir);
+    expect(store.describe().backend).toBe("cas"); // NOT 'none' (the bug)
+  });
 });

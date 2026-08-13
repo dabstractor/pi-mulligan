@@ -906,4 +906,35 @@ describe("F-revert-* integration (spec/10 §2.1 / spec/14)", () => {
     // git-safety: the user's .git is byte-identical (no new objects/refs/reflog/stash).
     expect(hashDir(join(repoDir, ".git"))).toBe(gitBefore);
   });
+
+  // ── [VALIDATION-FIX #1b] GitBackend creates a non-existent storageDir parent before `git init --bare` ──
+  it("F-revert-storageDir-missing: a NON-EXISTENT storageDir is auto-created (mkdir -p) so capture succeeds", async () => {
+    if (!(await gitAvailable())) {
+      console.warn("[revert-git] git not on PATH — skipping F-revert-storageDir-missing");
+      return;
+    }
+    const repoDir = await makeRepo("rev-mkdir-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "f.txt"), "original\n");
+    await git(repoDir, ["add", "-A"]);
+    await git(repoDir, ["config", "user.email", "test@example.com"]);
+    await git(repoDir, ["config", "user.name", "Test"]);
+    await git(repoDir, ["commit", "-m", "init"]);
+
+    // A storageDir whose PARENT does not exist on disk (the bug: `git init --bare` failed with
+    // 'fatal: Invalid path: No such file or directory'). The fix mkdir -p's the parent first.
+    const nestedRoot = join(tmpdir(), `mulligan-nested-${Date.now()}`);
+    dirs.push(nestedRoot);
+    const storageDir = join(nestedRoot, "deep", "mulligan");
+    setConfig({ revert: { enabled: true, storageDir } });
+    expect(existsSync(storageDir)).toBe(false); // precondition: does not exist yet
+
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("git");
+
+    // A capture must SUCCEED — ensureInit mkdir -p'd the storageDir, then git init --bare ran.
+    const ref = await store.capture("turn");
+    expect(ref).toBeTruthy();
+    expect(existsSync(storageDir)).toBe(true); // the parent was created
+  });
 });

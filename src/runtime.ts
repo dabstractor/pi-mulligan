@@ -131,6 +131,29 @@ export interface SessionRuntime {
    *  all on shutdown). Backend "none" (NoOpStore) is a valid assignment — the hooks guard on it. */
   store?: SnapshotStore;
 
+  /** [VALIDATION-FIX #2] Per-agent-loop capture gate for the v1.2 working-tree-revert feature.
+   *  Pi fires `turn_start` once PER INFERENCE (spec/01 §6: a turn = one model inference + its tools),
+   *  not once per user message. `turnStartCaptureHandler` originally re-captured the "turn" snapshot
+   *  on every inference, so by the time a mid-loop `mulligan_rewind(revert_file_changes)` ran the
+   *  snapshot held the POST-MUTATION state → `store.restore` found 0 differences (the mutate-then-
+   *  rewind workflow spans two inferences). Fix: capture the pre-span "before" state on `agent_start`
+   *  (which fires once per user message, before any inference) and have `turn_start` SKIP re-capture
+   *  when an in-progress snapshot already exists for the current agent loop.
+   *
+   *  Semantics: `true` = the capture is ARMED (the next eligible event SHOULD capture "turn").
+   *  - `agent_start`: ALWAYS captures (re-runs GC + capture("turn")), then sets this `false` so the
+   *    subsequent per-inference `turn_start`s do NOT overwrite the pre-span snapshot.
+   *  - `turn_start`: captures ONLY when this is `true` (fallback for when `agent_start` did not fire —
+   *    e.g. a Pi build that omits the event, or the legacy single-shot test contract), then sets it
+   *    `false`. So the FIRST turn_start after an agent_start captures; later ones skip.
+   *  - `agent_end`: sets this `true` (re-arm for the NEXT user message's first turn_start).
+   *  - freshRuntime initializes `true` (so a `turn_start` that arrives with no prior `agent_start` —
+   *    the historical contract the revert integration tests model — still captures).
+   *  In-memory, non-persisted; auto-reset by resetRuntime (session_start) and clearAll (shutdown).
+   *  OPTIONAL so a hand-built `{ } as SessionRuntime` type-checks; freshRuntime ALWAYS initializes it
+   *  to `true`. Treat `undefined` as ARMED (capture) — only an explicit `false` suppresses. */
+  captureArmed?: boolean;
+
   /** [P1.M3.T1.S1 / spec/14 §4.2 / BUG-003] Per-turn accumulator of write/edit tool paths observed
    *  by the tool_call capture hook (pendingExplicitPaths) for CasBackend explicit-paths mode. The hook
    *  pushes `event.input.path` here BEFORE the tool runs; the turn_start/agent_end capture hooks (S2)
@@ -172,6 +195,7 @@ function freshRuntime(sessionId: string): SessionRuntime {
     aboveHighWater: false,
     rewindRefusedTurnIndex: null,
     snapshots: new Map<string, RevertCheckpoint>(),
+    captureArmed: true, // [VALIDATION-FIX #2] armed so a turn_start with no prior agent_start still captures
     pendingExplicitPaths: [], // P1.M3.T1.S1 / BUG-003 — fresh [] per session (GOTCHA #5)
   };
 }

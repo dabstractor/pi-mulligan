@@ -64,6 +64,12 @@ function makeCtx(sessionId = "sess-test", cwd = "/test/cwd") {
     getSessionId() {
       return sessionId;
     },
+    getSessionDir() {
+      // VALIDATION-FIX #1 — index.ts now threads ctx.sessionManager.getSessionDir() into
+      // detectAndCreate so the documented default config (no explicit storageDir) creates a real
+      // backend instead of NoOpStore. Returns a stable per-session dir under a fake sessions root.
+      return `/home/u/.pi/agent/sessions/${sessionId}`;
+    },
   };
   return {
     sessionManager:
@@ -119,6 +125,7 @@ describe("index.ts extension factory", () => {
 
     const expected = [
       "agent_end",
+      "agent_start", // VALIDATION-FIX #2 — per-user-message capture (pre-span snapshot)
       "context",
       "tool_result",
       "tool_call",
@@ -141,6 +148,7 @@ describe("index.ts extension factory", () => {
     expect(Object.keys(handlers).sort()).toEqual(
       [
         "agent_end",
+        "agent_start", // VALIDATION-FIX #2 — per-user-message capture (pre-span snapshot)
         "context",
         "session_shutdown",
         "session_start",
@@ -368,7 +376,7 @@ describe("index.ts session_start store lifecycle (T2.S1)", () => {
     expect(getRuntime("s1").store).toBe(fakeStore); // cached on rt.store
   });
 
-  it("passes (ctx.cwd, getConfig().revert) to detectAndCreate (2-arg call — no sessionDir)", async () => {
+  it("passes (ctx.cwd, getConfig().revert, sessionDir) to detectAndCreate (3-arg call — VALIDATION-FIX #1)", async () => {
     const { handlers, pi } = makePi();
     indexFactory(pi);
     vi.mocked(loadMulliganConfig).mockReturnValue({
@@ -382,10 +390,17 @@ describe("index.ts session_start store lifecycle (T2.S1)", () => {
     );
 
     expect(detectAndCreate).toHaveBeenCalledTimes(1);
-    expect(detectAndCreate).toHaveBeenCalledWith("/proj", getConfig().revert);
+    // VALIDATION-FIX #1: the 3rd arg is ctx.sessionManager.getSessionDir() — WITHOUT it the default
+    // config (storageDir:null) made detectAndCreate throw → NoOpStore (silently inert revert).
+    expect(detectAndCreate).toHaveBeenCalledWith(
+      "/proj",
+      getConfig().revert,
+      "/home/u/.pi/agent/sessions/s1",
+    );
     expect(detectAndCreate).toHaveBeenCalledWith(
       "/proj",
       expect.objectContaining({ enabled: true, storageDir: "/tmp/store" }),
+      expect.any(String),
     );
   });
 
