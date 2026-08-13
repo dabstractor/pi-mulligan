@@ -1516,6 +1516,85 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
     expect(res.skipped).toContain("big.bin");
   });
 
+  it("OVERSIZE-DELETE (belt-and-suspenders): 'cas' deleteCreatedFiles SPARES a delete-candidate whose CURRENT size > maxFileBytes even when it is ABSENT from manifest.skipped (size guard fires independently of the spare Set)", async () => {
+    // BUG-001 defense-in-depth (P1.M1.T1.S2). The OVERSIZE-DELETE test above covers the HAPPY path: an
+    // oversize file present AT capture is recorded in manifest.skipped and spared via the `spare` Set.
+    // This test forces the BELT-AND-SUSPENDERS path: a delete-candidate that is oversize AT RESTORE but
+    // ABSENT from manifest.skipped (e.g. a file absent at capture that grew beyond maxFileBytes by
+    // restore, or any manifest drift). The `spare` Set offers no protection here — only the independent
+    // `st.size > maxFileBytes` guard (cas.ts restore step (c)) spares it. A small span creation in the
+    // SAME restore is still deleted, proving the guard does not over-fire.
+    const cwd = "/ws/proj";
+    const storage = "/store";
+    // mutable working tree so files can be injected AFTER capture
+    const fileEntries = new Map<string, Buffer>();
+    const childMap = new Map<string, Map<string, "file" | "dir">>();
+    childMap.set(resolve(cwd), new Map());
+    const absOf = (rel: string) => resolve(join(cwd, ...rel.split("/")));
+    const addFile = (rel: string, content: Buffer) => {
+      const ap = absOf(rel);
+      fileEntries.set(ap, content);
+      childMap.get(resolve(cwd))!.set(rel, "file");
+    };
+    // baseline at capture: ONLY small.ts. NO oversize file → manifest.skipped stays empty.
+    addFile("small.ts", Buffer.from("ok"));
+    const stored = new Map<string, Buffer>();
+    const written = new Set<string>();
+    const fakeFs: CasFs = {
+      readdir: async (dirPath: string) => {
+        const kids = childMap.get(resolve(dirPath));
+        if (!kids) throw new Error(`ENOENT ${dirPath}`);
+        return [...kids.entries()].map(([name, kind]) =>
+          ({ name, isFile: () => kind === "file", isDirectory: () => kind === "dir" }) as unknown as Dirent,
+        );
+      },
+      stat: async (p: string) => {
+        const c = fileEntries.get(resolve(p));
+        if (!c) throw new Error(`ENOENT ${p}`);
+        return { size: c.length, mtimeMs: 1 };
+      },
+      readFile: async (p: string) => {
+        const c = fileEntries.get(resolve(p));
+        if (c) return c;
+        const s = stored.get(p);
+        if (s) return s;
+        throw new Error(`ENOENT ${p}`);
+      },
+      writeFile: async (p: string, data: Buffer) => { stored.set(p, data); written.add(p); },
+      mkdir: async () => {},
+      access: async (p: string) => {
+        if (fileEntries.has(resolve(p)) || written.has(p)) return;
+        throw new Error(`ENOENT ${p}`);
+      },
+      unlink: async (p: string) => {
+        const ap = resolve(p);
+        if (!fileEntries.has(ap)) throw new Error(`ENOENT ${p}`);
+        fileEntries.delete(ap);
+        const parent = resolve(join(ap, ".."));
+        childMap.get(parent)?.delete(ap.split(sep).pop()!);
+      },
+    };
+    const cb = new CasBackend(cwd, { ...BASE_CFG, storageDir: storage, nonGitMode: "cas", allowDeleteCreatedFiles: true, maxFileBytes: 100 }, null, { fs: fakeFs });
+    const beforeRef = await cb.capture("turn");
+    expect(beforeRef).toBe("turn");
+    // sanity: NO oversize file was present at capture → manifest.skipped is empty
+    const mBefore = JSON.parse((await fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    expect(Object.keys(mBefore.files)).toEqual(["small.ts"]);
+    expect(mBefore.skipped).toEqual([]);
+    // inject AFTER capture — these are NOT in the beforeRef manifest:
+    addFile("created.ts", Buffer.from("created"));        // size 7 ≤ 100 → genuine small span creation
+    addFile("created-big.bin", Buffer.alloc(300));        // size 300 > 100; NOT in manifest.skipped
+    const res = await cb.restore(beforeRef!, { revertFileChanges: false, deleteCreatedFiles: true });
+    // the small span creation IS deleted (guard did not over-fire)
+    expect(res.deleted).toContain("created.ts");
+    expect(fileEntries.has(absOf("created.ts"))).toBe(false);
+    // CRITICAL — the oversize candidate (absent from manifest.skipped) is SPARED by the size guard
+    expect(res.deleted).not.toContain("created-big.bin");
+    expect(fileEntries.has(absOf("created-big.bin"))).toBe(true); // NOT unlinked
+    // the captured small.ts is left alone
+    expect(fileEntries.has(absOf("small.ts"))).toBe(true);
+  });
+
   it("explicit-paths: does NOT tree-walk (a present-not-in-manifest file is left untouched)", async () => {
     const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, {

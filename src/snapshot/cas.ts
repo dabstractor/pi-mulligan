@@ -1120,9 +1120,10 @@ export class CasBackend implements SnapshotStore {
         const excludeSet = new Set(
           this.cfg.excludeGlobs.map((g) => g.toLowerCase()),
         );
-        await this.walkTree(this.cwd, excludeSet, async (rel, abs) => {
+        await this.walkTree(this.cwd, excludeSet, async (rel, abs, st) => {
           if (manifest.files[rel]) return; // in beforeRef ⇒ not created during span
           if (spare.has(rel)) return; // OVERSIZE-DELETE: pre-existing oversize file — SPARE (not span-created)
+          if (st.size > this.cfg.maxFileBytes) return; // BUG-001 defense-in-depth (P1.M1.T1.S2): SPARE a delete-candidate whose CURRENT size > maxFileBytes even when absent from manifest.skipped (e.g. file absent at capture that grew oversize by restore, or any manifest drift) — fail-SAFE (a leftover file is recoverable; a deleted pre-existing file is not). Independent of the manifest round-trip; runs AFTER the spare Set so the happy-path spare tests are unchanged.
           if (isDangerousWorkspaceRel(rel)) return; // belt-and-suspenders (walkTree already prunes)
           try {
             await this.fs.unlink(abs);
