@@ -1109,11 +1109,20 @@ export class CasBackend implements SnapshotStore {
         this.cfg.allowDeleteCreatedFiles &&
         this.cfg.nonGitMode === "cas"
       ) {
+        // OVERSIZE-DELETE (bug-hunt BUG-001): the walk below deletes every present file NOT in
+        // `manifest.files`. A file that PRE-EXISTED the span but was too large to capture
+        // (> maxFileBytes) is recorded ONLY in `manifest.skipped`, NOT `manifest.files` — so without
+        // this guard it is conflated with a genuine span creation and unlinked (irreversible data
+        // loss). The paths in manifest.skipped are KNOWN pre-existing files to SPARE (spec/14 §2
+        // guarantee #4: "delete_created_files only deletes files the span created"). Mirrors git.ts's
+        // oversize-note spare.
+        const spare = new Set(manifest.skipped ?? []);
         const excludeSet = new Set(
           this.cfg.excludeGlobs.map((g) => g.toLowerCase()),
         );
         await this.walkTree(this.cwd, excludeSet, async (rel, abs) => {
           if (manifest.files[rel]) return; // in beforeRef ⇒ not created during span
+          if (spare.has(rel)) return; // OVERSIZE-DELETE: pre-existing oversize file — SPARE (not span-created)
           if (isDangerousWorkspaceRel(rel)) return; // belt-and-suspenders (walkTree already prunes)
           try {
             await this.fs.unlink(abs);

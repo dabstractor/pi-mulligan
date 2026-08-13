@@ -844,6 +844,15 @@ export class GitBackend implements SnapshotStore {
       //     Missing EITHER flag ⇒ zero deletions. The `:!` pathspecs exclude heavy/dangerous dirs so
       //     ls-files never lists node_modules/.git; the isDangerousWorkspaceRel gate is belt-and-suspenders.
       if (opts.deleteCreatedFiles && this.cfg.allowDeleteCreatedFiles) {
+        // OVERSIZE-DELETE (bug-hunt BUG-001): `git ls-files --others` lists EVERY untracked file —
+        // including pre-existing files that were too large to capture (> maxFileBytes). Those were
+        // excluded at capture via a `:!` pathspec (NEVER staged) + recorded in the oversize note
+        // (read into `result.skipped` at step a.5). They PRE-EXISTED the span and MUST be spared —
+        // spec/14 §2 guarantee #4: "delete_created_files only deletes files the span created". Build
+        // a Set + skip; without it a pre-existing oversize file (pnpm-lock.yaml, large package-lock.json,
+        // vendored binaries, big .env) is unlinked (irreversible data loss). (The CAS explicit-paths
+        // mode is unaffected — it does not tree-walk and only deletes existed:false manifest entries.)
+        const spare = new Set(result.skipped);
         const othersSpecs = [
           ".",
           ...this.cfg.excludeGlobs.map((g) => `:!${g}`),
@@ -861,6 +870,7 @@ export class GitBackend implements SnapshotStore {
           .map((s) => s.trim())
           .filter((s) => s.length > 0)) {
           if (isDangerousWorkspaceRel(rel)) continue; // belt-and-suspenders (ls-files :! already filters)
+          if (spare.has(rel)) continue; // OVERSIZE-DELETE: pre-existing oversize file — SPARE (not span-created)
           try {
             // resolveSafeWorkspacePath throws on `..`/absolute escape → caught below ⇒ failed[] (E27).
             const abs = resolveSafeWorkspacePath(this.repoRoot, rel);

@@ -839,4 +839,71 @@ describe("F-revert-* integration (spec/10 §2.1 / spec/14)", () => {
     // ASSERT the concurrent human edit SURVIVED (E30 — never silently clobbered).
     expect(readFileSync(join(repoDir, "b.ts"), "utf8")).toBe("HUMAN-EDIT\n");
   });
+
+  // ── F-revert-delete-oversize (OVERSIZE-DELETE / bug-hunt BUG-001 regression: a pre-existing file > maxFileBytes must SURVIVE
+  //    a delete_created_files rewind). The existing F-revert-delete tests only use small in-manifest
+  //    files; a pre-existing oversize file is excluded at capture via a `:!` pathspec (NEVER staged
+  //    into the shadow index) + recorded in the oversize git note, so `git ls-files --others` lists it
+  //    as untracked vs the read-tree'd beforeRef index — and the delete step unlinked it (irreversible
+  //    data loss — spec/14 §2 guarantee #4 violation). Drives store.restore() directly (faithful to
+  //    the bug-hunt reproduction) against the REAL GitBackend on a real git repo. ──
+  it("F-revert-delete-oversize (git): a pre-existing file > maxFileBytes SURVIVES delete_created_files (OVERSIZE-DELETE); span-created file IS deleted; user's .git byte-identical", async () => {
+    if (!(await gitAvailable())) {
+      console.warn("[revert-git] git not on PATH — skipping F-revert-delete-oversize");
+      return;
+    }
+
+    const repoDir = await makeRepo("rev-delete-oversize-");
+    dirs.push(repoDir);
+    // a PRE-EXISTING file larger than maxFileBytes (256) + a normal tracked file.
+    writeFileSync(join(repoDir, "small.txt"), "small\n");
+    writeFileSync(join(repoDir, "preexisting-big.bin"), "X".repeat(1000));
+    await git(repoDir, ["add", "-A"]);
+    await git(repoDir, ["config", "user.email", "test@example.com"]);
+    await git(repoDir, ["config", "user.name", "Test"]);
+    await git(repoDir, ["commit", "-m", "init"]);
+
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    // config gate ON + a TIGHT maxFileBytes so the 1000-byte file is oversize at capture.
+    setConfig({
+      revert: { enabled: true, allowDeleteCreatedFiles: true, maxFileBytes: 256, storageDir },
+    });
+
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("git");
+
+    // the user's .git is byte-identical before vs after the whole capture+restore sequence
+    // (git-safety guarantee #2/#3 — restore touches ONLY working-tree files).
+    const gitBefore = hashDir(join(repoDir, ".git"));
+
+    // CAPTURE turn_start (beforeRef) — the oversize file is fail-closed SKIPPED → excluded via a
+    // `:!` pathspec + recorded in the oversize git note under refs/mulligan/oversize (which restore
+    // reads into result.skipped at step a.5). The recorded contract is verified below via res.skipped
+    // (proving BOTH capture wrote the note AND restore read it back). The console.warn side-effect is
+    // incidental.
+    const beforeRef = await store.capture("turn");
+    expect(beforeRef).toBeTruthy();
+
+    // Simulate a span-created file (present now, absent from the beforeRef tree).
+    writeFileSync(join(repoDir, "span-created.txt"), "agent made this\n");
+
+    // DRIVE restore() directly (faithful to the bug-hunt reproduction): two-flag AND satisfied.
+    const res = await store.restore(beforeRef!, {
+      revertFileChanges: false,
+      deleteCreatedFiles: true,
+    });
+
+    // CRITICAL (OVERSIZE-DELETE): the PRE-EXISTING oversize file SURVIVES (was unlinked before the fix).
+    expect(existsSync(join(repoDir, "preexisting-big.bin"))).toBe(true);
+    expect(res.deleted).not.toContain("preexisting-big.bin");
+    // the genuine span creation IS deleted; the captured small file is left alone.
+    expect(existsSync(join(repoDir, "span-created.txt"))).toBe(false);
+    expect(res.deleted).toContain("span-created.txt");
+    expect(existsSync(join(repoDir, "small.txt"))).toBe(true);
+    // the oversize file is surfaced into result.skipped (the agent sees the incomplete revert).
+    expect(res.skipped).toContain("preexisting-big.bin");
+    // git-safety: the user's .git is byte-identical (no new objects/refs/reflog/stash).
+    expect(hashDir(join(repoDir, ".git"))).toBe(gitBefore);
+  });
 });

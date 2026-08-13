@@ -725,6 +725,33 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     }
   });
 
+  it("OVERSIZE-DELETE: deleteCreatedFiles SPARES oversize pre-existing files — paths in the oversize note (result.skipped) are NOT unlinked even though ls-files --others lists them", async () => {
+    // spec/14 §2 guarantee #4: "delete_created_files only deletes files the span created". A
+    // pre-existing file > maxFileBytes is skipped at capture (excluded via :! pathspec, NEVER
+    // staged), so it lands in the oversize NOTE (read into result.skipped at restore step a.5) —
+    // NOT in the beforeRef tree. `git ls-files --others` therefore lists it alongside a genuine
+    // span creation. Before the fix the delete step unlinked it (irreversible data loss). The fix
+    // spares any path present in result.skipped (the oversize note).
+    const calls: Call[] = [];
+    const unlinked: string[] = [];
+    const cfgAllowDelete = { ...BASE_CFG, allowDeleteCreatedFiles: true };
+    const gb = makeBackendWithUnlink(calls, unlinked, cfgAllowDelete, {
+      stdoutByCmd: {
+        notes: JSON.stringify(["big.bin"]), // oversize note written at capture
+        "ls-files": "big.bin\nnew.ts\n", // big.bin (pre-existing oversize) + new.ts (span-created)
+      },
+    });
+    const res = await gb.restore("BEFORE1", { revertFileChanges: false, deleteCreatedFiles: true });
+    // the oversize file was surfaced into result.skipped from the note (step a.5)
+    expect(res.skipped).toContain("big.bin");
+    // ONLY the genuine span creation is deleted — the pre-existing oversize file is SPARED
+    expect(res.deleted).toEqual(["new.ts"]);
+    expect(res.deleted).not.toContain("big.bin");
+    // big.bin was NEVER unlinked; new.ts WAS
+    expect(unlinked.some((p) => /big\.bin$/.test(p))).toBe(false);
+    expect(unlinked.some((p) => /new\.ts$/.test(p))).toBe(true);
+  });
+
   it("per-path checkout failure ⇒ path lands in failed[]; restore still resolves (never rejects)", async () => {
     const calls: Call[] = [];
     const gb = makeBackend(calls, BASE_CFG, emptyScan, {

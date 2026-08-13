@@ -740,4 +740,63 @@ describe("F-revert-cas/dirtyguard integration (spec/10 §2.1 / spec/14 §4/§6) 
     // sanity: not a refusal.
     expect(firstText(res)).not.toContain("Mulligan: refused");
   });
+
+  // ── F-revert-delete-oversize (OVERSIZE-DELETE / bug-hunt BUG-001 regression: a pre-existing file > maxFileBytes must SURVIVE
+  //    a delete_created_files rewind). The existing F-revert-delete tests only use small in-manifest
+  //    files; a pre-existing oversize file lands in manifest.skipped (NOT manifest.files), so the 'cas'
+  //    tree-walk delete conflated it with a span creation and unlinked it (irreversible data loss —
+  //    spec/14 §2 guarantee #4 violation). Drives store.restore() directly (faithful to the bug
+  //    report's reproduction) against the REAL CasBackend on a real non-git filesystem. ──
+  it("F-revert-delete-oversize (cas): a pre-existing file > maxFileBytes SURVIVES delete_created_files (OVERSIZE-DELETE); span-created file IS deleted", async () => {
+    const repoDir = makeNonGitDir("rev-cas-delete-oversize-");
+    dirs.push(repoDir);
+    // a PRE-EXISTING file larger than maxFileBytes (256) + a normal pre-existing file.
+    writeFileSync(join(repoDir, "preexisting-big.bin"), "X".repeat(1000));
+    writeFileSync(join(repoDir, "small.txt"), "small\n");
+
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    setConfig({
+      revert: {
+        enabled: true,
+        nonGitMode: "cas",
+        allowDeleteCreatedFiles: true,
+        maxFileBytes: 256,
+        storageDir,
+      },
+    });
+
+    const store = await detectAndCreate(repoDir, getConfig().revert);
+    expect(store.describe().backend).toBe("cas");
+
+    // CAPTURE turn_start (beforeRef) — the oversize file is fail-closed SKIPPED → recorded in
+    // manifest.skipped (NOT manifest.files), which is what lets restore() spare it. Verify the
+    // recorded contract directly (the console.warn side-effect is incidental).
+    const beforeRef = await store.capture("turn");
+    expect(beforeRef).toBe("turn");
+    const manifestBefore = JSON.parse(
+      readFileSync(join(storageDir, "manifests", "turn.json"), "utf8"),
+    );
+    expect(Object.keys(manifestBefore.files)).toEqual(["small.txt"]);
+    expect(manifestBefore.skipped).toContain("preexisting-big.bin");
+
+    // Simulate a span-created file (present now, absent from the beforeRef manifest).
+    writeFileSync(join(repoDir, "span-created.txt"), "agent made this\n");
+
+    // DRIVE restore() directly (faithful to the bug-hunt reproduction): two-flag AND satisfied.
+    const res = await store.restore(beforeRef!, {
+      revertFileChanges: false,
+      deleteCreatedFiles: true,
+    });
+
+    // CRITICAL (OVERSIZE-DELETE): the PRE-EXISTING oversize file SURVIVES (was unlinked before the fix).
+    expect(existsSync(join(repoDir, "preexisting-big.bin"))).toBe(true);
+    expect(res.deleted).not.toContain("preexisting-big.bin");
+    // the genuine span creation IS deleted; the captured small file + oversize file are left alone.
+    expect(existsSync(join(repoDir, "span-created.txt"))).toBe(false);
+    expect(res.deleted).toContain("span-created.txt");
+    expect(existsSync(join(repoDir, "small.txt"))).toBe(true);
+    // the oversize file is surfaced into result.skipped (the agent sees the incomplete revert).
+    expect(res.skipped).toContain("preexisting-big.bin");
+  });
 });

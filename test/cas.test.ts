@@ -1438,6 +1438,84 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
     expect(fileEntries.has(resolve(absOf("pre.ts")))).toBe(true); // pre.ts left alone
   });
 
+  it("OVERSIZE-DELETE: 'cas' mode deleteCreatedFiles SPARES oversize pre-existing files — a file > maxFileBytes present at capture (in manifest.skipped, NOT manifest.files) is NOT unlinked by the tree-walk delete", async () => {
+    // spec/14 §2 guarantee #4: "delete_created_files only deletes files the span created". A
+    // pre-existing file > maxFileBytes is fail-closed SKIPPED at capture: it lands in
+    // manifest.skipped, NOT manifest.files (so restore cannot revert it — no hash). The 'cas'-mode
+    // tree-walk delete step (c) walks every present file and unlinks any NOT in manifest.files —
+    // before the fix it conflated the oversize pre-existing file with a genuine span creation and
+    // unlinked it (irreversible data loss). The fix spares any path recorded in manifest.skipped.
+    const cwd = "/ws/proj";
+    const storage = "/store";
+    // mutable working tree so a span-created file can be injected after capture
+    const fileEntries = new Map<string, Buffer>();
+    const childMap = new Map<string, Map<string, "file" | "dir">>();
+    childMap.set(resolve(cwd), new Map());
+    const absOf = (rel: string) => resolve(join(cwd, ...rel.split("/")));
+    const addFile = (rel: string, content: Buffer) => {
+      const ap = absOf(rel);
+      fileEntries.set(ap, content);
+      childMap.get(resolve(cwd))!.set(rel, "file");
+    };
+    addFile("small.ts", Buffer.from("ok"));    // captured → manifest.files
+    addFile("big.bin", Buffer.alloc(300));       // PRE-EXISTING oversize (> maxFileBytes) → manifest.skipped
+    const stored = new Map<string, Buffer>();
+    const written = new Set<string>();
+    const fakeFs: CasFs = {
+      readdir: async (dirPath: string) => {
+        const kids = childMap.get(resolve(dirPath));
+        if (!kids) throw new Error(`ENOENT ${dirPath}`);
+        return [...kids.entries()].map(([name, kind]) =>
+          ({ name, isFile: () => kind === "file", isDirectory: () => kind === "dir" }) as unknown as Dirent,
+        );
+      },
+      stat: async (p: string) => {
+        const c = fileEntries.get(resolve(p));
+        if (!c) throw new Error(`ENOENT ${p}`);
+        return { size: c.length, mtimeMs: 1 };
+      },
+      readFile: async (p: string) => {
+        const c = fileEntries.get(resolve(p));
+        if (c) return c;
+        const s = stored.get(p);
+        if (s) return s;
+        throw new Error(`ENOENT ${p}`);
+      },
+      writeFile: async (p: string, data: Buffer) => { stored.set(p, data); written.add(p); },
+      mkdir: async () => {},
+      access: async (p: string) => {
+        if (fileEntries.has(resolve(p)) || written.has(p)) return;
+        throw new Error(`ENOENT ${p}`);
+      },
+      unlink: async (p: string) => {
+        const ap = resolve(p);
+        if (!fileEntries.has(ap)) throw new Error(`ENOENT ${p}`);
+        fileEntries.delete(ap);
+        const parent = resolve(join(ap, ".."));
+        childMap.get(parent)?.delete(ap.split(sep).pop()!);
+      },
+    };
+    const cb = new CasBackend(cwd, { ...BASE_CFG, storageDir: storage, nonGitMode: "cas", allowDeleteCreatedFiles: true, maxFileBytes: 100 }, null, { fs: fakeFs });
+    const beforeRef = await cb.capture("turn");
+    expect(beforeRef).toBe("turn");
+    // sanity: big.bin was fail-closed SKIPPED (> maxFileBytes); small.ts captured
+    const mBefore = JSON.parse((await fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    expect(Object.keys(mBefore.files)).toEqual(["small.ts"]);
+    expect(mBefore.skipped).toContain("big.bin");
+    // inject a genuine span-created file (present-now, NOT in beforeRef manifest)
+    addFile("created.ts", Buffer.from("created"));
+    const res = await cb.restore(beforeRef!, { revertFileChanges: false, deleteCreatedFiles: true });
+    // CRITICAL — the oversize PRE-EXISTING file SURVIVES (spared via manifest.skipped)
+    expect(fileEntries.has(absOf("big.bin"))).toBe(true);
+    expect(res.deleted).not.toContain("big.bin");
+    // the genuine span creation IS deleted; the captured file is left alone
+    expect(res.deleted).toContain("created.ts");
+    expect(fileEntries.has(absOf("created.ts"))).toBe(false);
+    expect(fileEntries.has(absOf("small.ts"))).toBe(true);
+    // the oversize file is surfaced into result.skipped (the agent sees the incomplete revert)
+    expect(res.skipped).toContain("big.bin");
+  });
+
   it("explicit-paths: does NOT tree-walk (a present-not-in-manifest file is left untouched)", async () => {
     const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, {
