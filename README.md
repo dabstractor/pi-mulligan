@@ -259,7 +259,7 @@ In a git repo the backend uses an **external shadow repository**: its `GIT_DIR` 
 1. **No command of any kind — read or write — is ever issued against the user's git** (the root is `realpath(cwd)` and needs no `rev-parse`; see Workspace-root safety below): every write (`add`, `write-tree`, `commit-tree`, `update-ref`, `read-tree`, `checkout`, `gc`) targets the shadow repo. Forbidden everywhere: `commit`, `reset`, `checkout <branch>`, `merge`, `stash`, `rebase` against the source.
 2. **The user's `.git` is never written — not even a dangling object.** This is strictly cleaner than a `git stash create`-in-source design: there is nothing to reclaim from the user's repo because nothing was ever put there. `git status`, `git log`, `git stash list`, and the reflog of the source repo are byte-for-byte unaffected.
 3. **Restore writes only working-tree files.** The source index and all source refs are never touched.
-4. **`delete_created_files` only deletes files the span created** (present now, absent from the before-snapshot), behind the per-call flag **and** `config.revert.allowDeleteCreatedFiles`.
+4. **`delete_created_files` only deletes files the span created** (present now, absent from the before-snapshot), behind the per-call flag **and** `config.revert.allowDeleteCreatedFiles`. **Defense-in-depth size floor:** a delete-candidate whose current size exceeds `revert.maxFileBytes` is always spared — even if its capture record was lost — so deletion safety never depends solely on the best-effort capture note/manifest (a leftover large file is recoverable; a deleted pre-existing one is not).
 5. **Pre-flight refuse-on-dirty** (below): if any affected path drifted since the after-snapshot, the **whole file-revert is refused** — never a silent clobber.
 
 ### Workspace-root safety
@@ -291,7 +291,7 @@ The eight `revert.*` knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; r
 | `revert.allowDeleteCreatedFiles` | `false` | Global kill-switch on the destructive `delete_created_files` path. Required in addition to the per-call flag. |
 | `revert.nonGitMode` | `"cas"` | Non-git capture strategy: `"cas"` (comprehensive whole-tree, default) or `"explicit-paths"` (conservative — `write`/`edit` only). |
 | `revert.storageDir` | `null` | Shadow-repo / CAS root; `null` → `<sessionDir>/mulligan/`. **Never resolves inside `cwd`** (validation rejects it). |
-| `revert.maxFileBytes` | `262144` | Per-file cap (256 KB); skip + warn (fail-closed) — a huge gitignored data file is not silently captured. |
+| `revert.maxFileBytes` | `262144` | Per-file cap (256 KB); skip + warn at capture (fail-closed) — a huge gitignored data file is not silently captured. Also the restore-time safety floor that spares oversize files from `delete_created_files` (see Git-safety guarantee #4). |
 | `revert.maxTotalBytes` | `33554432` | Per-session cap (32 MB); capture stops beyond it (partial snapshot). |
 | `revert.maxSnapshotsPerTurn` | `64` | Count cap; capture stops beyond it (partial snapshot). |
 | `revert.excludeGlobs` | `[".git","node_modules","dist","build",".next",".venv","target"]` | Snapshot excludes for **both** backends. `.gitignore` is deliberately **not** consulted — see the privacy note. |

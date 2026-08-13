@@ -4,14 +4,14 @@
       "type": "Phase",
       "id": "P1",
       "title": "Harden BUG-001 oversize-delete safety — close the note-write-failure data-loss window",
-      "status": "Researching",
+      "status": "Complete",
       "description": "BUG-001 (delete_created_files irreversibly deletes pre-existing files exceeding revert.maxFileBytes) was already fixed in commit ec5ad32 via a `spare` Set built from the oversize record in both backends' restore delete step, with passing integration + unit tests. HOWEVER, research uncovered a genuine HIGH-severity residual gap in the SAME bug class: the GitBackend persists oversize paths as a best-effort git note (try/catch-swallowed at git.ts ~418-432); if that note write fails, restore reads no note, the spare Set is empty, and `git ls-files --others` lists the oversize file (never staged -> untracked) -> it is unlinked (irreversible data loss). The fix's trust signal ('did the note arrive?') is itself best-effort, so trusting its ABSENCE to mean 'no oversize files existed' is unsafe. This phase closes that window with a defense-in-depth restore-time maxFileBytes size guard that is independent of the note round-trip. See plan/009_1ecb4b3cb372/bugfix/001_c5105b89490f/architecture/system_context.md (premise mismatch + code refs) and residual_risk_analysis.md (R1 mechanism + fix direction).",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Defense-in-depth restore-time maxFileBytes size guard (both backends) + regression coverage",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Add an independent, deterministic size check to the restore delete step in BOTH backends: any delete-candidate whose current byte size exceeds cfg.revert.maxFileBytes is spared (skip unlink) regardless of whether the oversize note/manifest round-trip succeeded. This is fail-SAFE — when the note is absent we cannot distinguish a pre-existing oversize file from a span-created large file, so the only safe action is to NOT delete (a leftover span-created file is recoverable via manual rm; a deleted pre-existing file is not). GitBackend needs a new `stat` DI seam (mirroring the existing `unlink` seam); CasBackend already receives `st` positionally from walkTree (it currently drops the third param — just accept it). Includes the key regression test: note-add failure + deleteCreatedFiles:true must NOT unlink an oversize file. NOTE: do NOT re-implement the existing spare Set (git.ts:869 / cas.ts:1119) — it stays; the size guard is additive belt-and-suspenders that runs AFTER the spare.has(rel) check.",
           "tasks": [
             {
@@ -59,14 +59,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Mode B (changeset-level docs): review and, where warranted, update the cross-cutting documentation that summarizes the delete_created_files safety guarantee, now that it is hardened with a defense-in-depth size guard independent of the best-effort note round-trip. This is the catch-all that prevents a coherent hardening delta from shipping with a stale README/spec guarantee statement. Depends on BOTH implementing subtasks (P1.M1.T1.S1 + P1.M1.T1.S2) so it runs last and summarizes the complete delta.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Review + update README.md and spec/14 delete_created_files safety-guarantee wording for the defense-in-depth size guard",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
