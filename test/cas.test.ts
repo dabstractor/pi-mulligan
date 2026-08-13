@@ -31,6 +31,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
   CasBackend,
@@ -369,7 +370,7 @@ function makeTreeBackend(
 
 describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   it("walks cwd, hashes+stores content, writes manifests/<label>.json, returns label", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("aaa"), mtimeMs: 1000 },
@@ -391,7 +392,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("dedupes identical content (one blob path per distinct hash)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const same = Buffer.from("identical");
     // Track writeFile calls to count distinct blob writes.
@@ -417,7 +418,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("mtime short-circuit: 2nd capture('turn') with no changes reuses every hash — readFile NOT called for working-tree files", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, readCalls } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("aaa"), mtimeMs: 1000 },
@@ -432,7 +433,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("changed mtimeMs triggers re-read/re-hash/re-store for that file only", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     // mutable tree so we can mutate one file's mtime between captures
     const tree: TreeSpec = {
@@ -455,7 +456,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("changed size triggers re-read (size differs even if mtimeMs same)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const aSpec = { content: Buffer.from("aaa"), mtimeMs: 1000 };
     const tree: TreeSpec = { "a.ts": aSpec };
@@ -470,7 +471,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("new file (no prev entry) is read/hashed/stored", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const tree: TreeSpec = {
       "a.ts": { content: Buffer.from("aaa"), mtimeMs: 1000 },
@@ -499,7 +500,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("excludeGlobs segment is skipped (e.g. 'dist' subdir absent from manifest)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -512,7 +513,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("dangerous dirs (.git/.pi/node_modules) are absent from the manifest", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -527,7 +528,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("oversize file (size > maxFileBytes) is skipped + warned — absent from manifest", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const big = Buffer.alloc(300); // > BASE_CFG.maxFileBytes (262144 is big; use a tighter cap)
@@ -545,7 +546,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("maxTotalBytes exceeded → PARTIAL manifest (early files present, later skipped); STILL returns label (NOT null)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // tree order: dir children come back in insertion order; put the small file first.
@@ -564,7 +565,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("maxSnapshotsPerTurn exceeded (capturesThisTurn >= cap) → returns null, no walk, no manifest write", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
@@ -582,7 +583,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("writeFile rejects → capture returns null, never rejects (best-effort)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -599,7 +600,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("readdir on an unreadable subdir → subtree skipped (no throw)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -618,7 +619,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("capturesThisTurn increments after each successful capture", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb } = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -635,7 +636,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("mutex serializes concurrent capture() (max-in-flight 1)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     let inFlight = 0;
     let maxInFlight = 0;
@@ -660,7 +661,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("missing previous manifest → full capture (no short-circuit)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, readCalls } = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -673,7 +674,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
   });
 
   it("corrupt previous manifest JSON → full capture (parseManifest throw swallowed, no reject)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -823,7 +824,7 @@ function makeStateBackend(
 
 describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   it("captures ONLY the explicit path (sibling file absent from manifest)", async () => {
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       "src/a.ts": Buffer.from("a"),
       "src/b.ts": Buffer.from("b"),
     });
@@ -836,7 +837,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("captures a not-yet-existing path as existed:false (no blob stored)", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const ref = await cb.capture("turn", ["src/new.ts"]);
     expect(ref).toBe("turn");
@@ -847,7 +848,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("dedupes a path passed twice (one manifest entry)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("x") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("x") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts", "a.ts"]);
     const m = state.manifestOf("turn")!;
@@ -855,7 +856,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("skips dangerous paths (.git/node_modules/..) — absent from manifest", async () => {
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       ".git/config": Buffer.from("g"),
       "node_modules/pkg/index.js": Buffer.from("p"),
       "safe.ts": Buffer.from("s"),
@@ -869,7 +870,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   it("skips oversize file (> maxFileBytes) + warns — absent from manifest", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const big = Buffer.alloc(300);
-    const state = makeStateFs("/ws", "/store", { "big.ts": big });
+    const state = makeStateFs("/ws/proj", "/store", { "big.ts": big });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxFileBytes: 100 });
     await cb.capture("turn", ["big.ts"]);
     const m = state.manifestOf("turn")!;
@@ -880,7 +881,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
 
   it("maxTotalBytes exceeded ⇒ PARTIAL (earlier paths present); STILL returns label", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       "a.ts": Buffer.alloc(60),
       "b.ts": Buffer.alloc(60), // 60+60=120 > 100
     });
@@ -894,7 +895,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("maxSnapshotsPerTurn exceeded ⇒ returns null (count-cap gate in capture)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxSnapshotsPerTurn: 1 });
     const first = await cb.capture("turn", ["a.ts"]);
     expect(first).toBe("turn");
@@ -903,7 +904,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("an escaping path (../x) is skipped by the safety floor (absent from manifest; capture still succeeds)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // `..` segments are caught by isDangerousWorkspaceRel (the lexical safety floor) BEFORE
     // resolveSafeWorkspacePath — they are skipped (continue), NOT thrown. capture still returns label
@@ -918,7 +919,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
 
   it("a writeFile rejection ⇒ capture returns null (resolveSafeWorkspacePath/IO throw → catch)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     // sabotage: make the manifest writeFile throw → capture's outer catch ⇒ null
     const origWrite = state.fakeFs.writeFile;
     state.fakeFs.writeFile = async (p: string, d: Buffer) => {
@@ -933,7 +934,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
   });
 
   it("capturesThisTurn increments after a successful explicit-paths capture", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths", maxSnapshotsPerTurn: 5 });
     await cb.capture("turn", ["a.ts"]); // 1
     await cb.capture("turn-after", ["a.ts"]); // 2
@@ -943,7 +944,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
 
   it("'cas' mode (no explicitPaths) STILL runs S2's whole-tree walk (dispatch does not break it)", async () => {
     // 'cas' mode uses TreeFs (walk-based), not StateFs. Reuse makeTreeBackend.
-    const base = makeTreeBackend("/ws", "/store", {
+    const base = makeTreeBackend("/ws/proj", "/store", {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
       "b.ts": { content: Buffer.from("b"), mtimeMs: 2 },
     });
@@ -959,7 +960,7 @@ describe("CasBackend.capture — explicit-paths mode (spec/14 §4.2)", () => {
 
 describe("CasBackend.notifyBashUsed — bash-not-captured warning (spec/14 §4.2)", () => {
   it("warns once in explicit-paths mode; 2nd call same turn is silent (once-per-turn dedup)", () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cbEp = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const w = vi.spyOn(console, "warn").mockImplementation(() => {});
     cbEp.notifyBashUsed();
@@ -970,7 +971,7 @@ describe("CasBackend.notifyBashUsed — bash-not-captured warning (spec/14 §4.2
   });
 
   it("is a no-op in 'cas' mode (bash is captured there)", () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cbCas = makeStateBackend(state, { nonGitMode: "cas" });
     const w = vi.spyOn(console, "warn").mockImplementation(() => {});
     cbCas.notifyBashUsed();
@@ -983,7 +984,7 @@ describe("CasBackend.notifyBashUsed — bash-not-captured warning (spec/14 §4.2
 
 describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   it("returns paths whose current hash ≠ afterRef manifest (modified since agent_end)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("original") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const afterRef = await cb.capture("turn-after", ["a.ts"]);
     // simulate the span: human edits a.ts AFTER agent_end
@@ -993,7 +994,7 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   });
 
   it("returns a path that existed at afterRef but is gone now (deleted since) as dirty", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const afterRef = await cb.capture("turn-after", ["a.ts"]);
     state.remove("a.ts"); // deleted since afterRef
@@ -1002,7 +1003,7 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   });
 
   it("returns a path absent from afterRef but existing now as dirty (conservative)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const afterRef = await cb.capture("turn-after", ["b.ts"]); // b.ts not captured
     // a.ts exists now but has no afterRef baseline ⇒ conservative dirty
@@ -1011,7 +1012,7 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   });
 
   it("returns a path captured existed:false but existing now as dirty (created since afterRef)", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // capture a not-yet-existing path as existed:false
     const afterRef = await cb.capture("turn-after", ["new.ts"]);
@@ -1022,7 +1023,7 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   });
 
   it("returns [] when all paths match the afterRef manifest (clean)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("unchanged") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("unchanged") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const afterRef = await cb.capture("turn-after", ["a.ts"]);
     // no mutation ⇒ clean
@@ -1031,14 +1032,14 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   });
 
   it("returns [] for null/empty afterRef and for empty paths", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     expect(await cb.dirtyCheck("", ["a.ts"])).toEqual([]);
     expect(await cb.dirtyCheck("turn-after", [])).toEqual([]);
   });
 
   it("returns [] when the afterRef manifest is missing/corrupt (best-effort allow)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // missing manifest
     expect(await cb.dirtyCheck("turn-after", ["a.ts"])).toEqual([]);
@@ -1051,19 +1052,19 @@ describe("CasBackend.dirtyCheck — spec/14 §6 step 3 + §2", () => {
   it("never rejects on any error (returns [])", async () => {
     // a fake whose readFile throws a non-ENOENT error on the manifest read
     const throwingFs: CasFs = {
-      ...makeStateFs("/ws", "/store", {}).fakeFs,
+      ...makeStateFs("/ws/proj", "/store", {}).fakeFs,
       readFile: async () => {
         throw new Error("disk failure");
       },
     };
-    const cb = new CasBackend("/ws", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
+    const cb = new CasBackend("/ws/proj", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
       fs: throwingFs,
     });
     await expect(cb.dirtyCheck("turn-after", ["a.ts"])).resolves.toEqual([]);
   });
 
   it("skips dangerous paths (never reported)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const afterRef = await cb.capture("turn-after", ["a.ts"]);
     // a.ts is clean; the dangerous paths are filtered (never reported even if they drifted).
@@ -1090,7 +1091,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   // ── EXPLICIT-PATHS MODE (use makeStateFs/makeStateBackend — mirrors dirtyCheck) ──
 
   it("explicit-paths: returns a manifest path whose current hash ≠ beforeRef (modified since)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("original") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     state.set("a.ts", Buffer.from("CHANGED")); // drift since beforeRef
@@ -1098,7 +1099,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("explicit-paths: returns a manifest path that existed at beforeRef but is gone now (deleted)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     state.remove("a.ts"); // deleted since beforeRef
@@ -1106,7 +1107,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("explicit-paths: returns an existed:false entry that now exists (created since) as changed", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // capture a not-yet-existing path as existed:false (stored hash "")
     const beforeRef = await cb.capture("turn", ["new.ts"]);
@@ -1116,7 +1117,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("explicit-paths: returns [] when all manifest paths match beforeRef (clean)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("unchanged") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("unchanged") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     // no mutation ⇒ clean
@@ -1126,7 +1127,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   it("explicit-paths: skips dangerous paths (never reported)", async () => {
     // capture a normal path; assert changedPaths never emits a dangerous path even if the manifest
     // somehow contained one (the safety floor filters before reporting).
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     const changed = await cb.changedPaths(beforeRef!);
@@ -1141,7 +1142,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   // (mirror the capture 'cas' test at line ~475: capture on T1, copy manifest, rebuild over T2).
 
   it("cas mode: returns a NEW file not in the beforeRef manifest (created since)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, { "a.ts": { content: Buffer.from("a"), mtimeMs: 1000 } });
     const beforeRef = await base.cb.capture("turn");
@@ -1156,7 +1157,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("cas mode: returns a MODIFIED file (current hash ≠ manifest hash)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, { "a.ts": { content: Buffer.from("a"), mtimeMs: 1000 } });
     const beforeRef = await base.cb.capture("turn");
@@ -1170,7 +1171,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("cas mode: returns a file that existed at beforeRef but is now MISSING (deleted)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1000 },
@@ -1188,7 +1189,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("cas mode: returns the UNION (new + modified + deleted in one call)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("a"), mtimeMs: 1000 },
@@ -1210,7 +1211,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   });
 
   it("cas mode: excludeGlobs + dangerous dirs are NOT walked (absent from result)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     // capture with 'dist' excluded; the rebuild ADDS a file under dist (excluded) + leaves a.ts clean
     const base = makeTreeBackend(cwd, storage, {
@@ -1230,13 +1231,13 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   // ── CROSS-MODE / ROBUSTNESS (use makeStateFs; behavior is mode-agnostic) ──
 
   it("returns [] for an empty beforeRef (no manifest read issued)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     expect(await cb.changedPaths("")).toEqual([]);
   });
 
   it("returns [] when the beforeRef manifest is missing/corrupt (best-effort)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // missing manifest
     expect(await cb.changedPaths("turn")).toEqual([]);
@@ -1249,19 +1250,19 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
   it("never rejects on any error (returns [])", async () => {
     // a fake whose readFile throws a non-ENOENT error on the manifest read
     const throwingFs: CasFs = {
-      ...makeStateFs("/ws", "/store", {}).fakeFs,
+      ...makeStateFs("/ws/proj", "/store", {}).fakeFs,
       readFile: async () => {
         throw new Error("disk failure");
       },
     };
-    const cb = new CasBackend("/ws", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
+    const cb = new CasBackend("/ws/proj", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
       fs: throwingFs,
     });
     await expect(cb.changedPaths("turn")).resolves.toEqual([]);
   });
 
   it("acquires the mutex (two concurrent calls both complete — §4.3)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     // two concurrent calls must both resolve (no deadlock from a forgotten release)
@@ -1278,7 +1279,7 @@ describe("CasBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
 
 describe("CasBackend.restore — spec/14 §6 + §2", () => {
   it("writes pre-span blob content back for each existed:true file (reverted[])", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("original") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     // simulate the span: agent edits a.ts
@@ -1291,7 +1292,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("a per-path read/write failure lands in failed[]; restore still resolves (never rejects)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("original") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     state.set("a.ts", Buffer.from("CHANGED"));
@@ -1307,7 +1308,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("neither flag set ⇒ returns 5 empty buckets, touches nothing", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("original") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     const beforeRef = await cb.capture("turn", ["a.ts"]);
     state.set("a.ts", Buffer.from("CHANGED"));
@@ -1319,7 +1320,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
 
   it("explicit-paths: deletes existed:false manifest entries when deleteCreatedFiles && allowDeleteCreatedFiles (deleted[])", async () => {
     // capture a NOT-yet-existing path as existed:false, then the create happens, then restore deletes it
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, {
       nonGitMode: "explicit-paths",
       allowDeleteCreatedFiles: true,
@@ -1332,7 +1333,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("TWO-FLAG AND: deleteCreatedFiles:false ⇒ zero deletions even if allowDeleteCreatedFiles:true", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, {
       nonGitMode: "explicit-paths",
       allowDeleteCreatedFiles: true,
@@ -1345,7 +1346,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("TWO-FLAG AND: allowDeleteCreatedFiles:false ⇒ zero deletions even if deleteCreatedFiles:true", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, {
       nonGitMode: "explicit-paths",
       allowDeleteCreatedFiles: false, // default
@@ -1359,7 +1360,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
 
   it("'cas' mode + allowDeleteCreatedFiles:true: tree-walk-deletes present-not-in-manifest files", async () => {
     // Build a mutable 'cas' tree supporting readdir + unlink via a hand-rolled fake.
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const fileEntries = new Map<string, Buffer>(); // absPath → content
     const addChild = (parent: string, name: string) => {};
@@ -1438,7 +1439,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("explicit-paths: does NOT tree-walk (a present-not-in-manifest file is left untouched)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, {
       nonGitMode: "explicit-paths",
       allowDeleteCreatedFiles: true,
@@ -1453,7 +1454,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
 
   it("never deletes a dangerous path (.git/node_modules) — gated by isDangerousWorkspaceRel", async () => {
     // 'cas' mode: a dangerous file present-now but not in manifest must NOT be unlinked.
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const base = makeTreeBackend(cwd, storage, {
       "pre.ts": { content: Buffer.from("pre"), mtimeMs: 1 },
@@ -1466,7 +1467,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("delete of an already-gone file (ENOENT) is silent (not failed[])", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, {
       nonGitMode: "explicit-paths",
       allowDeleteCreatedFiles: true,
@@ -1480,7 +1481,7 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 
   it("missing/corrupt beforeRef manifest ⇒ returns 5 empty-ish buckets, never rejects", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     // missing manifest
     const res1 = await cb.restore("turn", { revertFileChanges: true, deleteCreatedFiles: false });
@@ -1493,24 +1494,98 @@ describe("CasBackend.restore — spec/14 §6 + §2", () => {
   });
 });
 
+// ── restore — forbidden-root entry guard (spec/14 §2 SAFETY INVARIANT) — P1.M1.T4.S1 ──────────
+
+// A RECORDING CasFs that pushes EVERY method call to an array + returns safe defaults.
+// For the forbidden-root cases, an EMPTY call log (readFile/writeFile/unlink never invoked) is the
+// proof of ZERO filesystem mutation (spec/14 §10). The guard fires before the manifest readFile, so
+// even readFile is never called.
+function makeRecordingCasFs() {
+  const calls = {
+    readFile: [] as string[],
+    writeFile: [] as Array<{ path: string; data: Buffer }>,
+    unlink: [] as string[],
+    mkdir: [] as string[],
+    access: [] as string[],
+    stat: [] as string[],
+    readdir: [] as string[],
+  };
+  const fakeFs: CasFs = {
+    readFile: async (p) => { calls.readFile.push(p); return Buffer.from(""); },
+    writeFile: async (p, d) => { calls.writeFile.push({ path: p, data: d }); },
+    unlink: async (p) => { calls.unlink.push(p); },
+    mkdir: async (p) => { calls.mkdir.push(p); },
+    access: async (p) => { calls.access.push(p); },
+    stat: async (p) => { calls.stat.push(p); return { size: 0, mtimeMs: 0 }; },
+    readdir: async (p) => { calls.readdir.push(p); return []; },
+  };
+  return { fakeFs, calls };
+}
+
+describe("CasBackend.restore — forbidden-root entry guard (spec/14 §2 SAFETY INVARIANT)", () => {
+  // spec/14 §2: "restore() MUST additionally re-check this invariant at its entry and refuse
+  // (returning {refused} with zero filesystem mutation) if the resolved root is forbidden — a last
+  // line of defense independent of detection." The guard fires BEFORE the manifest readFile (so no
+  // manifest stub is needed) and BEFORE any writeFile/unlink (so the CasFs call log is empty).
+  // makeBackend/makeStateBackend default to a NON-forbidden cwd, so the home/'/' cases construct
+  // CasBackend DIRECTLY (mirroring the dirtyCheck throwingFs test's direct idiom).
+
+  it("refuses when cwd is the user's home — refused:[home], other buckets empty, ZERO mutation", async () => {
+    const home = homedir();
+    const { fakeFs, calls } = makeRecordingCasFs();
+    const cb = new CasBackend(home, BASE_CFG, null, { fs: fakeFs });
+    const res = await cb.restore("BEFORE1", { revertFileChanges: true, deleteCreatedFiles: true });
+    expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: [home] });
+    // ZERO mutation: the guard fired before the manifest readFile and before any writeFile/unlink.
+    expect(calls.readFile).toEqual([]);
+    expect(calls.writeFile).toEqual([]);
+    expect(calls.unlink).toEqual([]);
+    expect(calls.access).toEqual([]);
+  });
+
+  it("refuses when cwd is '/' (filesystem root) — same refused shape, ZERO mutation", async () => {
+    const { fakeFs, calls } = makeRecordingCasFs();
+    const cb = new CasBackend("/", BASE_CFG, null, { fs: fakeFs });
+    const res = await cb.restore("BEFORE1", { revertFileChanges: true, deleteCreatedFiles: true });
+    expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: ["/"] });
+    expect(calls.readFile).toEqual([]);
+    expect(calls.writeFile).toEqual([]);
+    expect(calls.unlink).toEqual([]);
+  });
+
+  it("does NOT fire for a normal (non-forbidden) cwd — restore proceeds (negative control)", async () => {
+    // a depth-≥-2 cwd (dirname !== "/") is NOT forbidden. Use makeStateBackend with a capture→
+    // mutate→restore round-trip so the negative control proves the guard is a transparent no-op
+    // AND restore still runs its recipe. cwd here is non-forbidden (depth-2).
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("original") });
+    const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
+    const beforeRef = await cb.capture("turn", ["a.ts"]);
+    state.set("a.ts", Buffer.from("CHANGED BY AGENT"));
+    const res = await cb.restore(beforeRef!, { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.refused).toEqual([]);            // guard did NOT fire
+    expect(res.reverted).toEqual(["a.ts"]);      // restore ran the recipe
+    expect(state.read("a.ts")?.toString()).toBe("original");  // worktree reverted
+  });
+});
+
 // ── has — spec/14 §2 ─────────────────────────────────────────────────────────────────────
 
 describe("CasBackend.has — spec/14 §2", () => {
   it("returns true for an existing manifest ref", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts"]); // writes manifests/turn.json
     expect(await cb.has("turn")).toBe(true);
   });
 
   it("returns false for a missing ref; never rejects", async () => {
-    const state = makeStateFs("/ws", "/store", {});
+    const state = makeStateFs("/ws/proj", "/store", {});
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     expect(await cb.has("turn")).toBe(false); // no manifest written
   });
 
   it("acquires the mutex (two concurrent both complete — §4.3 / BUG-007)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts"]); // write manifests/turn.json so has()→true
     // two concurrent has() must BOTH resolve — a forgotten release() (GOTCHA #5) would deadlock
@@ -1524,7 +1599,7 @@ describe("CasBackend.has — spec/14 §2", () => {
 
 describe("CasBackend.retire — spec/14 §2/§5", () => {
   it("unlinks the manifest file (subsequent has(ref) → false)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts"]); // writes manifest + blob
     expect(await cb.has("turn")).toBe(true);
@@ -1533,7 +1608,7 @@ describe("CasBackend.retire — spec/14 §2/§5", () => {
   });
 
   it("a 2nd retire (ENOENT) is a silent no-op; never rejects", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts"]);
     await cb.retire("turn");
@@ -1542,7 +1617,7 @@ describe("CasBackend.retire — spec/14 §2/§5", () => {
   });
 
   it("blob files persist after retire (mark-sweep deferred to P3 GC)", async () => {
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     const cb = makeStateBackend(state, { nonGitMode: "explicit-paths" });
     await cb.capture("turn", ["a.ts"]);
     const m = state.manifestOf("turn")!;
@@ -1561,7 +1636,7 @@ describe("CasBackend — mutex serializes capture/dirtyCheck/restore/retire (§4
     // Use a fake that tracks in-flight concurrency via a counter. capture/dirtyCheck/restore/retire
     // all acquire the mutex; their bodies must never overlap. (has ALSO acquires the mutex — BUG-007;
     // see the dedicated has smoke test in the CasBackend.has describe.)
-    const state = makeStateFs("/ws", "/store", { "a.ts": Buffer.from("a") });
+    const state = makeStateFs("/ws/proj", "/store", { "a.ts": Buffer.from("a") });
     let inFlight = 0;
     let maxInFlight = 0;
     const inner = state.fakeFs;
@@ -1582,7 +1657,7 @@ describe("CasBackend — mutex serializes capture/dirtyCheck/restore/retire (§4
       inFlight--;
       return r;
     };
-    const cb = new CasBackend("/ws", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
+    const cb = new CasBackend("/ws/proj", { ...BASE_CFG, storageDir: "/store", nonGitMode: "explicit-paths" }, null, {
       fs: wrap,
     });
     // fire 4 serialized ops concurrently
@@ -1715,7 +1790,7 @@ describe("CasBackend.gc — prompt-boundary namespace-delete + mark-sweep (spec/
   }
 
   function makeGcBackend(state: ReturnType<typeof makeGcFs>): CasBackend {
-    return new CasBackend("/ws", { ...BASE_CFG, storageDir: "/store" }, null, { fs: state.fakeFs });
+    return new CasBackend("/ws/proj", { ...BASE_CFG, storageDir: "/store" }, null, { fs: state.fakeFs });
   }
 
   it("deletes every turn/* manifest + reclaims its unreferenced blobs; checkpoint/* exempt", async () => {
@@ -1801,7 +1876,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   }
 
   it("captures an EXISTING file's pre-write state: {hash,size,mtime,existed:true} + stores the blob", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const content = Buffer.from("A0");
     const expectedHash = createHash("sha256").update(content).digest("hex");
@@ -1819,7 +1894,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("captures a NON-EXISTENT file (ENOENT): {hash:'',size:0,mtime:0,existed:false} + NO blob", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     // empty tree — src/created.ts does NOT exist yet (the upcoming write will create it)
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {});
@@ -1834,7 +1909,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("skips an OVERSIZE file: NO blob, NO files entry (fail-closed); BUG-005 records it in manifest.skipped", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const big = Buffer.from("x".repeat(100));
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
@@ -1852,7 +1927,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("skips a DANGEROUS path (.git/config): NO entry, no throw, no fs read of the real path", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb } = makeTreeBackend(cwd, storage, {});
     // must NOT throw + must NOT add an entry. The manifest file won't be written (nothing to append).
@@ -1860,7 +1935,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("is IDEMPOTENT per (label, path): a 2nd call is a no-op (first-write-wins)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs, readCalls } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("original"), mtimeMs: 100 },
@@ -1881,7 +1956,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("CREATE-OR-APPEND: appends to an EXISTING manifest without overwriting other entries", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "src/x.ts": { content: Buffer.from("x-content"), mtimeMs: 10 },
@@ -1899,7 +1974,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("skips a `..` escape path SILENTLY (isDangerousWorkspaceRel fires BEFORE resolveSafeWorkspacePath): NO entry, no throw", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {});
     // `..` is caught by isDangerousWorkspaceRel (the safety floor runs FIRST) → silent return, no throw.
@@ -1911,7 +1986,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("does NOT bump capturesThisTurn: a subsequent capture() is NOT starved", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb } = makeTreeBackend(cwd, storage, {
       "src/a.ts": { content: Buffer.from("a"), mtimeMs: 1 },
@@ -1926,7 +2001,7 @@ describe("CasBackend.appendExplicitPath — [P1.M3.T1.S2 / spec/14 §4.2 / BUG-0
   });
 
   it("acquires + releases the mutex (a subsequent op is NOT deadlocked)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb } = makeTreeBackend(cwd, storage, {});
     await cb.appendExplicitPath("turn", "src/a.ts");
@@ -1951,7 +2026,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   }
 
   it("whole-tree: oversize file (size > maxFileBytes) is recorded in manifest.skipped", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
@@ -1966,7 +2041,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   });
 
   it("whole-tree: maxTotalBytes exceeded ⇒ the over-budget rel is in manifest.skipped (PARTIAL)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
@@ -1986,7 +2061,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
 
   it("explicit-paths: oversize file (> maxFileBytes) is recorded in manifest.skipped", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       "small.ts": Buffer.from("ok"),
       "big.ts": Buffer.alloc(300),
     });
@@ -2000,7 +2075,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
 
   it("explicit-paths: maxTotalBytes exceeded ⇒ over-budget rel in manifest.skipped (PARTIAL)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       "a.ts": Buffer.alloc(60),
       "b.ts": Buffer.alloc(60), // 60+60=120 > 100
     });
@@ -2014,7 +2089,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
 
   it("appendExplicitPath: oversize file is recorded in manifest.skipped (NOT silently lost)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "big.ts": { content: Buffer.from("x".repeat(100)), mtimeMs: 1 },
@@ -2029,7 +2104,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
 
   it("appendExplicitPath: oversize MERGES onto an existing manifest's skipped (no overwrite)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     // start from an empty manifest; first append captures a normal file, second append is oversize.
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
@@ -2047,7 +2122,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   });
 
   it("restore: surfaces manifest.skipped into result.skipped (whole-tree capture)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
@@ -2062,7 +2137,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   });
 
   it("restore: surfaces manifest.skipped into result.skipped (explicit-paths capture)", async () => {
-    const state = makeStateFs("/ws", "/store", {
+    const state = makeStateFs("/ws/proj", "/store", {
       "a.ts": Buffer.alloc(60),
       "b.ts": Buffer.alloc(60),
     });
@@ -2073,7 +2148,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   });
 
   it("restore: BACKWARD-COMPAT — a manifest WITHOUT `skipped` (pre-fix) restores as skipped:[]", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "a.ts": { content: Buffer.from("aaa"), mtimeMs: 1 },
@@ -2089,7 +2164,7 @@ describe("CasBackend.capture/restore — caps-skipped tracking (BUG-005 / E29)",
   });
 
   it("restore: neither flag set ⇒ result.skipped is [] (the early-return guard short-circuits before the skipped copy)", async () => {
-    const cwd = "/ws";
+    const cwd = "/ws/proj";
     const storage = "/store";
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "big.bin": { content: Buffer.alloc(300), mtimeMs: 1 },

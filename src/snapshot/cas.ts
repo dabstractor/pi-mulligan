@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
@@ -19,6 +20,7 @@ import {
 import {
   normalizeRelPath,
   isDangerousWorkspaceRel,
+  isForbiddenRoot,
   resolveSafeWorkspacePath,
 } from "./paths.js";
 import type { MulliganConfig } from "../config.js";
@@ -210,6 +212,22 @@ export interface CasBackendDeps {
   fs?: CasFs;
 }
 
+/**
+ * Canonicalize `cwd` to its real absolute path WITHOUT following-symlinks surprises:
+ * `realpathSync` resolves the whole chain; on ANY failure (ENOENT / unreadable / symlink-loop —
+ * e.g. a direct unit test constructing CasBackend with a non-existent /fake/cwd) it falls back to
+ * `resolve(cwd)`. Defense-in-depth: detectAndCreate (P1.M1.T2.S1) ALREADY realpathSync's cwd before
+ * constructing CasBackend, so the production path's realpathSync never throws; the fallback exists
+ * for direct-test construction + any future caller. MODULE-PRIVATE.
+ */
+function realpathSafe(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return resolve(cwd);
+  }
+}
+
 // module-private binding of the real fs. readFile is wrapped to drop the default encoding so it
 // returns a Buffer (node:fs/promises.readFile returns Buffer when no encoding is passed — wrapping
 // it makes the binding satisfy CasFs.readFile's exact `Promise<Buffer>` shape); writeFile/mkdir/
@@ -260,7 +278,7 @@ export class CasBackend implements SnapshotStore {
     sessionDir?: string | null,
     deps?: CasBackendDeps,
   ) {
-    this.cwd = resolve(cwd);
+    this.cwd = realpathSafe(cwd);
     this.cfg = revertConfig;
     this.sessionDir = sessionDir ?? null;
     // Re-resolve storageDir inline (store.ts's resolveStorageDir is module-private — cannot import).
@@ -973,7 +991,10 @@ export class CasBackend implements SnapshotStore {
 
   /**
    * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state).
-   * spec/14 §6 (restore semantics), §2 (the interface). Serialized by the mutex (spec §4.3).
+   * spec/14 §2 (SAFETY INVARIANT — the forbidden-root entry guard: restore() re-checks
+   * isForbiddenRoot(this.cwd) as its FIRST act and refuses with ZERO filesystem mutation if the
+   * resolved root is forbidden; a last line of defense independent of detection), §6 (restore
+   * semantics), §2 (the interface). Serialized by the mutex (spec §4.3).
    * CONSUMED BY: rewindExecute step 6b (P4.M2.T1.S2) after the dirty guard passes.
    *
    * INTERFACE: `restore(beforeRef, opts)` has NO `afterRef` param (LOCKED by store.ts). The
@@ -1003,6 +1024,15 @@ export class CasBackend implements SnapshotStore {
    */
   async restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult> {
     const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    // SAFETY INVARIANT entry guard (spec/14 §2) — the LAST LINE OF DEFENSE, independent of
+    // detection (detectAndCreate already refuses forbidden roots → NoOp; this re-checks at restore()
+    // entry so a hand-constructed backend or a detection regression cannot bypass it).
+    // Fires BEFORE the manifest readFile and BEFORE any writeFile/unlink → ZERO filesystem mutation
+    // on refuse. @spec/14 §2 (SAFETY INVARIANT) + §6 (restore semantics).
+    if (isForbiddenRoot(this.cwd)) {
+      release();
+      return { reverted: [], deleted: [], failed: [], skipped: [], refused: [this.cwd] };
+    }
     const result: RestoreResult = {
       reverted: [],
       deleted: [],

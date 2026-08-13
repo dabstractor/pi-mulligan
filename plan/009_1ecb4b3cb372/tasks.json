@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Code: pure helper + detection rewrite + GitBackend rewrite + restore guards + unit tests",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement all source changes (R1–R4) with their unit tests (R5a–R5c) riding with the work (implicit TDD). Each subtask produces verified, test-passing code. The isForbiddenRoot helper (T1) is the foundation that unblocks the rest.",
           "tasks": [
             {
@@ -115,14 +115,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Add restore() forbidden-root entry guard in cas.ts",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a defense-in-depth forbidden-root guard at the top of CasBackend.restore(), mirroring the git.ts guard. Requirement R4 (cas.ts part).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Add restore() entry guard + constructor realpath in cas.ts + test",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -150,14 +150,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Integration verification: run revert-*.test.ts suite + add subdirectory-not-promoted assertion",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify the full integration test suite passes with the new lexical .git detection. Add one new test case proving a subdirectory launch under a git repo is NOT promoted to the parent (stays cas). Requirement R5d.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Run integration suite + add subdir-not-promoted assertion to revert-edge.test.ts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
