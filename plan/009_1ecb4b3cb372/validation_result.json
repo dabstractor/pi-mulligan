@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 1,
+  "summary": "Code is correct (typecheck + 1394 tests + 14/14 smoke in isolation pass); the only finding is that `npm run smoke` and the README 'Zero-config smoke' fail with a misleading tool-name conflict whenever pi-mulligan is also globally registered (the README's recommended install path) — a tooling/docs gap, not a code defect."
+}

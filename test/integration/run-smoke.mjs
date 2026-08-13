@@ -73,6 +73,13 @@ function runPi(scenario, { prompts, extraArgs = [] } = {}) {
   // Default = the existing 2-prompt deterministic flow (unchanged for the 12 non-seeded scenarios).
   const ps = prompts ?? [`/mulligan_smoke ${scenario}`, "Reply with exactly: OK"];
   const argv = [
+    // -ne (--no-extensions): suppress Pi's global extension + package auto-discovery so the harness is
+    // SELF-CONTAINED and never collides with a copy of pi-mulligan that is globally registered in
+    // ~/.pi/agent/settings.json → `packages` (validation Issue #1). Explicit -e paths still load.
+    // Without this, a globally-registered copy registers the mulligan_* tools FIRST, and the -e ./src/index.ts
+    // copy is then rejected with `Tool "mulligan_*" conflicts with <path>` → pi exits non-zero → the
+    // orchestrator reports "EXTENSION LOAD FAILED" for every scenario.
+    "-ne",
     "-e", "./src/index.ts",
     "-e", "./test/integration/smoke.ts",
     // Run-scoped session id (RUN_ID): unique per `npm run smoke` invocation → no cross-run JSONL accumulation
@@ -594,6 +601,15 @@ function main() {
   let totalFail = 0;
   const failed = [];
 
+  // Validation Issue #1 — detect the duplicate-registration conflict ONCE, across all scenarios, and emit a single
+  // clear diagnostic instead of 14 misleading "EXTENSION LOAD FAILED" lines. The signature (from pi's stderr) is:
+  //   Tool "mulligan_*" conflicts with <path>
+  // This happens when a second copy of pi-mulligan is already registered (e.g. via ~/.pi/agent/settings.json →
+  // `packages`) BEFORE the `-e ./src/index.ts` copy is processed. The harness now passes `-ne` (runPi) to suppress
+  // global auto-loading, which prevents this in the common case; this detection is the backstop that explains the
+  // residual edge case (e.g. a conflicting extension also registered via an explicit -e / auto-discovery dir).
+  let conflictShortCircuit = null; // set on the first conflict; reported once, then every scenario is skipped.
+
   for (const scenario of SCENARIOS) {
     const run = runScenario(scenario);
     const smoke = run.smoke;
@@ -601,7 +617,27 @@ function main() {
 
     // GOTCHA #12: detect EXTENSION LOAD FAILED (non-zero pi exit + empty smoke log → src/index.ts failed).
     if (piRes.status !== 0 && smoke.lines.length === 0) {
+      // Validation Issue #1: look for the duplicate-tool-name conflict signature in pi's combined output. If found,
+      // translate the misleading "EXTENSION LOAD FAILED" into a single actionable diagnostic and stop the run.
+      const combined = `${piRes.stdout}\n${piRes.stderr}`;
+      const conflictMatch = combined.match(/Tool "mulligan_[a-z]+" conflicts with (.+)/);
+      if (conflictMatch) {
+        conflictShortCircuit = conflictMatch[1].trim();
+        console.log(`FAIL ${scenario} — EXTENSION LOAD FAILED: duplicate tool registration (see below)`);
+        totalFail++;
+        failed.push(scenario);
+        continue;
+      }
       console.log(`FAIL ${scenario} — EXTENSION LOAD FAILED (check src/index.ts; pi exit=${piRes.status})`);
+      totalFail++;
+      failed.push(scenario);
+      continue;
+    }
+
+    // If a prior scenario hit the conflict short-circuit, the remaining scenarios are guaranteed to fail the same
+    // way; skip them so the failure output stays a single clear diagnostic rather than N redundant red lines.
+    if (conflictShortCircuit) {
+      console.log(`SKIP ${scenario} — blocked by duplicate-registration conflict (see diagnostic below)`);
       totalFail++;
       failed.push(scenario);
       continue;
@@ -641,6 +677,22 @@ function main() {
   console.log(`  ${totalPass}/${SCENARIOS.length} scenarios passed`);
   if (totalFail > 0) {
     console.log(`  FAILED: ${failed.join(", ")}`);
+  }
+  // Validation Issue #1: the single actionable diagnostic for the duplicate-registration conflict (emitted once,
+  // at the end, where the remediation steps are most useful). The harness already passes `-ne` to suppress global
+  // auto-loading; this message covers the residual edge case (a conflicting copy loaded another way).
+  if (conflictShortCircuit) {
+    console.log("");
+    console.log("  ✦ DUPLICATE TOOL REGISTRATION DETECTED ✦");
+    console.log("  A second copy of pi-mulligan is already registered and conflicts with the `-e ./src/index.ts`");
+    console.log("  copy loaded by this harness. The existing copy is at:");
+    console.log(`    ${conflictShortCircuit}`);
+    console.log("  The extension code is NOT broken — this is purely a duplicate-tool-name conflict.");
+    console.log("  To fix:");
+    console.log("    • The harness passes `-ne` to suppress global package auto-loading. If a copy is registered via");
+    console.log("      `~/.pi/agent/settings.json` → `packages`, remove it (or run `pi remove <path>`) and re-run.");
+    console.log("    • Or check the `~/.pi/agent/extensions/` and `.pi/extensions/` auto-discovery dirs for a second");
+    console.log("      `src/index.ts` symlink/copy and remove it.");
   }
   console.log("──────────────────────────────────────────────────────────");
   process.exit(totalFail === 0 ? 0 : 1);

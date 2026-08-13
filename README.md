@@ -36,6 +36,8 @@ See `spec/SPEC.md` §1–§2 for the full executive summary and problem statemen
    pi -e ./src/index.ts
    ```
 
+   If you already have pi-mulligan registered globally (see options 2–3 below) and get a `Tool "mulligan_*" conflicts with <path>` error, add `-ne` (`pi -ne -e ./src/index.ts`) to suppress global auto-loading for that run.
+
 2. **Auto-discovery (recommended for daily use; supports `/reload`):** place the extension in one of Pi's extension directories:
 
    - `.pi/extensions/*.ts` — project-local (loads after project trust), or
@@ -52,15 +54,35 @@ The repo already declares its runtime deps (`@earendil-works/pi-coding-agent` + 
 ### Zero-config smoke (the acceptance check)
 
 ```bash
-pi -e ./src/index.ts        # loads with NO mulligan config → all defaults → works out of the box
+pi -ne -e ./src/index.ts    # loads with NO mulligan config → all defaults → works out of the box
 ```
 
 This is the `spec/11-build-order.md` §2 Step 9 acceptance check: the extension must load without error with an absent/empty `mulligan` config block.
+
+> **`-ne` (no global extensions).** `-ne` disables Pi's global extension + package auto-discovery so the `-e` copy is the *only* one loaded. If a copy of pi-mulligan is already registered globally (via `pi install`, `~/.pi/agent/settings.json` → `packages`, or a symlink in `~/.pi/agent/extensions/`), loading it again with `-e` produces a `Tool "mulligan_*" conflicts with <path>` duplicate-name error and `pi` exits non-zero. `-ne` is what `npm run smoke` uses too (see [How to run the smoke](#how-to-run-the-smoke)).
 
 ### Requirements
 
 - **Pi** `0.84.x`.
 - **Node ESM** (the project's `package.json` has `"type": "module"`).
+
+### How to run the smoke
+
+The end-to-end acceptance gate is `npm run smoke`, which drives 14 deterministic scenarios (9 `F-*` + 5 edge cases `E7`/`E11`/`E12`/`E15`/`E20`) through a **real Pi process** firing the real `context` filter.
+
+```bash
+npm run smoke            # → 14/14 scenarios passed
+```
+
+The harness (`test/integration/run-smoke.mjs`) spawns each scenario as:
+
+```bash
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-<scenario>-<RUN_ID> -p "..." -p "..."
+```
+
+> **`-ne` is load-bearing.** It disables Pi's global extension + package auto-discovery so the `-e ./src/index.ts` copy is the *only* copy of pi-mulligan registered. **If a copy of pi-mulligan is already registered globally** — via `pi install`, an entry in `~/.pi/agent/settings.json` → `packages`, or a `src/index.ts` symlink/copy in `~/.pi/agent/extensions/` or `.pi/extensions/` — then loading it again with `-e` collides on the tool names (`Tool "mulligan_*" conflicts with <path>`) and `pi` exits non-zero, which the harness reports as `EXTENSION LOAD FAILED` for every scenario. `-ne` prevents this by suppressing the global registration. If you still see the conflict (e.g. a second copy loaded another way), the harness detects the signature and prints a single actionable diagnostic naming the conflicting path and the remediation.
+
+> **Precondition.** No *second* copy of pi-mulligan may be loaded via an explicit `-e` or auto-discovery dir at the same time as the harness's own `-e ./src/index.ts`. A single globally-registered copy is fine because `-ne` suppresses it for the run.
 
 ---
 

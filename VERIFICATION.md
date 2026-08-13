@@ -21,7 +21,7 @@
 | 5 | Intentional filter exception doesn't break a turn | `filter.test.ts -t fail-open` + smoke `F-failopen` | **10 fail-open tests green** + F-failopen PASS | ✅ |
 | 6 | README documents install, the five agent-callable tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **5 *_DESC verbatim + 20-knob config table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** (rewind, shrink, checkpoint, audit, cancel) | ✅ |
 | + | typebox schemas compile | `npx tsc --noEmit` | **exit 0** (strict + skipLibCheck; typebox `Type.Object` schemas compile) | ✅ |
-| + | zero-config smoke load (`spec/11` §2 Step 9) | `pi -e ./src/index.ts -p "Reply with the single word: ok"` | **no load error**; model responded `ok` | ✅ |
+| + | zero-config smoke load (`spec/11` §2 Step 9) | `pi -ne -e ./src/index.ts -p "Reply with the single word: ok"` | **no load error**; model responded `ok` | ✅ |
 
 ---
 
@@ -35,7 +35,7 @@ npm test                                        # → 671 passed, 0 failed
 npx tsc --noEmit                                # → exit 0
 
 # DoD #6 / spec/11 §2 Step 9 — zero-config smoke load
-pi -e ./src/index.ts -p "Reply with the single word: ok"   # → no load error
+pi -ne -e ./src/index.ts -p "Reply with the single word: ok"   # → no load error
 
 # DoD #2/#3/#5 — integration smoke (9 F-* + 5 E-* scenarios)
 npm run smoke                                   # → 14/14 scenarios passed (F-protected asserts the BUG-006 refusal)
@@ -119,6 +119,19 @@ assertions on a single clean run.
 > as noted below. With the run-scoped id, `npm run smoke` is now **genuinely idempotent**: 14/14 on back-to-back
 > runs (verified). The notes below are retained as the original S2 narrative.
 
+> **Precondition — no second copy of pi-mulligan registered (validation Issue #1).** `run-smoke.mjs` now spawns
+> each scenario with `pi -ne` (`--no-extensions`), which disables Pi's global extension + package auto-discovery
+> so the harness's own `-e ./src/index.ts` copy is the *only* one loaded. This makes the harness self-contained:
+> it no longer matters whether a copy of pi-mulligan is globally registered (via `pi install`, an entry in
+> `~/.pi/agent/settings.json` → `packages`, or a `src/index.ts` symlink/copy in `~/.pi/agent/extensions/`).
+> Without `-ne`, a globally-registered copy registers the `mulligan_*` tools *first*; the `-e ./src/index.ts`
+> copy is then rejected with `Tool "mulligan_*" conflicts with <path>` and `pi` exits non-zero, which the
+> harness reports as `EXTENSION LOAD FAILED` for all 14 scenarios — masquerading as a total code break. As a
+> backstop, the harness also detects that signature and prints a single actionable diagnostic naming the
+> conflicting path. The one remaining precondition is that **no second copy is loaded via another explicit `-e`
+> or an auto-discovery dir that survives `-ne`** — `-ne` suppresses `packages` and `extensions` auto-loading but
+> not additional `-e` flags passed by the caller.
+
 `run-smoke.mjs` spawns each scenario with `--session-id smoke-<scenario>`, and Pi **appends**
 to that same JSONL file on every run. F-reload *relies* on this (two runs share one session
 within a single `npm run smoke`). The side effect: **running `npm run smoke` repeatedly
@@ -184,7 +197,7 @@ run — see the DoD #2 harness note):
 |---|---|---|
 | 1a | `npm test` | 671 passed, 0 failed |
 | 1b | `npx tsc --noEmit` | exit 0 |
-| 2 | `pi -e ./src/index.ts -p "Reply with the single word: ok"` | no load error; model replied `ok` |
+| 2 | `pi -ne -e ./src/index.ts -p "Reply with the single word: ok"` | no load error; model replied `ok` |
 | 3 | disabled-path unit tests (4 files) | 115 passed |
 | 3 | 5 master-switch gates grep | filter:180, rewind:322, shrink:235, nudges:98, nudges:176 ✅ |
 | 4 | `npm run smoke` (clean state) | 14/14 scenarios passed |
