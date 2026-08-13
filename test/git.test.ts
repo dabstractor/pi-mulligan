@@ -102,11 +102,14 @@ function makeBackendWithUnlink(
   unlinked: string[],
   cfg: MulliganConfig["revert"] = BASE_CFG,
   canned: ExecCanned = {},
+  // BUG-001 R1: optional stat DI seam (production omits → real fs.stat; tests inject a fake to
+  // assert the defense-in-depth size guard without a real filesystem).
+  stat?: (path: string) => Promise<{ size: number }>,
 ): GitBackend {
   const unlink = async (p: string): Promise<void> => {
     unlinked.push(p);
   };
-  return new GitBackend("/fake/cwd", cfg, null, { exec: makeExec(calls, canned), scan: emptyScan, unlink });
+  return new GitBackend("/fake/cwd", cfg, null, { exec: makeExec(calls, canned), scan: emptyScan, unlink, stat });
 }
 
 /** Find the first recorded call whose args[0] === cmd (e.g. "add", "write-tree"). */
@@ -750,6 +753,51 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     // big.bin was NEVER unlinked; new.ts WAS
     expect(unlinked.some((p) => /big\.bin$/.test(p))).toBe(false);
     expect(unlinked.some((p) => /new\.ts$/.test(p))).toBe(true);
+  });
+
+  it("BUG-001 R1: spares an oversize delete-candidate when the oversize note is ABSENT (note-write-failure window)", async () => {
+    // The OVERSIZE-DELETE test above covers the happy path (note present → spare Set populated →
+    // big.bin spared). This closes the RESIDUAL window (residual_risk_analysis.md § R1): the oversize
+    // note is a best-effort side channel (its write is try/catch-swallowed at capture). If that write
+    // FAILED, restore reads no note → result.skipped empty → spare Set empty → `git ls-files --others`
+    // lists the pre-existing oversize file → `unlink` → irreversible data loss. The defense-in-depth
+    // size guard (stat().size > maxFileBytes) spares it INDEPENDENT of the note.
+    const calls: Call[] = [];
+    const unlinked: string[] = [];
+    // stat fake: big.bin is oversize (>256); new.ts is small. stat receives the ABS path
+    // (resolveSafeWorkspacePath result), so match on the suffix (GOTCHA #4).
+    const stat = async (p: string): Promise<{ size: number }> =>
+      p.endsWith("big.bin") ? { size: 1000 } : { size: 10 };
+    const cfg: MulliganConfig["revert"] = {
+      ...BASE_CFG,
+      allowDeleteCreatedFiles: true,
+      maxFileBytes: 256,
+    };
+    const gb = makeBackendWithUnlink(
+      calls,
+      unlinked,
+      cfg,
+      {
+        // makeExec's throwOn REQUIRES `call` (GOTCHA #2). restore() is called DIRECTLY (no capture),
+        // so the ONLY `git notes` call is restore step (a.5)'s `notes … show BEFORE1` — call 1.
+        // Throwing it → restore's try/catch swallows → result.skipped stays empty → spare Set empty
+        // → (without the guard) big.bin would be unlinked. ls-files lists both candidates.
+        throwOn: { cmd: "notes", call: 1 },
+        stdoutByCmd: { "ls-files": "big.bin\nnew.ts\n" },
+      },
+      stat,
+    );
+
+    const res = await gb.restore("BEFORE1", { revertFileChanges: false, deleteCreatedFiles: true });
+
+    // The small span-created file IS deleted; the oversize candidate is SPARED.
+    expect(res.deleted).toEqual(["new.ts"]);
+    expect(res.deleted).not.toContain("big.bin");
+    // The spared oversize path is surfaced for agent visibility (independent of the note).
+    expect(res.skipped).toContain("big.bin");
+    // The recording unlink fake got new.ts but NOT big.bin.
+    expect(unlinked.some((p) => /new\.ts$/.test(p))).toBe(true);
+    expect(unlinked.some((p) => /big\.bin$/.test(p))).toBe(false);
   });
 
   it("per-path checkout failure ⇒ path lands in failed[]; restore still resolves (never rejects)", async () => {

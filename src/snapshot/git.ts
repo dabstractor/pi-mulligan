@@ -119,6 +119,15 @@ export interface GitBackendDeps {
    * backward-compatible — production construction omits it → real fsUnlink.
    */
   unlink?: (path: string) => Promise<void>;
+  /**
+   * Default: node:fs/promises.stat. The delete-created-files step in restore() calls this to
+   * enforce a defense-in-depth maxFileBytes size guard (BUG-001 R1): a delete-candidate whose
+   * CURRENT size exceeds cfg.revert.maxFileBytes is SPARED (surfaced in result.skipped) even
+   * when the oversize git note is absent (note-write failure at capture). Optional + backward-
+   * compatible — production construction omits it → real stat. Tests inject a fake to assert
+   * the spare path without a real filesystem.
+   */
+  stat?: (path: string) => Promise<{ size: number }>;
 }
 
 /**
@@ -235,6 +244,7 @@ export class GitBackend implements SnapshotStore {
     maxFileBytes: number,
   ) => Promise<CapScan>;
   private readonly unlink: (path: string) => Promise<void>;
+  private readonly stat: (path: string) => Promise<{ size: number }>;
   // resolved lazily by ensureInit():
   private repoRoot!: string;
   private shadowDir!: string;
@@ -270,6 +280,7 @@ export class GitBackend implements SnapshotStore {
     this.exec = deps?.exec ?? (execFileDefault as GitExec);
     this.scan = deps?.scan ?? scanForCaps;
     this.unlink = deps?.unlink ?? fsUnlink;
+    this.stat = deps?.stat ?? stat;
   }
 
   /** Report the active backend (sync metadata for logging / the rewind notice). */
@@ -888,6 +899,21 @@ export class GitBackend implements SnapshotStore {
           try {
             // resolveSafeWorkspacePath throws on `..`/absolute escape → caught below ⇒ failed[] (E27).
             const abs = resolveSafeWorkspacePath(this.repoRoot, rel);
+            // [BUG-001 R1] defense-in-depth size guard — INDEPENDENT of the note (closes the note-write-
+            //   failure data-loss window). A delete-candidate whose CURRENT size exceeds maxFileBytes is
+            //   SPARED + surfaced (deduped) in result.skipped. When the note is absent we cannot tell
+            //   "pre-existing oversize" from "span-created large file"; the only safe action is to NOT
+            //   delete (a leftover large file is recoverable; a deleted pre-existing file is not).
+            try {
+              const st = await this.stat(abs);
+              if (st.size > this.cfg.maxFileBytes) {
+                if (!result.skipped.includes(rel)) result.skipped.push(rel); // dedup visibility
+                continue; // SPARE — legal in a nested try within a for-loop (skips await this.unlink)
+              }
+            } catch {
+              /* ENOENT / inaccessible → size unknown → fall through to the normal unlink attempt
+                 below; its own try/catch handles ENOENT as a silent skip. */
+            }
             await this.unlink(abs);
             result.deleted.push(rel);
           } catch (e) {
