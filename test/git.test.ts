@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { GitBackend, type GitExec, type CapScan } from "../src/snapshot/git.js";
 import type { MulliganConfig } from "../src/config.js";
 
@@ -749,6 +750,46 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: [] });
     expect(findCmd(calls, "read-tree")).toBeUndefined();
     expect(findCmd(calls, "ls-files")).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// spec/14 §2 SAFETY INVARIANT — restore() forbidden-root entry guard (task P1.M1.T3.S2).
+// §10 testing safety clause: "restore() against a forbidden root returns refused with zero
+// filesystem mutation". The guard fires BEFORE ensureInit() and BEFORE any fs/git mutation, so the
+// recording exec fake is NEVER invoked (calls.length === 0) — that empty call log IS the
+// zero-mutation proof. makeBackend() hardcodes cwd="/fake/cwd" (NOT forbidden), so the home/"/"
+// cases construct GitBackend DIRECTLY (mirroring the describe() test's direct-construction idiom).
+describe("GitBackend.restore — forbidden-root entry guard (spec/14 §2 SAFETY INVARIANT)", () => {
+  it("refuses when cwd is the user's home — refused:[home], other buckets empty, ZERO mutation", async () => {
+    const home = homedir();
+    const calls: Call[] = [];
+    const gb = new GitBackend(home, BASE_CFG, null, { exec: makeExec(calls), scan: emptyScan });
+    const res = await gb.restore("BEFORE1", { revertFileChanges: true, deleteCreatedFiles: true });
+    expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: [home] });
+    // ZERO mutation: the guard fired before ensureInit() and before any this.exec() / unlink().
+    expect(calls).toHaveLength(0);
+    expect(findCmd(calls, "read-tree")).toBeUndefined();
+    expect(findCmd(calls, "checkout")).toBeUndefined();
+    expect(findCmd(calls, "ls-files")).toBeUndefined();
+  });
+
+  it("refuses when cwd is '/' (filesystem root) — same refused shape, ZERO mutation", async () => {
+    const calls: Call[] = [];
+    const gb = new GitBackend("/", BASE_CFG, null, { exec: makeExec(calls), scan: emptyScan });
+    const res = await gb.restore("BEFORE1", { revertFileChanges: true, deleteCreatedFiles: true });
+    expect(res).toEqual({ reverted: [], deleted: [], failed: [], skipped: [], refused: ["/"] });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does NOT fire for a normal (non-forbidden) cwd — restore proceeds (negative control)", async () => {
+    // makeBackend → cwd="/fake/cwd" (depth-2, not home, not "/") → isForbiddenRoot === false.
+    const calls: Call[] = [];
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { stdoutByCmd: { diff: "a.ts\n" } });
+    const res = await gb.restore("BEFORE1", { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.refused).toEqual([]); // guard did NOT fire
+    expect(res.reverted).toEqual(["a.ts"]); // restore ran the recipe
+    expect(findCmd(calls, "read-tree")).toBeDefined();
   });
 });
 

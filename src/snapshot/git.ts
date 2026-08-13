@@ -18,6 +18,7 @@ import {
 import {
   normalizeRelPath,
   isDangerousWorkspaceRel,
+  isForbiddenRoot,
   resolveSafeWorkspacePath,
   DANGEROUS_DIRS,
 } from "./paths.js";
@@ -725,8 +726,11 @@ export class GitBackend implements SnapshotStore {
 
   /**
    * Write working-tree files FROM the `beforeRef` snapshot (restore the pre-span file state).
-   * spec/14 §3 (the FIVE git-safety guarantees), §6 (restore semantics). Serialized by the mutex
-   * (spec §4.3). CONSUMED BY: rewindExecute step 6b (P4.M2.T1.S2) after the dirty guard passes.
+   * spec/14 §2 (SAFETY INVARIANT — the forbidden-root entry guard: restore() re-checks
+   * isForbiddenRoot(this.cwd) as its FIRST act and refuses with ZERO filesystem mutation if the
+   * resolved root is forbidden; a last line of defense independent of detection), §3 (the FIVE
+   * git-safety guarantees), §6 (restore semantics). Serialized by the mutex (spec §4.3).
+   * CONSUMED BY: rewindExecute step 6b (P4.M2.T1.S2) after the dirty guard passes.
    *
    * INTERFACE: `restore(beforeRef, opts)` has NO `afterRef` param (fixed by S1/store.ts). The
    * delete-created set therefore uses "files present NOW but absent from the beforeRef tree"
@@ -758,6 +762,15 @@ export class GitBackend implements SnapshotStore {
    */
   async restore(beforeRef: string, opts: RestoreOpts): Promise<RestoreResult> {
     const release = await this.mutex.acquire(); // spec §4.3 — serialize ALL store ops
+    // SAFETY INVARIANT entry guard (spec/14 §2) — the LAST LINE OF DEFENSE, independent of
+    // detection (detectAndCreate already refuses forbidden roots → NoOp; this re-checks at
+    // restore() entry so a hand-constructed backend or a detection regression cannot bypass it).
+    // Fires BEFORE ensureInit() and BEFORE any fs/git mutation → ZERO filesystem mutation on
+    // refuse. @spec/14 §2 (SAFETY INVARIANT) + §6 (restore semantics).
+    if (isForbiddenRoot(this.cwd)) {
+      release();
+      return { reverted: [], deleted: [], failed: [], skipped: [], refused: [this.cwd] };
+    }
     const result: RestoreResult = {
       reverted: [],
       deleted: [],
