@@ -7,7 +7,7 @@ import {
   unlink as fsUnlink,
   rm as fsRm,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   AsyncMutex,
@@ -33,10 +33,12 @@ const execFileDefault = promisify(execFileCb);
  *
  * DESIGN:
  * - SHADOW-REPO ISOLATION (the five git-safety guarantees, spec §3):
- *   1. No ref-moving or write command is ever issued against the USER's git. The ONLY command run
- *      against the source repo is the READ-ONLY `git rev-parse --show-toplevel` /
- *      `--absolute-git-dir` (cwd, NO shadow env). All writes (`add`/`write-tree`/`commit-tree`/
- *      `update-ref`/`init`/`gc`) target the SHADOW repo via the `shadowEnv()` helper.
+ *   1. No command of any kind — read OR write — is ever issued against the USER's git. The workspace
+ *      root is `realpath(cwd)` and needs no `rev-parse` to resolve it, so the backend never inspects
+ *      or touches the user's `.git` (the old read-only `rev-parse --show-toplevel`/`--absolute-git-dir`
+ *      is REMOVED — spec/14 §2 SAFETY INVARIANT + §3 guarantee #1). All git commands (`init`/`add`/
+ *      `write-tree`/`commit-tree`/`update-ref`/`read-tree`/`checkout`/`gc`) target the SHADOW repo via
+ *      `shadowEnv()` (`env.GIT_DIR === shadowDir`).
  *   2. The user's `.git` is never written — not even a dangling object. Every blob/tree/commit/ref
  *      lives in the external shadow repo (strictly cleaner than a `git stash create`-in-source
  *      design, which leaves reclaimable dangling objects in the user's `.git/objects`). Enforced
@@ -46,9 +48,11 @@ const execFileDefault = promisify(execFileCb);
  *      config.revert.allowDeleteCreatedFiles (restored by S2).
  *   5. Pre-flight refuse-on-dirty (§6): `dirtyCheck` before restore; if any affected path drifted
  *      since the after-snapshot, the whole file-revert is refused (S2).
- * - REPO-ROOT KEYING (PRD §3 / spec §3): the shadow repo is keyed by the resolved repo root
- *   (`git rev-parse --show-toplevel` → `sha256(root).slice(0,16)`), so subdirectory launches of the
- *   same repo SHARE one shadow repo. Fall back to resolved cwd if rev-parse fails.
+ * - LAUNCH-DIRECTORY KEYING (spec/14 §2 + §3): the shadow repo is keyed by `realpath(cwd)` (the
+ *   launch directory) via `sha256(realpath(cwd)).slice(0,16)`. The repo-root-keyed sharing across
+ *   subdirectory launches is intentionally NOT used: it required upward traversal (`rev-parse
+ *   --show-toplevel`) to resolve the root, which is the hazard closed by the SAFETY INVARIANT
+ *   (spec/14 §2). One shadow repo per launch directory — never an ancestor of it.
  * - LAZY IDEMPOTENT INIT: the shadow `git init --bare` runs ONCE (memoized in `initPromise`; a
  *   second `capture()` does NOT re-init). Concurrent first-captures share ONE init. A transient
  *   init failure resets the memo so the next call retries.
@@ -132,12 +136,30 @@ function refForLabel(label: string): string {
 }
 
 /**
- * Derive the 16-hex shadow-repo storage key from the resolved repo root (sha256, first 16 hex
- * chars). Repo-root-keyed (NOT cwd) so subdirectory launches of the same repo SHARE one shadow
- * repo (PRD §3 / spec §3). MODULE-PRIVATE.
+ * Derive the 16-hex shadow-repo storage key from the launch directory
+ * (`sha256(realpath(cwd)).slice(0,16)`). Launch-directory-keyed (NOT repo-root-keyed) — one shadow
+ * repo per launch dir; subdirectory launches do NOT share (that required upward traversal — the
+ * hazard closed by spec/14 §2 SAFETY INVARIANT). The arg is `repoRoot`, which after the
+ * constructor's realpathSafe + ensureInit's `repoRoot = this.cwd` IS realpath(cwd). MODULE-PRIVATE.
  */
 function shadowKey(repoRoot: string): string {
   return createHash("sha256").update(repoRoot).digest("hex").slice(0, 16);
+}
+
+/**
+ * Canonicalize `cwd` to its real absolute path WITHOUT following-symlinks surprises:
+ * `realpathSync` resolves the whole chain; on ANY failure (ENOENT / unreadable / symlink-loop —
+ * e.g. a direct unit test constructing GitBackend with a non-existent /fake/cwd) it falls back to
+ * `resolve(cwd)`. Defense-in-depth: detectAndCreate (P1.M1.T2.S1) ALREADY realpathSync's cwd before
+ * constructing GitBackend, so the production path's realpathSync never throws; the fallback exists
+ * for direct-test construction + any future caller. MODULE-PRIVATE.
+ */
+function realpathSafe(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return resolve(cwd);
+  }
 }
 
 /**
@@ -213,7 +235,6 @@ export class GitBackend implements SnapshotStore {
   private readonly unlink: (path: string) => Promise<void>;
   // resolved lazily by ensureInit():
   private repoRoot!: string;
-  private sourceGitDir!: string;
   private shadowDir!: string;
   private lastCommit: string | null = null; // optional -p <parent> chaining across captures
   private capturesThisTurn = 0; // maxSnapshotsPerTurn cap (reset by lifecycle P3 at turn boundary)
@@ -232,7 +253,7 @@ export class GitBackend implements SnapshotStore {
     sessionDir?: string | null,
     deps?: GitBackendDeps,
   ) {
-    this.cwd = resolve(cwd);
+    this.cwd = realpathSafe(cwd);
     this.cfg = revertConfig;
     this.sessionDir = sessionDir ?? null;
     if (revertConfig.storageDir) {
@@ -255,43 +276,35 @@ export class GitBackend implements SnapshotStore {
   }
 
   /**
-   * Initialize the shadow repo (idempotent — safe to call multiple times). Resolves repoRoot +
-   * sourceGitDir via read-only rev-parse against the USER's repo, derives the shadow key, and runs
-   * `git init --bare` against the SHADOW repo if it does not yet exist. Delegates to the memoized
-   * `ensureInit()` so concurrent first-captures share ONE init.
+   * Initialize the shadow repo (idempotent — safe to call multiple times). Sets
+   * `repoRoot = realpath(cwd)` (the launch directory — NO rev-parse, NO upward discovery; spec/14 §2
+   * SAFETY INVARIANT), derives the shadow key, and runs `git init --bare` against the SHADOW repo if
+   * it does not yet exist. Delegates to the memoized `ensureInit()` so concurrent first-captures share
+   * ONE init. @spec/14 §3 (GitBackend init) + §3 guarantee #1.
    */
   async init(): Promise<void> {
     await this.ensureInit();
   }
 
   /**
-   * Lazy memoized init — the SINGLE source of repoRoot/sourceGitDir/shadowDir resolution. Concurrent
+   * Lazy memoized init — the SINGLE source of repoRoot/shadowDir resolution. Concurrent
    * first-captures share ONE init (the memoized `initPromise`). A FAILED init resets the memo so the
    * NEXT capture retries rather than permanently bricking the backend (e.g. a transient disk-full).
    * MODULE-PRIVATE.
    *
-   * Step (1) is the ONLY command against the USER's repo — read-only rev-parse, cwd, NO shadow env
-   * (guarantee #1). Step (2) runs `git init --bare` against the SHADOW repo only if `shadowDir` does
-   * not already exist (idempotent — `existsSync` gate so a second capture never re-inits).
+   * Issues NO command against the USER's repo (spec/14 §2 SAFETY INVARIANT + §3 guarantee #1):
+   * repoRoot is set to `this.cwd` (already canonicalized by the constructor's realpathSafe) — no
+   * `rev-parse`, no upward walk. The ONLY git command here is `git init --bare` against the SHADOW
+   * repo (GIT_DIR only), gated by `existsSync` so a second capture never re-inits.
    */
   private ensureInit(): Promise<void> {
     if (this.initPromise) return this.initPromise; // memoize: concurrent first-calls share ONE init
     this.initPromise = (async () => {
-      // (1) READ-ONLY resolve against the USER's repo — cwd, NO shadow env. Guarantee #1.
-      const top = (
-        await this.exec("git", ["rev-parse", "--show-toplevel"], {
-          cwd: this.cwd,
-        })
-      ).stdout.trim();
-      const gitDir = (
-        await this.exec("git", ["rev-parse", "--absolute-git-dir"], {
-          cwd: this.cwd,
-        })
-      ).stdout.trim();
-      this.repoRoot = top || this.cwd; // PRD: repo-root-keyed; fall back to resolved cwd
-      this.sourceGitDir = gitDir;
-      this.shadowDir = join(this.storageDir, shadowKey(this.repoRoot));
-      // (2) lazily init the SHADOW repo (idempotent — skip if it already exists on disk).
+      // repoRoot is the canonical launch directory — NO rev-parse, NO upward discovery (spec/14 §2
+      // SAFETY INVARIANT). this.cwd was already canonicalized by realpathSafe() in the constructor.
+      this.repoRoot = this.cwd;
+      this.shadowDir = join(this.storageDir, shadowKey(this.repoRoot)); // keyed by launch dir
+      // lazily init the SHADOW repo (idempotent — skip if it already exists on disk).
       //     `git init --bare` needs ONLY GIT_DIR (git forbids GIT_WORK_TREE on a bare init — it is
       //     meaningless for a bare repo). The work-tree association is established per-command later
       //     via shadowEnv() (add/commit-tree/etc.). GIT_DIR alone redirects the new object DB + refs to

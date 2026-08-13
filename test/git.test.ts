@@ -10,7 +10,7 @@ import type { MulliganConfig } from "../src/config.js";
 // What is mocked (DI seam via constructor deps) vs what is real:
 //   - exec (deps.exec): a recording fake returning canned stdout for rev-parse/write-tree/commit-tree
 //     so capture reaches its pipeline WITHOUT real git. Tests assert on the recorded calls.
-//   - scan (deps.scan): a canned CapScan so the real fs walk (against a non-existent /fake/repo)
+//   - scan (deps.scan): a canned CapScan so the real fs walk (against a non-existent /fake/cwd)
 //     never runs. ALWAYS inject BOTH exec + scan.
 //   - AsyncMutex: REAL (the serialization test exercises the genuine promise-chain mutex).
 //
@@ -72,9 +72,6 @@ function makeExec(calls: Call[], canned: ExecCanned = {}): GitExec {
       throwCounts[cmd] = (throwCounts[cmd] ?? 0) + 1;
       if (throwCounts[cmd] === canned.throwOn.call) throw new Error(`mock ${cmd} failure`);
     }
-    if (cmd === "rev-parse" && args[1] === "--show-toplevel") return { stdout: "/fake/repo\n", stderr: "" };
-    if (cmd === "rev-parse" && args[1] === "--absolute-git-dir")
-      return { stdout: "/fake/repo/.git\n", stderr: "" };
     if (cmd === "write-tree") return { stdout: "TREE123\n", stderr: "" };
     if (cmd === "commit-tree") return { stdout: "COMMIT456\n", stderr: "" };
     if (canned.stdoutByCmd && cmd in canned.stdoutByCmd) return { stdout: canned.stdoutByCmd[cmd], stderr: "" };
@@ -123,22 +120,27 @@ function writeCalls(calls: Call[]): Call[] {
   );
 }
 
-/** The expected shadow dir for the /fake/repo fixture: <storageDir>/<sha256("/fake/repo").slice(0,16)>. */
-function expectedShadow(storageDir: string, repoRoot = "/fake/repo"): string {
+/** The expected shadow dir for the /fake/cwd fixture (realpathSafe falls back to resolve since
+ * /fake/cwd does not exist on disk): <storageDir>/<sha256("/fake/cwd").slice(0,16)>. */
+function expectedShadow(storageDir: string, repoRoot = "/fake/cwd"): string {
   return `${storageDir}/${createHash("sha256").update(repoRoot).digest("hex").slice(0, 16)}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe("GitBackend.capture — command construction (spec/14 §3)", () => {
-  it("issues rev-parse --show-toplevel against the USER repo (cwd, NO shadow GIT_DIR)", async () => {
+  it("issues ZERO commands against the user's git (no rev-parse --show-toplevel/--absolute-git-dir)", async () => {
     const calls: Call[] = [];
     const gb = makeBackend(calls);
     await gb.capture("turn");
-    const showTop = findCmd(calls, "rev-parse");
-    expect(showTop).toBeDefined();
-    expect(showTop!.opts?.cwd).toBe("/fake/cwd"); // resolved cwd, NOT the shadow env
-    // NO shadow GIT_DIR override on the read-only rev-parse (guarantee #1).
-    expect(showTop!.opts?.env?.GIT_DIR).toBeUndefined();
+    // NO rev-parse --show-toplevel / --absolute-git-dir is ever issued (spec/14 §3 guarantee #1).
+    const showTop = calls.find((c) => c.args[0] === "rev-parse" && c.args[1] === "--show-toplevel");
+    const absGitDir = calls.find((c) => c.args[0] === "rev-parse" && c.args[1] === "--absolute-git-dir");
+    expect(showTop).toBeUndefined();
+    expect(absGitDir).toBeUndefined();
+    // NO command runs against the user's repo at all — every capture command carries the shadow env.
+    for (const c of calls) {
+      expect(c.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+    }
   });
 
   it("issues git init --bare ONCE against the SHADOW repo (GIT_DIR=shadow), then NOT again", async () => {
@@ -163,7 +165,7 @@ describe("GitBackend.capture — command construction (spec/14 §3)", () => {
     for (const cmd of ["add", "write-tree", "commit-tree", "update-ref"]) {
       const c = findCmd(calls, cmd)!;
       expect(c.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
-      expect(c.opts?.env?.GIT_WORK_TREE).toBe("/fake/repo");
+      expect(c.opts?.env?.GIT_WORK_TREE).toBe("/fake/cwd");
     }
   });
 
@@ -225,23 +227,20 @@ describe("GitBackend — the five git-safety guarantees (spec/14 §3)", () => {
     // Every write command (init/add/write-tree/commit-tree/update-ref) must target the SHADOW repo.
     for (const c of writeCalls(calls)) {
       expect(c.opts?.env?.GIT_DIR).toBe(shadow);
-      expect(c.opts?.env?.GIT_DIR).not.toBe("/fake/repo/.git"); // NEVER the source git dir
+      expect(c.opts?.env?.GIT_DIR).not.toBe("/fake/cwd/.git"); // NEVER the source git dir
     }
   });
 
-  it("the ONLY command without the shadow env is the read-only rev-parse", async () => {
+  it("ZERO commands run without the shadow env (no command touches the user's git)", async () => {
     const calls: Call[] = [];
     const gb = makeBackend(calls);
     await gb.capture("turn");
-    const revParses = calls.filter((c) => c.args[0] === "rev-parse");
-    expect(revParses.length).toBeGreaterThan(0);
-    for (const rp of revParses) {
-      expect(rp.opts?.cwd).toBe("/fake/cwd");
-      expect(rp.opts?.env?.GIT_DIR).toBeUndefined(); // no shadow override on the source read
-    }
-    // Every NON-rev-parse call carries the shadow env.
-    for (const c of calls.filter((c) => c.args[0] !== "rev-parse")) {
+    // spec/14 §3 guarantee #1: NO command of any kind — read or write — against the user's git.
+    // Every recorded command (init/add/write-tree/commit-tree/update-ref) carries the shadow GIT_DIR.
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
       expect(c.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+      expect(c.opts?.cwd).toBeUndefined(); // no cwd-only (user-repo) command exists anymore
     }
   });
 });
@@ -252,9 +251,6 @@ describe("GitBackend.capture — best-effort + caps (E29/E27)", () => {
     const calls: Call[] = [];
     const throwingExec: GitExec = async (file, args, opts) => {
       calls.push({ file, args: [...args], opts });
-      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { stdout: "/fake/repo\n", stderr: "" };
-      if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir")
-        return { stdout: "/fake/repo/.git\n", stderr: "" };
       if (args[0] === "add") throw new Error("mock add failure");
       return { stdout: "", stderr: "" };
     };
@@ -302,9 +298,6 @@ describe("GitBackend — mutex serialization (spec/14 §4.3)", () => {
     const calls: Call[] = [];
     const racingExec: GitExec = async (file, args, opts) => {
       calls.push({ file, args: [...args], opts });
-      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { stdout: "/fake/repo\n", stderr: "" };
-      if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir")
-        return { stdout: "/fake/repo/.git\n", stderr: "" };
       if (args[0] === "write-tree") return { stdout: "TREE123\n", stderr: "" };
       if (args[0] === "commit-tree") return { stdout: "COMMIT456\n", stderr: "" };
       // Yield on every OTHER call (add/update-ref/init) so overlap would be observable if the mutex
@@ -375,7 +368,7 @@ describe("GitBackend.changedPaths — spec/14 §6 step 2 / BUG-004", () => {
     expect(diff.args).not.toContain("--diff-filter"); // CRITICAL: full A/D/M coverage, not just MD
     expect(diff.args).not.toContain("--"); // CRITICAL: no path filter (unlike dirtyCheck)
     expect(diff.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
-    expect(diff.opts?.env?.GIT_WORK_TREE).toBe("/fake/repo");
+    expect(diff.opts?.env?.GIT_WORK_TREE).toBe("/fake/cwd");
   });
 
   it("returns [] when beforeRef is empty (no diff issued)", async () => {
@@ -417,14 +410,14 @@ describe("GitBackend.has — spec/14 §2", () => {
 
   it("returns false when rev-parse --verify rejects (missing ref ⇒ exit 128)", async () => {
     const calls: Call[] = [];
-    // The first two rev-parse calls (show-toplevel, absolute-git-dir) in ensureInit succeed; the
-    // 3rd rev-parse (--verify) throws → has returns false.
-    const gb = makeBackend(calls, BASE_CFG, emptyScan, { throwOn: { cmd: "rev-parse", call: 3 } });
+    // ensureInit issues NO rev-parse; has()'s --verify is the FIRST rev-parse call → throwOn call:1
+    // makes it throw → has returns false.
+    const gb = makeBackend(calls, BASE_CFG, emptyScan, { throwOn: { cmd: "rev-parse", call: 1 } });
     expect(await gb.has("MISSING")).toBe(false);
   });
 
   it("never rejects", async () => {
-    const gb = makeBackend([], BASE_CFG, emptyScan, { throwOn: { cmd: "rev-parse", call: 3 } });
+    const gb = makeBackend([], BASE_CFG, emptyScan, { throwOn: { cmd: "rev-parse", call: 1 } });
     await expect(gb.has("MISSING")).resolves.toBe(false);
   });
 
@@ -636,7 +629,7 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     for (const c of checkouts) {
       expect(c.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
       // GUARANTEE #1/#2: never the SOURCE git dir.
-      expect(c.opts?.env?.GIT_DIR).not.toBe("/fake/repo/.git");
+      expect(c.opts?.env?.GIT_DIR).not.toBe("/fake/cwd/.git");
     }
   });
 
@@ -651,7 +644,7 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     expect(writes.length).toBeGreaterThan(0);
     for (const w of writes) {
       expect(w.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
-      expect(w.opts?.env?.GIT_DIR).not.toBe("/fake/repo/.git");
+      expect(w.opts?.env?.GIT_DIR).not.toBe("/fake/cwd/.git");
     }
   });
 
@@ -709,7 +702,7 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
     expect(res.deleted).toEqual(["src/a.ts", "new.txt"]);
     expect(unlinked).toHaveLength(2);
     for (const p of unlinked) {
-      expect(p).toMatch(/\/fake\/repo\/(src\/a\.ts|new\.txt)$/); // absolute, inside the workspace
+      expect(p).toMatch(/\/fake\/cwd\/(src\/a\.ts|new\.txt)$/); // absolute, inside the workspace
     }
   });
 
@@ -723,7 +716,7 @@ describe("GitBackend.restore — working-tree only (spec/14 §3/§6)", () => {
       stdoutByCmd: { "ls-files": "node_modules/evil.js\n.git/config\n.pi/x\nsrc/clean.ts\n" },
     });
     await gb.restore("BEFORE1", { revertFileChanges: false, deleteCreatedFiles: true });
-    expect(unlinked).toEqual([expect.stringMatching(/\/fake\/repo\/src\/clean\.ts$/)]);
+    expect(unlinked).toEqual([expect.stringMatching(/\/fake\/cwd\/src\/clean\.ts$/)]);
     for (const p of unlinked) {
       expect(p).not.toMatch(/node_modules/);
       expect(p).not.toMatch(/[\\/]\.git[\\/]/);
@@ -801,7 +794,7 @@ describe("GitBackend — oversize-skipped tracking via git notes (BUG-005 / E29)
     ]);
     // BEST-EFFORT + SAME shadow-env seam as update-ref (no new imports; guarantee #1/#2).
     expect(note.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
-    expect(note.opts?.env?.GIT_DIR).not.toBe("/fake/repo/.git");
+    expect(note.opts?.env?.GIT_DIR).not.toBe("/fake/cwd/.git");
   });
 
   it("capture: writes NO note when oversizePaths is empty (a clean capture)", async () => {

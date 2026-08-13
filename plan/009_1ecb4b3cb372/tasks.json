@@ -69,14 +69,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Rewrite GitBackend init/keying/guarantee + add restore guard in git.ts",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove every rev-parse call against the user's repo from GitBackend. Re-anchor the workspace root to realpath(cwd). Remove the sourceGitDir field. Update the shadow keying to launch-directory. Rewrite guarantee #1. Add the restore() forbidden-root guard. Requirement R3 + R4 (git.ts part) + unit tests R5c.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Rewrite constructor + ensureInit + remove sourceGitDir + update docs + rework git.test.ts",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -95,7 +95,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S2",
                   "title": "Add restore() forbidden-root entry guard in git.ts + test",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
