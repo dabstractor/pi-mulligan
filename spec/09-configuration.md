@@ -40,8 +40,8 @@
       "allowDeleteCreatedFiles": false, // global kill-switch on the destructive delete path (even when the agent asks)
       "nonGitMode": "cas",          // "cas" (default, comprehensive whole-tree) | "explicit-paths" (conservative: write/edit only, bash excluded)
       "storageDir": null,           // shadow-repo / CAS root; null → <sessionDir>/mulligan/. NEVER under cwd.
-      "maxFileBytes": 262144,        // per-file cap; 256 KB. ALL backends: skip+warn (fail-closed)
-      "maxTotalBytes": 33554432,     // per-session cap for the CAS backend; 32 MB
+      "maxFileBytes": 10485760,     // per-file cap; 10 MB. ALL backends: skip+warn (fail-closed)
+      "maxTotalBytes": 134217728,    // per-session cap for the CAS backend; 128 MB
       "maxSnapshotsPerTurn": 64,     // count cap; capture stops accepting new data beyond it
       "excludeGlobs": [".git","node_modules","dist","build",".next",".venv","target"]  // snapshot excludes for BOTH backends (.gitignore is NOT used — gitignored files like .env ARE captured)
     },
@@ -92,7 +92,7 @@
 | `revert.allowDeleteCreatedFiles` | `false` | Deletion is the one irreversible revert action, so it sits behind BOTH the per-call `delete_created_files` flag AND this global config gate. |
 | `revert.nonGitMode` | `"cas"` | Non-git capture strategy: `"cas"` (default — comprehensive whole-tree) or `"explicit-paths"` (conservative — only `write`/`edit` tool paths; bash not captured; the `pi-undo-redo` model). |
 | `revert.storageDir` | `null` | Root for the shadow repo / CAS store. `null` → `<sessionDir>/mulligan/`. MUST NOT resolve inside `cwd` (would pollute the workspace). |
-| `revert.maxFileBytes` / `maxTotalBytes` / `maxSnapshotsPerTurn` | `262144` / `33554432` / `64` | Bounds BOTH backends' storage; capture stops (best-effort degrade) beyond them. The git backend skips files > `maxFileBytes` (fail-closed) and stops capturing past `maxTotalBytes`. |
+| `revert.maxFileBytes` / `maxTotalBytes` / `maxSnapshotsPerTurn` | `10485760` / `134217728` / `64` | Bounds BOTH backends' storage; capture stops (best-effort degrade) beyond them. The git backend skips files > `maxFileBytes` (fail-closed) and stops capturing past `maxTotalBytes`. |
 | `revert.excludeGlobs` | `[.git, node_modules, …]` | Snapshot excludes for BOTH backends (`.gitignore` is deliberately NOT used — a gitignored `.env` is still wanted in a snapshot). Keeps capture off heavy/generated dirs. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |

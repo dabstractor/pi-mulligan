@@ -28,8 +28,8 @@ describe("DEFAULT_CONFIG", () => {
         allowDeleteCreatedFiles: false,
         nonGitMode: "cas",
         storageDir: null,
-        maxFileBytes: 262144,
-        maxTotalBytes: 33554432,
+        maxFileBytes: 10485760,
+        maxTotalBytes: 134217728,
         maxSnapshotsPerTurn: 64,
         excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
       },
@@ -95,8 +95,8 @@ describe("validateConfig", () => {
         allowDeleteCreatedFiles: false,
         nonGitMode: "cas",
         storageDir: null,
-        maxFileBytes: 262144,
-        maxTotalBytes: 33554432,
+        maxFileBytes: 10485760,
+        maxTotalBytes: 134217728,
         maxSnapshotsPerTurn: 64,
         excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
       },
@@ -695,8 +695,8 @@ describe("revert.* (P1.M1.T1.S1 / spec/14 §8, spec/09 §2-§4)", () => {
     allowDeleteCreatedFiles: false,
     nonGitMode: "cas",
     storageDir: null,
-    maxFileBytes: 262144,
-    maxTotalBytes: 33554432,
+    maxFileBytes: 10485760,
+    maxTotalBytes: 134217728,
     maxSnapshotsPerTurn: 64,
     excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
   };
@@ -883,8 +883,8 @@ describe("revert.* (P1.M1.T1.S1 / spec/14 §8, spec/09 §2-§4)", () => {
     expect(cfg.revert.allowDeleteCreatedFiles).toBe(false);
     expect(cfg.revert.nonGitMode).toBe("cas");
     expect(cfg.revert.storageDir).toBe(null);
-    expect(cfg.revert.maxFileBytes).toBe(262144);
-    expect(cfg.revert.maxTotalBytes).toBe(33554432);
+    expect(cfg.revert.maxFileBytes).toBe(10485760);
+    expect(cfg.revert.maxTotalBytes).toBe(134217728);
     expect(cfg.revert.maxSnapshotsPerTurn).toBe(64);
     expect(cfg.revert.excludeGlobs).toEqual(REVERT_DEFAULT.excludeGlobs);
   });

@@ -198,8 +198,8 @@ For a rewind at a supported granularity, with revert flags set and `config.rever
   "allowDeleteCreatedFiles": false,   // global kill-switch on the destructive delete path
   "nonGitMode": "cas",                // "cas" (default, comprehensive whole-tree) | "explicit-paths" (conservative, write/edit only; bash not captured)
   "storageDir": null,                 // shadow-repo / CAS root; null → default (<sessionDir>/mulligan/). NEVER under cwd.
-  "maxFileBytes": 262144,             // per-file cap; 256 KB. ALL backends: skip+warn (fail-closed) — a huge gitignored data file is not silently captured.
-  "maxTotalBytes": 33554432,          // per-session cap; 32 MB. capture stops beyond it (partial snapshot).
+  "maxFileBytes": 10485760,            // per-file cap; 10 MB. ALL backends: skip+warn (fail-closed) — a huge gitignored data file is not silently captured.
+  "maxTotalBytes": 134217728,         // per-session cap; 128 MB. capture stops beyond it (partial snapshot).
   "maxSnapshotsPerTurn": 64,          // count cap
   "excludeGlobs": [".git","node_modules","dist","build",".next",".venv","target"]  // snapshot excludes for BOTH backends (.gitignore NOT used — .env etc. captured)
 }

@@ -104,10 +104,10 @@ export interface MulliganConfig {
     storageDir: string | null;
     /** Per-file byte cap; files larger than this are skipped + warned (fail-closed — a huge
      *  gitignored data file is never silently claimed restorable). Must be > 0.
-     *  Default: 262144 (256 KB). (spec/14 §8, spec/09 §3/§4) */
+     *  Default: 10485760 (10 MB). (spec/14 §8, spec/09 §3/§4) */
     maxFileBytes: number;
     /** Per-session byte cap for capture; capture stops (best-effort partial snapshot) beyond
-     *  it. Must be > 0. Default: 33554432 (32 MB). (spec/14 §8, spec/09 §3/§4) */
+     *  it. Must be > 0. Default: 134217728 (128 MB). (spec/14 §8, spec/09 §3/§4) */
     maxTotalBytes: number;
     /** Count cap on snapshots captured per turn; capture stops accepting new data beyond it.
      *  Must be > 0. Default: 64. (spec/14 §8, spec/09 §3/§4) */
@@ -207,8 +207,8 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     allowDeleteCreatedFiles: false,
     nonGitMode: "cas",
     storageDir: null,
-    maxFileBytes: 262144,
-    maxTotalBytes: 33554432,
+    maxFileBytes: 10485760,
+    maxTotalBytes: 134217728,
     maxSnapshotsPerTurn: 64,
     excludeGlobs: [".git", "node_modules", "dist", "build", ".next", ".venv", "target"],
   },

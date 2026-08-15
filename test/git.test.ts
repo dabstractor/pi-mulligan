@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { GitBackend, type GitExec, type CapScan } from "../src/snapshot/git.js";
@@ -25,8 +25,8 @@ const BASE_CFG: MulliganConfig["revert"] = {
   allowDeleteCreatedFiles: false,
   nonGitMode: "cas",
   storageDir: "/fake/store",
-  maxFileBytes: 262144,
-  maxTotalBytes: 33554432,
+  maxFileBytes: 10485760,
+  maxTotalBytes: 134217728,
   maxSnapshotsPerTurn: 64,
   excludeGlobs: [".git", "node_modules"],
 };
@@ -269,6 +269,23 @@ describe("GitBackend.capture — best-effort + caps (E29/E27)", () => {
     const sha = await gb.capture("turn");
     expect(sha).toBe("COMMIT456");
     expect(findCmd(calls, "add")!.args).toContain(":!big.bin");
+  });
+
+  it("oversize warn fires ONCE per (session, path) across captures — the :! exclusion still applies every capture", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls: Call[] = [];
+    const oversizeScan = async (): Promise<CapScan> => ({ oversizePaths: ["big.bin"], totalBytes: 10 });
+    const gb = makeBackend(calls, BASE_CFG, oversizeScan);
+    await gb.capture("turn");
+    await gb.capture("turn-after");
+    const oversizeWarns = warnSpy.mock.calls.filter((c) => /oversize/.test(String(c[0])));
+    expect(oversizeWarns).toHaveLength(1); // NOT one per capture — the latch dedupes
+    // Functional exclusion is UNAFFECTED by the warn latch: both add invocations carry the :! pathspec.
+    const adds = calls.filter((c) => c.args[0] === "add");
+    expect(adds).toHaveLength(2);
+    expect(adds[0].args).toContain(":!big.bin");
+    expect(adds[1].args).toContain(":!big.bin");
+    warnSpy.mockRestore();
   });
 
   it("returns null when totalBytes > maxTotalBytes (aborts before add)", async () => {

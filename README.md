@@ -291,8 +291,8 @@ The eight `revert.*` knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; r
 | `revert.allowDeleteCreatedFiles` | `false` | Global kill-switch on the destructive `delete_created_files` path. Required in addition to the per-call flag. |
 | `revert.nonGitMode` | `"cas"` | Non-git capture strategy: `"cas"` (comprehensive whole-tree, default) or `"explicit-paths"` (conservative — `write`/`edit` only). |
 | `revert.storageDir` | `null` | Shadow-repo / CAS root; `null` → `<sessionDir>/mulligan/`. **Never resolves inside `cwd`** (validation rejects it). |
-| `revert.maxFileBytes` | `262144` | Per-file cap (256 KB); skip + warn at capture (fail-closed) — a huge gitignored data file is not silently captured. Also the restore-time safety floor that spares oversize files from `delete_created_files` (see Git-safety guarantee #4). |
-| `revert.maxTotalBytes` | `33554432` | Per-session cap (32 MB); capture stops beyond it (partial snapshot). |
+| `revert.maxFileBytes` | `10485760` | Per-file cap (10 MB); skip + warn at capture (fail-closed — the warn fires once per file per session) — a huge gitignored data file is not silently captured. Also the restore-time safety floor that spares oversize files from `delete_created_files` (see Git-safety guarantee #4). |
+| `revert.maxTotalBytes` | `134217728` | Per-session cap (128 MB); capture stops beyond it (partial snapshot). |
 | `revert.maxSnapshotsPerTurn` | `64` | Count cap; capture stops beyond it (partial snapshot). |
 | `revert.excludeGlobs` | `[".git","node_modules","dist","build",".next",".venv","target"]` | Snapshot excludes for **both** backends. `.gitignore` is deliberately **not** consulted — see the privacy note. |
 

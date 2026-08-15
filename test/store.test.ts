@@ -18,8 +18,8 @@ const REVERT_CFG: MulliganConfig["revert"] = {
   allowDeleteCreatedFiles: false,
   nonGitMode: "cas",
   storageDir: null,
-  maxFileBytes: 262144,
-  maxTotalBytes: 33554432,
+  maxFileBytes: 10485760,
+  maxTotalBytes: 134217728,
   maxSnapshotsPerTurn: 64,
   excludeGlobs: [".git", "node_modules"],
 };

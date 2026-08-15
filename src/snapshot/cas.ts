@@ -264,6 +264,12 @@ export class CasBackend implements SnapshotStore {
   /** Once-per-turn bash-not-captured warning latch (explicit-paths mode, §4.2). Reset by lifecycle
    *  P3 at the turn boundary (parity with capturesThisTurn). */
   private bashWarnedThisTurn = false;
+  /** Once-per-session oversize warn latch (workspace-rel path → already warned?). The capture walk
+   *  is stateless: an unchanged oversize file is re-detected on EVERY capture, and without this
+   *  latch the same "skipping oversize file" warning fires per capture, per file — spam. Only the
+   *  console.warn is deduped; the manifest-level visibility (manifest.skipped →
+   *  RestoreResult.skipped per rewind, BUG-005) is recorded every capture, unaffected. */
+  private readonly oversizeWarned = new Set<string>();
 
   /**
    * @param cwd            the workspace root to snapshot (resolved).
@@ -464,6 +470,20 @@ export class CasBackend implements SnapshotStore {
   }
 
   /**
+   * Emit "[mulligan] <site>: skipping oversize file …" ONCE per (session, path) — see
+   * {@link CasBackend.oversizeWarned}. The CALLER still records the skip in manifest.skipped on
+   * EVERY occurrence (that per-manifest data is load-bearing for restore()'s oversize spare set,
+   * BUG-005); only the console noise is latched. MODULE-PRIVATE.
+   */
+  private warnOversizeOnce(site: string, rel: string): void {
+    if (this.oversizeWarned.has(rel)) return; // already surfaced this session
+    this.oversizeWarned.add(rel);
+    console.warn(
+      `[mulligan] ${site}: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
+    );
+  }
+
+  /**
    * Capture ONLY the explicit write/edit tool paths (the conservative pi-undo-redo model — spec/14
    * §4.2). Does NOT scan the workspace (contrast S2's whole-tree walk). For each workspace-rel
    * posix path in `explicitPaths` (deduped): dangerous-path skip; `resolveSafeWorkspacePath` (a
@@ -511,9 +531,7 @@ export class CasBackend implements SnapshotStore {
         // fail-closed (§4.3) — never silently claim restorable. Record the rel so restore() can
         // surface it in RestoreResult.skipped (BUG-005: the agent must see the revert was incomplete).
         skipped.push(rel);
-        console.warn(
-          `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
-        );
+        this.warnOversizeOnce("snapshot.capture", rel);
         continue;
       }
       if (totalBytes + st.size > this.cfg.maxTotalBytes) {
@@ -611,17 +629,10 @@ export class CasBackend implements SnapshotStore {
       );
 
       await this.walkTree(this.cwd, excludeSet, async (rel, abs, st) => {
-        // oversize → fail-closed skip+warn (never silently claim restorable). Record the rel so
-        // restore() surfaces it in RestoreResult.skipped (BUG-005: the agent must see the revert was
-        // incomplete).
-        if (st.size > this.cfg.maxFileBytes) {
-          skipped.push(rel);
-          console.warn(
-            `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${rel}`,
-          );
-          return;
-        }
-        // mtime/size short-circuit — reuse stored hash, NO read/re-hash/store
+        // mtime/size short-circuit FIRST — reuse stored hash, NO read/re-hash/store. Deliberately
+        // ordered BEFORE the oversize gate: a file captured under a previous (larger) maxFileBytes
+        // whose (size, mtime) is unchanged still has a valid stored blob — it remains a restorable
+        // manifest entry instead of being demoted to skipped by today's smaller cap.
         const pe = prev.get(rel);
         if (pe && pe.size === st.size && pe.mtime === st.mtimeMs) {
           files[rel] = {
@@ -630,6 +641,15 @@ export class CasBackend implements SnapshotStore {
             mtime: st.mtimeMs,
             existed: true,
           };
+          return;
+        }
+        // oversize → fail-closed skip + warn-ONCE-per-session (never silently claim restorable).
+        // The rel is pushed to skipped EVERY capture (manifest.skipped is per-manifest data that
+        // restore() spares from delete_created_files — it must stay accurate); only the console.warn
+        // is latched (oversizeWarned) so an unchanged oversize file stops re-warning every capture.
+        if (st.size > this.cfg.maxFileBytes) {
+          skipped.push(rel);
+          this.warnOversizeOnce("snapshot.capture", rel);
           return;
         }
         // byte budget → stop accepting NEW data, mark PARTIAL (E29). NOT abort (CAS is file-by-file;
@@ -763,9 +783,7 @@ export class CasBackend implements SnapshotStore {
           // manifest so restore() surfaces it in RestoreResult.skipped — instead of silently
           // returning + losing the path. (The idempotency guard above still holds: a path already
           // in `files` is never re-skipped.)
-          console.warn(
-            `[mulligan] snapshot.appendExplicitPath: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${path}`,
-          );
+          this.warnOversizeOnce("snapshot.appendExplicitPath", path);
           manifest.skipped = [...(manifest.skipped ?? []), path];
           await this.fs.mkdir(join(this.storageDir, "manifests"), { recursive: true });
           await this.fs.writeFile(

@@ -49,8 +49,8 @@ const BASE_CFG: MulliganConfig["revert"] = {
   allowDeleteCreatedFiles: false,
   nonGitMode: "cas",
   storageDir: "/fake/store",
-  maxFileBytes: 262144,
-  maxTotalBytes: 33554432,
+  maxFileBytes: 10485760,
+  maxTotalBytes: 134217728,
   maxSnapshotsPerTurn: 64,
   excludeGlobs: [".git", "node_modules"],
 };
@@ -531,7 +531,7 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
     const cwd = "/ws/proj";
     const storage = "/store";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const big = Buffer.alloc(300); // > BASE_CFG.maxFileBytes (262144 is big; use a tighter cap)
+    const big = Buffer.alloc(300); // > BASE_CFG.maxFileBytes (10485760 is big; use a tighter cap)
     const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
       "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
       "big.bin": { content: big, mtimeMs: 1 },
@@ -542,6 +542,47 @@ describe("CasBackend.capture — whole-tree (spec/14 §4.1)", () => {
     expect(Object.keys(m.files)).toEqual(["small.ts"]);
     expect(warnSpy).toHaveBeenCalled();
     expect(warnSpy.mock.calls.some((c) => /oversize/.test(String(c[0])))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("oversize warn fires ONCE per (session, path) — a second capture of the unchanged file is silent, but manifest.skipped stays accurate", async () => {
+    const cwd = "/ws/proj";
+    const storage = "/store";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { cb, fakeFs } = makeTreeBackend(cwd, storage, {
+      "small.ts": { content: Buffer.from("ok"), mtimeMs: 1 },
+      "big.bin": { content: Buffer.alloc(300), mtimeMs: 1 },
+    }, { maxFileBytes: 100 });
+    await cb.capture("turn");
+    await cb.capture("turn-after"); // different label → different prev manifest → oversize re-detected
+    const oversizeWarns = warnSpy.mock.calls.filter((c) => /oversize/.test(String(c[0])));
+    expect(oversizeWarns).toHaveLength(1); // NOT one per capture — the oversizeWarned latch dedupes
+    // The per-manifest SKIP DATA is recorded every capture (restore()'s spare set depends on it):
+    for (const label of ["turn", "turn-after"]) {
+      const m = JSON.parse((await fakeFs.readFile(join(storage, `manifests/${label}.json`))).toString("utf8"));
+      expect(m.skipped).toEqual(["big.bin"]);
+      expect(Object.keys(m.files)).toEqual(["small.ts"]);
+    }
+    warnSpy.mockRestore();
+  });
+
+  it("mtime short-circuit precedes the oversize gate — a file captured under a larger cap stays a restorable entry after the cap shrinks", async () => {
+    const cwd = "/ws/proj";
+    const storage = "/store";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // capture #1 with a GENEROUS cap: big.bin (300 B) is captured, blob stored.
+    const first = makeTreeBackend(cwd, storage, {
+      "big.bin": { content: Buffer.alloc(300), mtimeMs: 7 },
+    }, { maxFileBytes: 1000 });
+    await first.cb.capture("turn");
+    // capture #2 over the SAME fake storage with a SHRUNK cap: (size, mtime) unchanged → the
+    // short-circuit reuses the stored hash and big.bin stays in files — NOT demoted to skipped.
+    const shrunk = new CasBackend(cwd, { ...BASE_CFG, storageDir: storage, maxFileBytes: 100 }, null, { fs: first.fakeFs });
+    await shrunk.capture("turn");
+    const m = JSON.parse((await first.fakeFs.readFile(join(storage, "manifests/turn.json"))).toString("utf8"));
+    expect(Object.keys(m.files)).toEqual(["big.bin"]); // still a captured, restorable entry
+    expect(m.skipped).toEqual([]); // NOT skipped despite today's smaller cap
+    expect(warnSpy.mock.calls.some((c) => /oversize/.test(String(c[0])))).toBe(false); // no warn either
     warnSpy.mockRestore();
   });
 

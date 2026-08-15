@@ -250,6 +250,11 @@ export class GitBackend implements SnapshotStore {
   private shadowDir!: string;
   private lastCommit: string | null = null; // optional -p <parent> chaining across captures
   private capturesThisTurn = 0; // maxSnapshotsPerTurn cap (reset by lifecycle P3 at turn boundary)
+  /** Once-per-session oversize warn latch (workspace-rel path → already warned?). The caps pre-walk
+   *  re-detects the same oversize files on EVERY capture; without this latch each capture re-warns
+   *  per file — spam. Only the console.warn is deduped; the functional `:!` pathspec exclusion and
+   *  the oversize git note (BUG-005) still apply on every capture. */
+  private readonly oversizeWarned = new Set<string>();
   private initPromise: Promise<void> | null = null;
 
   /**
@@ -380,10 +385,16 @@ export class GitBackend implements SnapshotStore {
         );
         return null;
       }
-      for (const p of oversizePaths)
+      // Warn ONCE per (session, path): the caps pre-walk re-detects unchanged oversize files on
+      // every capture — the `:!` pathspec exclusion below still applies every time (functional);
+      // only the console noise is latched (oversizeWarned).
+      for (const p of oversizePaths) {
+        if (this.oversizeWarned.has(p)) continue;
+        this.oversizeWarned.add(p);
         console.warn(
           `[mulligan] snapshot.capture: skipping oversize file (> ${this.cfg.maxFileBytes} B): ${p}`,
         );
+      }
       // PATHSPECS: include all (.), then exclude globs + oversize, as `:!` single-argv elements.
       const pathspecs = [
         ".",
