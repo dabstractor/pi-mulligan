@@ -57,7 +57,14 @@ const execFileDefault = promisify(execFileCb);
  *   (spec/14 §2). One shadow repo per launch directory — never an ancestor of it.
  * - LAZY IDEMPOTENT INIT: the shadow `git init --bare` runs ONCE (memoized in `initPromise`; a
  *   second `capture()` does NOT re-init). Concurrent first-captures share ONE init. A transient
- *   init failure resets the memo so the next call retries.
+ *   init failure resets the memo so the next call retries. The init gate is a VALIDITY probe
+ *   (`existsSync(shadowDir/HEAD)` — a bare repo always has HEAD), NOT dir existence: a crashed/
+ *   partial init leaves a dir with no HEAD, which the old existence gate treated as initialized
+ *   (every later command then failed `fatal: not a git repository`). SETTLED inits are
+ *   RE-VALIDATED on every ensureInit: if the shadow repo VANISHED on disk (a sibling pi session
+ *   in the same cwd shares it — the session dir, hence `<sessionDir>/mulligan/<key>`, is keyed
+ *   by cwd, not session — and its shutdown `destroy()` rm -rf'd it), init re-runs (self-heal)
+ *   and `lastCommit` is dropped (its `-p` parent no longer exists in the fresh repo).
  * - CAPTURE PIPELINE (spec §3): caps pre-walk → `add --all -f -- . :!<excludeGlobs> :!<oversize>` →
  *   `write-tree` → `commit-tree <tree> [-p <parent>] -m "snapshot:<label>"` → `update-ref
  *   refs/mulligan/snapshots/<ns>/<part> <commit>`. `commit-tree` writes ONE object + prints its SHA
@@ -128,6 +135,14 @@ export interface GitBackendDeps {
    * the spare path without a real filesystem.
    */
   stat?: (path: string) => Promise<{ size: number }>;
+  /**
+   * Default: node:fs.existsSync. ensureInit's VALIDITY gate + self-heal re-validation probe
+   * `join(shadowDir, "HEAD")` (a bare repo ALWAYS has a HEAD file; a crashed/partial `git init
+   * --bare` leaves a dir WITHOUT one). Optional + backward-compatible — production construction
+   * omits it → real existsSync. Tests inject a stateful fake to simulate a valid / vanished /
+   * poisoned shadow repo without a real filesystem (a fake exec creates nothing on disk).
+   */
+  exists?: (path: string) => boolean;
 }
 
 /**
@@ -245,6 +260,7 @@ export class GitBackend implements SnapshotStore {
   ) => Promise<CapScan>;
   private readonly unlink: (path: string) => Promise<void>;
   private readonly stat: (path: string) => Promise<{ size: number }>;
+  private readonly exists: (path: string) => boolean;
   // resolved lazily by ensureInit():
   private repoRoot!: string;
   private shadowDir!: string;
@@ -256,6 +272,9 @@ export class GitBackend implements SnapshotStore {
    *  the oversize git note (BUG-005) still apply on every capture. */
   private readonly oversizeWarned = new Set<string>();
   private initPromise: Promise<void> | null = null;
+  /** True once the CURRENT initPromise settled successfully — only SETTLED inits are re-validated
+   *  by the ensureInit self-heal (an in-flight init may not have written HEAD yet). */
+  private initSettled = false;
 
   /**
    * @param cwd            the workspace root to snapshot (resolved).
@@ -286,6 +305,7 @@ export class GitBackend implements SnapshotStore {
     this.scan = deps?.scan ?? scanForCaps;
     this.unlink = deps?.unlink ?? fsUnlink;
     this.stat = deps?.stat ?? stat;
+    this.exists = deps?.exists ?? ((p: string) => existsSync(p));
   }
 
   /** Report the active backend (sync metadata for logging / the rewind notice). */
@@ -316,6 +336,29 @@ export class GitBackend implements SnapshotStore {
    * repo (GIT_DIR only), gated by `existsSync` so a second capture never re-inits.
    */
   private ensureInit(): Promise<void> {
+    // SELF-HEAL — a vanished/invalidated shadow repo (observed in the wild: `fatal: not a git
+    // repository: <shadowDir>` on every gc/capture until process restart). A SETTLED init is only
+    // valid while the shadow repo is still a repo ON DISK. It can go invalid under a live backend:
+    //   (a) VANISHED — a sibling pi session in the SAME cwd shares this shadow repo (the session
+    //       dir — hence <sessionDir>/mulligan/<key> — is keyed by cwd, NOT by session), and its
+    //       session_shutdown destroy() rm -rf'd the repo mid-flight;
+    //   (b) POISONED — the dir exists but was never a valid repo (a killed process left a partial
+    //       `git init --bare`); the OLD dir-existence gate then skipped init forever, so every
+    //       subsequent command failed "not a git repository" until process restart.
+    // Remedy: when a SETTLED init's repo is no longer valid (HEAD missing), reset the memo so init
+    // re-runs below. `git init --bare` is idempotent on a valid repo, and re-init after a vanish
+    // MUST also drop lastCommit — its -p parent commit no longer exists in the fresh repo
+    // (commit-tree would otherwise fail against a ghost). Only SETTLED inits are re-validated.
+    if (
+      this.initPromise &&
+      this.initSettled &&
+      this.shadowDir &&
+      !this.exists(join(this.shadowDir, "HEAD"))
+    ) {
+      this.initPromise = null;
+      this.initSettled = false;
+      this.lastCommit = null; // the commit chain died with the repo — never -p onto a ghost
+    }
     if (this.initPromise) return this.initPromise; // memoize: concurrent first-calls share ONE init
     this.initPromise = (async () => {
       // repoRoot is the canonical launch directory — NO rev-parse, NO upward discovery (spec/14 §2
@@ -335,21 +378,28 @@ export class GitBackend implements SnapshotStore {
       } catch {
         /* best-effort — proceed to git init --bare (its failure is handled by capture's error path) */
       }
-      // lazily init the SHADOW repo (idempotent — skip if it already exists on disk).
-      //     `git init --bare` needs ONLY GIT_DIR (git forbids GIT_WORK_TREE on a bare init — it is
-      //     meaningless for a bare repo). The work-tree association is established per-command later
-      //     via shadowEnv() (add/commit-tree/etc.). GIT_DIR alone redirects the new object DB + refs to
-      //     the shadow repo → guarantee #2 (the user's .git is never written).
-      if (!existsSync(this.shadowDir)) {
+      // lazily init the SHADOW repo — VALIDITY gate, not dir existence: a bare repo ALWAYS has a
+      //     HEAD file, so a partial dir (crashed init), an empty dir, or a foreign dir is
+      //     (re-)initialized. `git init --bare` needs ONLY GIT_DIR (git forbids GIT_WORK_TREE on a
+      //     bare init — it is meaningless for a bare repo). The work-tree association is established
+      //     per-command later via shadowEnv() (add/commit-tree/etc.). GIT_DIR alone redirects the
+      //     new object DB + refs to the shadow repo → guarantee #2 (the user's .git is never written).
+      //     Skipped only when HEAD already exists (the happy-path exec saving; re-init is harmless).
+      if (!this.exists(join(this.shadowDir, "HEAD"))) {
         await this.exec("git", ["init", "--bare"], {
           env: { ...process.env, GIT_DIR: this.shadowDir },
           maxBuffer: 16 * 1024 * 1024,
         });
       }
-    })().catch((e) => {
-      this.initPromise = null; // a failed init can retry next call (transient failure → not permanent)
-      throw e;
-    });
+    })()
+      .then(() => {
+        this.initSettled = true; // eligible for self-heal re-validation from now on
+      })
+      .catch((e) => {
+        this.initPromise = null; // a failed init can retry next call (transient failure → not permanent)
+        this.initSettled = false;
+        throw e;
+      });
     return this.initPromise;
   }
 
@@ -686,10 +736,14 @@ export class GitBackend implements SnapshotStore {
   async destroy(): Promise<void> {
     const release = await this.mutex.acquire(); // §4.3 — serialize vs in-flight capture/restore/gc
     try {
-      try {
-        await this.ensureInit(); // resolve shadowDir (idempotent + memoized; may init-then-we-delete — harmless)
-      } catch {
-        /* never initialized / transient failure — shadowDir unset → nothing to reclaim */
+      // Resolve shadowDir ONLY if never resolved — do NOT ensureInit a repo we are about to delete
+      // (the self-heal would resurrect it via re-init just to immediately rm -rf it).
+      if (!this.shadowDir) {
+        try {
+          await this.ensureInit();
+        } catch {
+          /* never initialized — shadowDir unset → nothing to reclaim */
+        }
       }
       if (this.shadowDir) {
         try {

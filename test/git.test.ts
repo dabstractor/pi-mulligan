@@ -90,7 +90,14 @@ function makeBackend(
   scan: (root: string, globs: readonly string[], maxFileBytes: number) => Promise<CapScan> = emptyScan,
   canned: ExecCanned = {},
 ): GitBackend {
-  return new GitBackend("/fake/cwd", cfg, null, { exec: makeExec(calls, canned), scan });
+  return new GitBackend("/fake/cwd", cfg, null, {
+    exec: makeExec(calls, canned),
+    scan,
+    // SELF-HEAL seam: with a fake exec nothing is created on disk, so a real existsSync would
+    // consider the shadow repo permanently invalid (HEAD missing) and re-init on EVERY call.
+    // Simulate the disk: the shadow repo is valid (HEAD present) once an init call has been issued.
+    exists: (p) => p.endsWith("HEAD") && calls.some((c) => c.args[0] === "init"),
+  });
 }
 
 /**
@@ -109,7 +116,13 @@ function makeBackendWithUnlink(
   const unlink = async (p: string): Promise<void> => {
     unlinked.push(p);
   };
-  return new GitBackend("/fake/cwd", cfg, null, { exec: makeExec(calls, canned), scan: emptyScan, unlink, stat });
+  return new GitBackend("/fake/cwd", cfg, null, {
+    exec: makeExec(calls, canned),
+    scan: emptyScan,
+    unlink,
+    stat,
+    exists: (p) => p.endsWith("HEAD") && calls.some((c) => c.args[0] === "init"),
+  });
 }
 
 /** Find the first recorded call whose args[0] === cmd (e.g. "add", "write-tree"). */
@@ -156,6 +169,45 @@ describe("GitBackend.capture — command construction (spec/14 §3)", () => {
     expect(inits).toHaveLength(1);
     expect(inits[0]!.args).toEqual(["init", "--bare"]);
     expect(inits[0]!.opts?.env?.GIT_DIR).toBe(expectedShadow(BASE_CFG.storageDir!));
+  });
+
+  it("re-inits when a SETTLED init's shadow repo VANISHES (sibling session destroy) — capture self-heals, lastCommit chain reset", async () => {
+    const calls: Call[] = [];
+    let vanished = false; // flips true when the sibling session's destroy() rm -rf's the repo
+    const gb = new GitBackend("/fake/cwd", BASE_CFG, null, {
+      exec: makeExec(calls),
+      scan: emptyScan,
+      // the shadow repo is valid (HEAD present) once an init command has issued — unless vanished.
+      exists: (p) =>
+        p.endsWith("HEAD") && !vanished && calls.some((c) => c.args[0] === "init"),
+    });
+    expect(await gb.capture("turn")).toBe("COMMIT456");
+    expect(calls.filter((c) => c.args[0] === "init")).toHaveLength(1); // first init ran once
+    // sibling pi session in the SAME cwd shuts down → its destroy() rm -rf's the SHARED shadow repo
+    vanished = true;
+    // OLD behavior: every later op failed "fatal: not a git repository" until process restart.
+    expect(await gb.capture("turn-after")).toBe("COMMIT456"); // SELF-HEALED
+    const inits = calls.filter((c) => c.args[0] === "init");
+    expect(inits).toHaveLength(2); // re-init actually ran
+    // lastCommit was RESET on re-init: the 2nd commit-tree carries NO -p parent (the ghost commit
+    // died with the old repo — -p onto it would fail "not a valid object name").
+    const commits = calls.filter((c) => c.args[0] === "commit-tree");
+    expect(commits).toHaveLength(2);
+    expect(commits[1]!.args).not.toContain("-p");
+  });
+
+  it("re-inits a POISONED shadow dir (dir exists, HEAD missing — crashed init) instead of skipping init forever", async () => {
+    const calls: Call[] = [];
+    const gb = new GitBackend("/fake/cwd", BASE_CFG, null, {
+      exec: makeExec(calls),
+      scan: emptyScan,
+      // the OLD gate's poison state: the dir "exists" (non-HEAD paths true) but HEAD is missing —
+      // the old existsSync(shadowDir) check skipped init, so every command failed "not a git
+      // repository" until process restart.
+      exists: (p) => !p.endsWith("HEAD"),
+    });
+    expect(await gb.capture("turn")).toBe("COMMIT456"); // init RUNS (validity gate), capture succeeds
+    expect(calls.filter((c) => c.args[0] === "init")).toHaveLength(1);
   });
 
   it("capture('turn') runs add → write-tree → commit-tree → update-ref in order, ALL with GIT_DIR=shadow", async () => {

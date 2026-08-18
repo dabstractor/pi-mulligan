@@ -106,6 +106,7 @@ Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, re
 | **F-revert-dirtyguard** (v1.2) | after `agent_end`, edit one target file externally, then rewind with `revert_file_changes:true` | file-revert REFUSED: the drifted path is in `revert.refusedFiles`; the context rewind still happens; the file is NOT overwritten |
 | **F-revert-explicit** (v1.2) | `nonGitMode:"explicit-paths"`; mutate via `write`/`edit` AND bash `sed`, then revert | write/edit files reverted; the bash `sed` file NOT reverted (+ once-per-turn warning); `revert.backend==="cas"` |
 | **F-revert-reload** (v1.2) | rewind with revert, then `/resume` and rewind-to-checkpoint | persisted refs still honored; files restored post-reload (E32 resolved) |
+| **F-revert-selfheal** (v1.2) | two backends in one cwd (sibling sessions); the sibling's `destroy()` deletes the shared shadow repo; the survivor captures again | the next capture **self-heals** (re-runs `git init --bare`, resets the commit chain) instead of failing `fatal: not a git repository` forever; a restore against the re-seeded snapshot still reverts files |
 
 ### 2.2 Driving reliability
 - Use a deterministic, instruction-following model if available; otherwise phrase prompts to force the tool call (the spike used `glm-5.2` successfully with explicit instructions). Provide a fallback "deterministic command" path (`/mulligan_smoke <scenario>`) that invokes the tools/handlers directly for scenarios that don't need model judgment (F-shrink-persist, F-protected, F-maxdepth, F-checkpoint, F-failopen, F-reload).

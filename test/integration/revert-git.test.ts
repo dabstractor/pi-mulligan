@@ -346,6 +346,48 @@ function chmodRecursive(root: string, mode: number): void {
 describe("F-revert-* integration (spec/10 §2.1 / spec/14)", () => {
   // ── F-revert-git (spec/10 §2.1 row F-revert-git) ─────────────────────────
 
+  it("F-revert-selfheal: shadow repo destroyed mid-session by a SIBLING session's shutdown — next capture re-inits (self-heal) and the backend keeps working", async () => {
+    if (!(await gitAvailable())) {
+      console.warn("[revert-git] git not on PATH — skipping F-revert-selfheal");
+      return;
+    }
+
+    // SETUP: a real git repo + separate storage dir (shared session-dir layout: keyed by cwd).
+    const repoDir = await makeRepo("rev-heal-");
+    dirs.push(repoDir);
+    writeFileSync(join(repoDir, "a.ts"), "A1\n");
+    const storageDir = makeStorage();
+    dirs.push(storageDir);
+    setConfig({ revert: { enabled: true, storageDir } });
+
+    // SESSION A (the live session) captures normally.
+    const storeA = await detectAndCreate(repoDir, getConfig().revert);
+    expect(storeA.describe().backend).toBe("git");
+    const before1 = await storeA.capture("turn");
+    expect(before1).toBeTruthy();
+
+    // A SIBLING pi session in the SAME cwd (same session dir → same <sessionDir>/mulligan/<key>)
+    // shuts down: its destroy() rm -rf's the SHARED shadow repo out from under session A.
+    const shadow = join(storageDir, await shadowKey(repoDir));
+    expect(existsSync(shadow)).toBe(true);
+    const storeSibling = await detectAndCreate(repoDir, getConfig().revert);
+    await storeSibling.destroy();
+    expect(existsSync(shadow)).toBe(false);
+
+    // OLD BEHAVIOR: every subsequent op on storeA failed "fatal: not a git repository: <shadow>"
+    // until process restart. NEW: ensureInit's self-heal detects the missing HEAD, re-runs
+    // git init --bare, and the backend keeps working.
+    const before2 = await storeA.capture("turn-after");
+    expect(before2).toBeTruthy();
+    expect(existsSync(shadow)).toBe(true); // re-created on disk
+
+    // The healed backend still does the FULL job: restore against the re-seeded snapshot works.
+    writeFileSync(join(repoDir, "a.ts"), "A2-span-edit\n");
+    const res = await storeA.restore(before2!, { revertFileChanges: true, deleteCreatedFiles: false });
+    expect(res.reverted).toEqual(["a.ts"]);
+    expect(readFileSync(join(repoDir, "a.ts"), "utf8")).toBe("A1\n"); // back to the healed capture's content
+  });
+
   it("F-revert-git: write+edit+bash sed all reverted; .git byte-identical; shadow ref present then cleared; marker.revert.revertedFiles populated", async () => {
     if (!(await gitAvailable())) {
       console.warn("[revert-git] git not on PATH — skipping F-revert-git");
