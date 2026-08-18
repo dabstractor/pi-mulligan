@@ -158,7 +158,9 @@ Mulligan registers four agent-callable tools. The descriptions below are **verba
 
 **When to use it (vs `mulligan_rewind`):** rewind = the call was a *mistake* — it is gone, replaced by a fresh attempt; shrink = the call was *fine* but its *output* is bloated — the call stays, and its result is swapped for your summary.
 
-**Operator echo (zero context cost).** The tool result stays terse ("Matched: yes/no") and does **not** echo the replacement — echoing it would place a second copy in context, defeating the tool's purpose. Instead the replacement is surfaced to the *operator* via a UI toast (`ctx.ui.notify`), capped at `shrink.notifyMaxChars` (default 2048) chars for ergonomics — the model never sees it. (`spec/05-tools.md` §2.)
+**Operator echo (zero context cost).** The tool result stays terse ("Matched: yes/no" plus the fixed R6 orientation line — see below) and does **not** echo the replacement — echoing it would place a second copy in context, defeating the tool's purpose. Instead the replacement is surfaced to the *operator* via a UI toast (`ctx.ui.notify`), capped at `shrink.notifyMaxChars` (default 2048) chars for ergonomics — the model never sees it. (`spec/05-tools.md` §2.)
+
+**R6 re-orientation guard (bench-stable).** Every ACTIVE shrink activation ends its tool result with this exact final line — `Context updated: <k> result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.` (k=1 today; a future batched flush emits it once with aggregate numbers via the exported `shrinkOrientationLine`). The bench measured losing sessions averaging **+2.4 requests after each rewrite event** re-orienting; one stable imperative cue at the rewrite point keeps the resumed model on-task. Refusals and failed appends carry no line (nothing was activated); rewind's orientation stays in its structured note (`src/notes.ts`), unchanged.
 
 **Target matchers** (resolved live each turn, robust to compaction):
 

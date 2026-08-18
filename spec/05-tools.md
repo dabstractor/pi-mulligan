@@ -126,12 +126,18 @@ const ShrinkParams = Type.Object({
 
 ### Return shape
 ```ts
-{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched: yes/no." }] }
+{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched: yes/no.\nContext updated: 1 result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed." }] }
 // The replacement is NOT echoed in the result. Echoing it would place a second
 // copy in the model's context — defeating the tool's entire purpose. The operator
 // sees the extracted summary via ctx.ui.notify (behavior step 5) at ZERO context
 // cost; the model sees only this terse line, then the replacement applied to the
-// target message on the next turn.
+// target message on the next turn. The SECOND line is the R6 re-orientation guard
+// (bench-stable, exact): it is appended as the FINAL line on every ACTIVE-activation
+// path — a persisted marker (k=1 here; a future batched flush emits it once with the
+// aggregate k/t) — so the resumed model does not spend turns re-orienting (the bench
+// measured +2.4 requests/event without it). Refusals and failed appends never carry
+// it (nothing was activated). ~<t> is the NET chars/4 estimate of original minus
+// replacement, floored at 0.
 ```
 
 ### Behavior
