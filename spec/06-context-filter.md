@@ -273,6 +273,7 @@ Compaction rewrites the message list Pi hands to `context` (summarizing the head
 - A marker targeting the **retained tail** still works (tail messages have stable roles/ids).
 - Risk: compaction may summarize content Mulligan hid into a compaction summary the model sees. Mitigations: (a) Mulligan reduces context, so compaction fires later and over less; (b) the filter could optionally strip `mulligan:` references from compaction summaries — **v1 does not** (keep it simple; the leak is bounded and transient). Document as a known limitation in `@08-edge-cases.md`.
 - `seq` ordering survives compaction (markers are entries on the branch; compaction keeps entries after `firstKeptEntryId`, which includes recent markers).
+- **Compaction is a FREE break for the rewrite budget (v2.1):** the filter calls `maybeFlushOnCompaction` on every fire. It counts `type:"compaction"` entries on the branch against a per-session watermark; the FIRST observation only initializes the watermark (a compaction predating the queue flushes nothing). When the count INCREASES while ops are queued, the queue flushes with trigger `"compaction"` — the provider already destroyed the cache itself, so activating markers there costs no additional break; such a flush NEVER increments `momentsSpent`. Fail-open: any error is a silent no-op (E13).
 
 ---
 

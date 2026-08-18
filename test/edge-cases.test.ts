@@ -12,7 +12,7 @@
  *     `expectPairingInvariant` — from test/transforms.test.ts (they are local to that file; not imported across).
  *   - `.js` import paths (ESM/Bundler resolution).
  *   - `clearAll()` + `setConfig(undefined)` reset in `beforeEach`/`afterEach` (GOTCHA #3: config + runtime are
- *     MODULE-SCOPED mutable state; a test that setConfig({enabled:false}) leaks into the next).
+ *     MODULE-SCOPED mutable state; a test that setConfig({ rewrites: { flushShedTokens: 0 },enabled:false}) leaks into the next).
  *   - `vi.mock("../src/transforms.js", …)` is NOT used here — E13's forced-throw cases use THROW-FAKES
  *     (throwOn* ctx options + throwOnAppend fake-pi), which keep the REAL transforms everywhere (GOTCHA #2).
  *
@@ -45,7 +45,10 @@ import { clearAll, getRuntime } from "../src/runtime.js";
 import { makeRewindTool, type RewindArgs, type RewindDetails } from "../src/tools/rewind.js";
 import { makeShrinkTool } from "../src/tools/shrink.js";
 import { makeCheckpointTool, validCheckpointName } from "../src/tools/checkpoint.js";
-import { auditTool } from "../src/tools/audit.js";
+import { makeAuditTool } from "../src/tools/audit.js";
+// [v1.2] mulligan_audit is a makeAuditTool(pi) factory (flush trigger (b)). These tests never queue
+// rewrites, so the captured pi is never touched — a no-op stand-in keeps call sites unchanged.
+const auditTool = makeAuditTool({ appendEntry() {} } as unknown as import("@earendil-works/pi-coding-agent").ExtensionAPI);
 import { bloatReminderHandler, turnEndMetricHandler } from "../src/nudges.js";
 import type {
   AgentToolResult,
@@ -58,14 +61,14 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 // GOTCHA #3: config + runtime are MODULE-SCOPED mutable state. Reset before AND after each test so a prior
-// test's setConfig({enabled:false}) or nextSeq increment can't leak in. (test/tools/*.test.ts pattern.)
+// test's setConfig({ rewrites: { flushShedTokens: 0 },enabled:false}) or nextSeq increment can't leak in. (test/tools/*.test.ts pattern.)
 beforeEach(() => {
   clearAll();
-  setConfig(undefined); // reset the config cache to validated DEFAULT_CONFIG
+  setConfig({ rewrites: { flushShedTokens: 0 } }); // DEFAULTS except the rewrite budget: contract tests opt out of queueing (0 = flush every op immediately)
 });
 afterEach(() => {
   clearAll();
-  setConfig(undefined);
+  setConfig({ rewrites: { flushShedTokens: 0 } });
 });
 
 // ── fixture builders (LOCAL copies of test/transforms.test.ts's builders) ────────────────────
@@ -546,7 +549,7 @@ describe("E5 — Side effects (writes/bash) in the hidden span", () => {
   });
 
   it("requireMutationWarning:false → the side-effect warning is OMITTED (the warning is config-gated)", async () => {
-    setConfig({ rewind: { requireMutationWarning: false } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { requireMutationWarning: false } });
     const { pi } = makePi();
     const { ctx } = makeCtx({ contextEntries: sideEffectEntries() });
     const tool = makeRewindTool(pi);
@@ -841,7 +844,7 @@ describe("E13 — Tool/handler throws internally (fail-open — the cardinal saf
 
 describe("E14 — Extension disabled via config (master switch)", () => {
   it("contextHandler with enabled:false → returns undefined (pass-through); cache untouched", () => {
-    setConfig({ enabled: false });
+    setConfig({ rewrites: { flushShedTokens: 0 }, enabled: false });
     const { pi } = makePi();
     const ctx = makeCtx({ sessionId: "dis1" }).ctx;
     const event = { type: "context" as const, messages: [user("hi")] } as unknown as ContextEvent;
@@ -850,7 +853,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("turnEndMetricHandler with enabled:false → no-op (no turn-metric appended)", () => {
-    setConfig({ enabled: false });
+    setConfig({ rewrites: { flushShedTokens: 0 }, enabled: false });
     const { appended, pi } = makePi();
     const ctx = makeCtx({ sessionId: "dis2" }).ctx;
     const event = { type: "turn_end", turnIndex: 1, message: null, toolResults: [] } as unknown as TurnEndEvent;
@@ -859,7 +862,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("bloatReminderHandler with enabled:false → no-op (returns void)", () => {
-    setConfig({ enabled: false });
+    setConfig({ rewrites: { flushShedTokens: 0 }, enabled: false });
     const ctx = makeCtx({ sessionId: "dis3" }).ctx;
     const event = {
       type: "tool_result",
@@ -873,7 +876,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("sub-feature disabled (rewind.enabled:false, master still true) → 'rewind is disabled' (UNCHANGED text)", async () => {
-    setConfig({ rewind: { enabled: false } });
+    setConfig({ rewind: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const tool = makeRewindTool(pi);
@@ -882,7 +885,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("master disabled (enabled:false, rewind.enabled still true) → 'Mulligan is disabled' (THE FIX)", async () => {
-    setConfig({ enabled: false }); // rewind.enabled defaults to true (DEFAULT_CONFIG) — does NOT cascade
+    setConfig({ rewrites: { flushShedTokens: 0 }, enabled: false }); // rewind.enabled defaults to true (DEFAULT_CONFIG) — does NOT cascade
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const tool = makeRewindTool(pi);
@@ -891,7 +894,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("master disabled (enabled:false) → shrink refuses 'Mulligan is disabled' (THE FIX)", async () => {
-    setConfig({ enabled: false });
+    setConfig({ rewrites: { flushShedTokens: 0 }, enabled: false });
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const tool = makeShrinkTool(pi);
@@ -900,7 +903,7 @@ describe("E14 — Extension disabled via config (master switch)", () => {
   });
 
   it("sub-feature disabled (shrink.enabled:false, master still true) → 'shrink is disabled' (UNCHANGED text)", async () => {
-    setConfig({ shrink: { enabled: false } });
+    setConfig({ shrink: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const tool = makeShrinkTool(pi);

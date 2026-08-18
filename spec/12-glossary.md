@@ -38,6 +38,12 @@
 - **Guardrail (v1.1)** — no rewind wipes user input; the only exception is a checkpoint rewind (the user opted in by setting it). `first:user` is never wiped. (`@13` §1.)
 - **Active-checkpoint banner (v1.1)** — the persistent above-prompt-box reminder (`ctx.ui.setWidget(placement:"aboveEditor")`) shown while a user-set checkpoint is armed, so the user does not forget they granted destructive cross-prompt rewind power. (`@13` §5, `@08` E26.)
 - **Agent-attributable delta (v1.1)** — the drift nudge's measured token growth excluding `user` messages; only content the agent produced counts as sheddable bloat. (D10, `@07` §2.)
+- **Operation (v2.1)** — one `mulligan_rewind` or `mulligan_shrink` tool call (a would-be marker). NOT the budgeted unit.
+- **Moment (v2.1)** — a turn in which at least one marker becomes ACTIVE (five parallel shrinks in one turn = five operations, ONE moment). Each moment breaks the provider's prompt cache and re-bills the session tail — the budgeted unit (`rewrites.maxMoments`).
+- **Rewrite queue (v2.1)** — per-session list of queued, INERT marker-creating ops (no marker, no event, content fully visible) waiting for a flush trigger. (`@04` §8, `@08` E28.)
+- **Flush (v2.1)** — activating ALL queued markers at once (one cache break, not N). Triggers: volume, same-turn batch, audit, compaction (free), safety valve. (`@05` §4, `@08` E28.)
+- **Free break (v2.1)** — a point where the cache is already destroyed: a provider compaction, or an audit call at the cap. Queued ops may ride it without spending a moment. (`@06` §10.)
+- **Safety valve (v2.1)** — `rewrites.safetyValveTokens`: queued volume strictly above it spends an EXTRA moment and flushes even at the cap, so pathological sessions can still shed. (`@09` §2.)
 
 ## References
 

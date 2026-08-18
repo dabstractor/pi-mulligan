@@ -73,6 +73,14 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 ---
 
 ### 1.12 Shrink activation orientation line (v1.2 guard)
+
+### 1.13 Rewrite budget (v2.1 — queue-first, moments)
+- Queue verdicts: an op under an unspent moment with sub-threshold volume QUEUES (no marker persisted, no activation event, honest "still visible" tool text); the 2nd op in the SAME turn flushes the batch (natural batching, ONE moment); queued volume reaching `flushShedTokens` flushes (volume trigger); strictly above `safetyValveTokens` flushes even at the cap (valve).
+- Post-cap: further ops queue and only ride free breaks — an audit call applies them; a NEW compaction entry (watermark increase) applies them without spending a moment; volume alone never opens a second moment.
+- Flush behavior: all queued markers activate together, each op replayed verbatim (marker + note + checkpoint-label consumption), per-op markerIds returned in queue order, `mulligan:rewrite-flush {count, estimatedTokens, trigger, momentsSpent}` emitted.
+- Refusals: `maxMoments = 0` refuses rewind and shrink with the budget-exhausted text suggesting `mulligan_audit`; audit/cancel unaffected.
+- Session reset: `momentsSpent`/queue/counters reset on `session_start` (resetRuntime) and per-turn counters (`opsThisTurn`, `activatedThisTurn`) reset on `turn_end`.
+- Config fail-open: garbage `rewrites.*` values fall back to defaults; internal budget errors degrade to apply-immediately.
 - Single ACTIVE activation (persisted marker): the result ENDS with the exact line `Context updated: 1 result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.` — `~<t>` is the NET `estimateTokens` (chars/4) of matched original minus replacement, floored at 0; assert a deterministic value (e.g. a 4000-char original + 7-char replacement → `~998`).
 - Persisted-but-unmatched target (`Matched: no`, E8): line present with `~0` (the filter live-resolves it later).
 - The line-builder is asserted verbatim for BOTH the single (`k=1`) and aggregate (`k>1`) forms — the aggregate is reserved for a future batched flush and is locked now so it cannot drift to a variant.

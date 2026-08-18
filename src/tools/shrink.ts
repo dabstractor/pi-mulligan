@@ -60,9 +60,13 @@ import { currentTurnSpan, resolveShrinkTarget } from "../transforms.js"; // Pi-f
 import type { ShrinkTarget } from "../transforms.js"; // structurally identical to markers.ts ShrinkTarget
 import type { MessageLike } from "../transforms.js";
 import { getConfig } from "../config.js"; // GOTCHA #10: read ONCE per execute
-import { estimateTokens } from "../tokens.js"; // pure Pi-free estimator (chars/4 heuristic) — v1.2 orientation line
+import { estimateTokens } from "../tokens.js"; // pure Pi-free estimator (chars/4 heuristic) — feeds BOTH the orientation line ~<t> and the rewrite-budget shed estimate
 import type { MessageLike as EstMessageLike } from "../tokens.js"; // tokens.ts structural flavor (same cast idiom as below)
 import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
+
+import { getRuntime } from "../runtime.js"; // [v2] per-session rewrite-budget state
+import type { SessionRuntime } from "../runtime.js";
+import { submitRewrite } from "../rewrite-budget.js"; // [v2] moment-capped queueing (queue-first, flush on triggers)
 
 // ── Parameter schema (spec/05 §2 — Typebox, VERBATIM incl. the 2-arm target union + descriptions) ────
 
@@ -131,6 +135,12 @@ export interface ShrinkDetails {
   matched?: boolean;
   /** The persisted marker's ENTRY id (appendShrinkMarker's return; null when append threw / no leaf). Success path. */
   markerId?: string | null;
+  /** [v1.2] true when the op was QUEUED for batched application (no marker yet — the content stays
+   *  visible until a flush activates the whole queue). Present ONLY on the queued path. */
+  queued?: boolean;
+  /** [v1.2] the flush size when queueing this op IMMEDIATELY crossed the flushShedTokens threshold
+   *  (trigger (a)): the batch (incl. this op) activated in the same turn. Present ONLY on that path. */
+  flushed?: number;
 }
 
 /**
@@ -248,7 +258,8 @@ function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string |
 
 /**
  * resolveTargetEntryId — the ADVISORY read-only match that ALSO captures the matched message's STABLE ENTRY id
- * (FINDING 3 fix; supersedes the old boolean bestEffortMatch). It builds a SNAPSHOT via
+ * (FINDING 3 fix; supersedes the old boolean bestEffortMatch) and its TOKEN ESTIMATE ([v1.2] — the
+ * flush-trigger shed volume; estimation ONLY, it never gates persistence). It builds a SNAPSHOT via
  * `ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)` (NOT event.messages — the tool
  * is write-only w.r.t. messages), computes the CURRENT TURN's span (`currentTurnSpan`, transforms.ts), feeds BOTH
  * to the PURE 3-arg resolver `resolveShrinkTarget(messages, target, span)` — v2.0 §2 step 3: the match resolves
@@ -365,19 +376,85 @@ async function shrinkExecute(
     if (snapshotOk && index === undefined) {
       // v2.0 §2 step 3 hard refusal — exact spec text; earlier-turn and no-match share ONE string.
       // Nothing is persisted and no orientation line is attached ("Context updated" must not lie).
+      // [v1.2 merged] nothing counted/queued either — a refused op creates no marker, so it never
+      // touched the rewrite budget (decideRewrite/countRewrite only run on the persist path below).
       return refusal("that result is from a previous turn; only this turn's tool calls can be shrunk");
     }
     const matched = snapshotOk ? entryId !== null : false; // snapshotOk:false → E13 persist path, matched:false
+    // v1.2 (merged): ONE net-shed estimate — the orientation line's ~<t> and the flush trigger share it
+    // (original matched content minus the replacement, floored at 0; estimateTokens never throws).
+    const tokensShed = Math.max(0, origTokens - estimateTokens([{ content: params.replacement }]).tokens);
 
-    // (5) persist (spec/05 §2 step 4; GOTCHA #1 — NO cast, NO leaveNote; ShrinkMarkerInput matches EXACTLY).
+    // (4b) [v2] rewrite budget — "cap at one moment": EVERY op is submitted to the budget
+    //      (queue-first). submitRewrite refuses (maxMoments 0), queues (inert — still visible,
+    //      rides the next free moment), or applies NOW (a trigger spent the moment and flushed
+    //      the queue, possibly with batch-mates from this same turn). No runtime (E13 fail-open)
+    //      → apply immediately with no budget bookkeeping.
+    let rt: SessionRuntime | null = null;
+    try {
+      rt = getRuntime(ctx.sessionManager.getSessionId());
+    } catch {
+      rt = null; // fail-open: no runtime → apply immediately (E13)
+    }
+
+    // (5) the persisted payload (spec/05 §2 step 4; GOTCHA #1 — NO cast, NO leaveNote; ShrinkMarkerInput matches EXACTLY).
     //     pinnedEntryId is included ONLY when the target matched at creation (absent → the filter falls back to live
     //     resolution — backward compat / compaction-robust). A non-matching target STILL persists (E8).
-    const markerId = appendShrinkMarker(pi, ctx, {
+    const shrinkInput: ShrinkMarkerInput = {
       target: params.target,
       replacement: params.replacement,
       reason: params.reason,
       ...(entryId ? { pinnedEntryId: entryId } : {}),
-    } satisfies ShrinkMarkerInput);
+    };
+
+    let markerId: string | null;
+    /** [v2] when the op applied via a flush: the batch size (for the AGGREGATE orientation line);
+     *  undefined on the fail-open immediate path (no budget) and null-markerId paths. */
+    let flushShrinks: number | null = null;
+    let flushShed: number | null = null;
+
+    if (rt === null) {
+      markerId = appendShrinkMarker(pi, ctx, shrinkInput); // E13 fail-open: no budget bookkeeping
+    } else {
+      const r = submitRewrite(pi, ctx, rt, {
+        kind: "shrink",
+        payload: shrinkInput as unknown as Record<string, unknown>,
+        reason: params.reason,
+        estimatedTokens: tokensShed,
+      });
+      if (r.status === "refused") return refusal(r.reason);
+      if (r.status === "queued") {
+        const label = r.label;
+        // INERT — no marker, no context change yet (events mean "now active"). Honest wording:
+        // queued, still visible, applies at the next free moment.
+        try {
+          if (ctx.hasUI) {
+            const capped = cap(params.replacement, config.shrink.notifyMaxChars);
+            ctx.ui.notify(`QUEUED shrink (batch pending) ${describeTarget(params.target)} — replacement:\n<<<\n${capped}\n>>>`, "info");
+          }
+        } catch {
+          // E13: a UI failure must never break the tool.
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Mulligan: shrink queued — ${label} — the content stays fully visible in your context for now ` +
+                "(no change yet). It applies at the next free moment: your next mulligan_audit call, a context " +
+                "compaction, or when the queued batch is worth spending the session's rewrite moment on. " +
+                "Do not try to shed the same content again in the meantime",
+            },
+          ],
+          details: { matched, markerId: null, queued: true },
+        };
+      }
+      // applied — a trigger spent the moment and flushed the queue (incl. this op).
+      const mine = r.flush.applied.length > 0 ? r.flush.applied[r.flush.applied.length - 1] : null;
+      markerId = mine ? mine.markerId : null;
+      flushShrinks = Math.max(1, r.flush.applied.filter((a) => a.kind === "shrink").length);
+      flushShed = r.flush.estimatedTokens;
+    }
 
     // (5b) operator echo (spec/05 §2 step 5 — zero context cost; the replacement is NOT in the tool result).
     //      P1.M2.T1.S2: surface a capped copy of the replacement to the operator via ctx.ui.notify so the
@@ -394,12 +471,14 @@ async function shrinkExecute(
 
     // (6) return (spec/05 §2 step 5) — feedback text (yes/no from the best-effort match) + details. v1.2 guard:
     //     when the marker ACTUALLY persisted (markerId truthy → it is ACTIVE), the result ENDS with the fixed
-    //     orientation line (single form k=1). t = NET estimate shed: original content minus the replacement,
-    //     floored at 0 (estimateTokens is defensive — never throws; a Matched:no marker reports ~0 until the
-    //     filter live-resolves it). Append FAILED (markerId null) → NO marker → nothing is active → NO line
-    //     ("Context updated" must not lie). Refusal paths never reach here (they have their own honest text).
-    const tokensShed = Math.max(0, origTokens - estimateTokens([{ content: params.replacement }]).tokens);
-    const orientation = markerId ? `\n${shrinkOrientationLine(1, tokensShed)}` : "";
+    //     orientation line — the AGGREGATE form when a flush batched multiple shrink results (k = shrink ops in
+    //     the flush, t = the batch's total shed estimate), else the single form (k=1, this op's `tokensShed` —
+    //     ONE estimate shared with the rewrite-budget triggers). Append FAILED (markerId null) → NO marker →
+    //     nothing is active → NO line ("Context updated" must not lie). Refusal/queued paths never reach here
+    //     (they have their own honest text).
+    const orientation = markerId
+      ? `\n${shrinkOrientationLine(flushShrinks ?? 1, flushShed ?? tokensShed)}`
+      : "";
     return {
       content: [{ type: "text", text: feedbackText(matched) + orientation }],
       details: { matched, markerId },

@@ -50,6 +50,7 @@ import { estimateTokens } from "./tokens.js";
 import type { RewindMarker, ShrinkMarker, TurnMetric } from "./markers.js";
 import { appendCancelMarker } from "./markers.js";
 import { shouldHighWater, injectHighWaterNudge, injectNudge, shouldNudge, suppressCheck } from "./nudges.js";
+import { maybeFlushOnCompaction } from "./rewrite-budget.js"; // [v2] compaction-riding flush (free break)
 
 // ── module-private defensive helpers (mirror transforms.ts/notes.ts — never throw) ───
 
@@ -248,6 +249,14 @@ export function contextHandler(
     if (!config.enabled) return; // master switch off → pass-through (do NOT pollute the audit cache)
 
     const rt = getRuntime(sessionId);
+
+    // [v2] FREE-BREAK rider: if the provider re-compacted context since the last fire (a new
+    // `type:"compaction"` entry) and ops are queued, flush them NOW — the prompt cache is already
+    // destroyed by the compaction itself, so activating the queue there costs no extra moment
+    // (flushRewrites(trigger:"compaction") never increments momentsSpent). Runs BEFORE readMarkers
+    // so the flushed markers apply to THIS fire. Never throws (internal try/catch — E13).
+    maybeFlushOnCompaction(pi, ctx, rt);
+
     const markers = readMarkers(ctx); // fresh markers each fire (C12)
     const branchEntries = ctx.sessionManager.getBranch(); // read FRESH (C12); passed to the Pi-free pipeline
 

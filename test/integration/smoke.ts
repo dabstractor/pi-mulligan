@@ -38,11 +38,17 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { makeRewindTool } from "../../src/tools/rewind.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js";
 import { makeCheckpointTool } from "../../src/tools/checkpoint.js";
-import { auditTool, listCheckpoints } from "../../src/tools/audit.js";
+import { listCheckpoints, makeAuditTool } from "../../src/tools/audit.js";
 import { makeAuditCommand } from "../../src/commands.js"; // F-useraudit — the REAL /mulligan_audit handler
 import { appendRewindMarker, type RewindMarkerInput } from "../../src/markers.js";
 import { getRuntime } from "../../src/runtime.js"; // SHARED module instance — same SessionRuntime src mutated
 import { estimateTokens } from "../../src/tokens.js"; // same estimator src uses (chars/4)
+
+// [v1.2] mulligan_audit is a makeAuditTool(pi) factory (flush trigger (b)). The smoke scenarios never
+// queue rewrites, so a no-op pi stand-in keeps the `auditTool.execute(...)` call sites unchanged.
+const auditTool = makeAuditTool(
+  {} as unknown as import("@earendil-works/pi-coding-agent").ExtensionAPI,
+);
 
 // ── Log destination (per-scenario isolation via env; orchestrator sets MULLIGAN_SMOKE_LOG) ───────────
 const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";

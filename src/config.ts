@@ -68,13 +68,34 @@ export interface MulliganConfig {
      *  Default: 3. Source: spec/09-configuration.md §2/§3.
      *  Consumed by P3.M2.T3. */
     staleAfterFires: number;
-    /** Caps the replacement text shown to the operator via ctx.ui.notify when a shrink is recorded —
+    /** Caps the replacement text shown to the operator via ctx.ui.notify when a shrink is recorded –
      *  a pure UI side-channel with ZERO context cost (the tool result itself stays terse). Must be > 0.
      *  Default: 2048. Source: spec/09-configuration.md §3; spec/05-tools.md §2.
      *  Consumed by P1.M2.T1.S2 (the shrink operator echo). */
     notifyMaxChars: number;
     // NOTE: "autoOnBloat" is reserved for a FUTURE opt-in mode and is NOT in v1
     //       (spec/07 §nudges: "Auto-shrink would risk data loss"). Do not add it.
+  };
+
+  /** Context-rewrite budget settings (v1.2 → v2 “cap at one moment”). The unit is the REWRITE
+   *  MOMENT — a turn in which at least one marker becomes active — not tool operations: each
+   *  moment breaks the provider's prompt cache and re-bills the rest of the session at full
+   *  price. Bench: sessions with exactly ONE moment ran 2–13% cheaper than no-tool twins; two or
+   *  more moments ran 16–37% more expensive. There is a cliff between one and two. */
+  rewrites: {
+    /** Max distinct TURNS with marker activation (“moments”) per session. 0 = never create
+     *  markers (ops refuse; audit/cancel still work). Integer >= 0; fractions floor; invalid
+     *  values fall back to the default. Default: 1 (the measured sweet spot). */
+    maxMoments: number;
+    /** PRE-SPEND flush trigger: while the session's allowed moment(s) are unspent, queued ops
+     *  activate together (spending a moment) once the queued ESTIMATED shed volume reaches this
+     *  many tokens (src/tokens.ts estimate; at-threshold flushes). 0 = flush every op immediately
+     *  (the aggressive off-position for the queue). Must be >= 0. Default: 4000. */
+    flushShedTokens: number;
+    /** SAFETY VALVE: if the queued estimated shed volume strictly exceeds this many tokens, spend
+     *  an EXTRA moment and flush even at the cap — pathological sessions must still be able to
+     *  shed. An exception, not a path; must be > 0. Default: 16000. */
+    safetyValveTokens: number;
   };
 
   /** Preventive nudge settings (advisory; ride inferences that were already happening). */
@@ -159,6 +180,11 @@ export const DEFAULT_CONFIG: MulliganConfig = {
     maxActive: 32,
     staleAfterFires: 3,
     notifyMaxChars: 2048,
+  },
+  rewrites: {
+    maxMoments: 1,
+    flushShedTokens: 4000,
+    safetyValveTokens: 16000,
   },
   nudges: {
     bloatReminder: true,
@@ -298,6 +324,24 @@ export function validateConfig(raw: unknown): MulliganConfig {
       }
       v = safeGet(shrinkRaw, "notifyMaxChars");
       if (v !== undefined) cfg.shrink.notifyMaxChars = coerceNumber("shrink.notifyMaxChars", v, cfg.shrink.notifyMaxChars, true);
+    }
+
+    // rewrites.* (v2 — “cap at one moment”). maxMoments: finite number >= 0, floored to an integer
+    // (0 is VALID — the “never create markers” off switch; negatives/garbage → default + warn).
+    // flushShedTokens / safetyValveTokens: finite numbers > 0. The v1 keys (maxPerSession, batching)
+    // are RETIRED: unknown keys are ignored per spec/09 §4, so old settings files fail-open to the
+    // new defaults. All fail-open to defaults.
+    const rewritesRaw = safeGet(raw, "rewrites");
+    if (isRecord(rewritesRaw)) {
+      v = safeGet(rewritesRaw, "maxMoments");
+      if (v !== undefined) {
+        const n = coerceNumber("rewrites.maxMoments", v, cfg.rewrites.maxMoments, false);
+        cfg.rewrites.maxMoments = Number.isFinite(n) && Math.floor(n) >= 0 ? Math.floor(n) : cfg.rewrites.maxMoments;
+      }
+      v = safeGet(rewritesRaw, "flushShedTokens");
+      if (v !== undefined) cfg.rewrites.flushShedTokens = coerceNumber("rewrites.flushShedTokens", v, cfg.rewrites.flushShedTokens, false); // >= 0 (0 = flush immediately)
+      v = safeGet(rewritesRaw, "safetyValveTokens");
+      if (v !== undefined) cfg.rewrites.safetyValveTokens = coerceNumber("rewrites.safetyValveTokens", v, cfg.rewrites.safetyValveTokens, true);
     }
 
     // nudges.*

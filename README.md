@@ -72,7 +72,7 @@ Mulligan reads a `mulligan` object from Pi `settings.json` — the global `~/.pi
 
 ### Defaults table
 
-All 21 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
+All 24 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spec/09-configuration.md` §3).
 
 | Knob | Default | What it does |
 |------|---------|--------------|
@@ -90,6 +90,10 @@ All 21 knobs (source of truth: `src/config.ts` `DEFAULT_CONFIG`; rationale: `spe
 | `shrink.maxActive` | `32` | Cap on simultaneous *active* `mulligan:shrink` markers; the oldest is retired when exceeded. Mirrors `rewind.maxDepth` as a bound on marker accumulation. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
 | `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent for this many consecutive filter fires (`spec/08-edge-cases.md` E15/E21). Stops dead markers being walked every fire. A fractional value floors to a minimum of 1 (silent fallback to the default if it would floor below 1). |
 | `shrink.notifyMaxChars` | `2048` | Caps the replacement text shown to the operator via `ctx.ui.notify` when a shrink is recorded. Pure UI side-channel — **zero context cost** (the tool result itself stays terse). See `spec/05-tools.md` §2. |
+| **rewrites** | | |
+| `rewrites.maxMoments` | `1` | v2 cache-break budget: max **rewrite moments** per session — a moment is a TURN in which at least one marker becomes active (five parallel shrinks in one turn = five operations, ONE moment). Each moment breaks the provider's prompt cache and re-bills the rest of the session at full price; measured sessions with exactly one moment ran 2–13% *cheaper* than no-tool twins, while two or more ran 16–37% more expensive. `0` = never create markers (ops refuse; audit/cancel still work). Fractional values floor; the counter resets on `session_start`. |
+| `rewrites.flushShedTokens` | `4000` | Pre-spend trigger: while the session's moment(s) are unspent, ops queue (inert — no marker, no context change) and activate TOGETHER once the queued **estimated** shed volume (tokens, via the estimator in `src/tokens.ts`) reaches this. Other spend triggers: a second op in the same turn (natural batching), or the model calling `mulligan_audit`. `0` = flush every op immediately (the aggressive off-position). |
+| `rewrites.safetyValveTokens` | `16000` | Safety valve: after the moment budget is spent, further ops only queue and ride **free** breaks (a context compaction, or an audit call). If the queued volume strictly exceeds this, one EXTRA moment is spent anyway — pathological sessions must still be able to shed. |
 | **nudges** | | |
 | `nudges.bloatReminder` | `true` | Annotate a `tool_result` exceeding the byte threshold with a rewind reminder. |
 | `nudges.perTurnDrift` | `true` | Inject a one-line drift nudge when a turn grew past the token threshold. |
@@ -115,6 +119,7 @@ The `mulligan` block is **optional** — omit it entirely for all defaults. Here
   //   "enabled": true,
   //   "rewind": { "maxDepth": 5, "maxRetriesPerPrompt": 5, "abortContextFraction": 0.9 },
   //   "shrink": { "maxActive": 32, "staleAfterFires": 3, "notifyMaxChars": 2048 },
+  //   "rewrites": { "maxMoments": 1, "flushShedTokens": 4000, "safetyValveTokens": 16000 },
   //   "nudges": { "bloatThresholdBytes": 16384, "bloatThresholdBytesByTool": { "read": 24576 }, "driftThresholdTokens": 4000, "driftWindowTurns": 3, "highWaterFraction": 0.7 }
   // }
 }

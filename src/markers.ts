@@ -494,3 +494,68 @@ export function setCheckpoint(
     return { error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+// ── consumeCheckpointLabels: clear ALL currently-active labels for a checkpoint name ────────
+
+/**
+ * consumeCheckpointLabels — clear every CURRENTLY-ACTIVE `mulligan:checkpoint:<name>` label
+ * (spec/05 §3 step 5 "Auto-expiry on consumption (REQUIRED)", extracted VERBATIM from the rewind
+ * tool's step 7b so the v1.2 rewrite-budget flush can replay the SAME consumption when a QUEUED
+ * checkpoint rewind activates — behavior-identical, one implementation).
+ *
+ * Algorithm (the rewind tool's BUG-001 fix, unchanged): (1) collect candidate targetIds from raw
+ * label entries whose label string === needle (a cleared checkpoint still has the historical set
+ * entry in the raw stream); (2) clear each candidate whose CURRENT getLabel(id) still maps to the
+ * needle (Pi's latest-wins map — undefined once a clear entry follows the set). There is NO break:
+ * Pi's labelsById is Map<targetId,label> with NO cross-target uniqueness, so when the same name is
+ * set on two targets BOTH carry the label and BOTH must be cleared or checkpointExists stays true
+ * via the survivor.
+ *
+ * NEVER throws (own try/catch + per-entry/per-candidate try/catch — a label-clear failure must
+ * never undo the rewind; the marker is already persisted by the caller). Writes through `pi.setLabel`
+ * (C9); reads through `ctx.sessionManager` FRESH (C12).
+ *
+ * @param pi   the Pi ExtensionAPI (setLabel lives here).
+ * @param ctx  the Pi ExtensionContext (getEntries/getLabel — read-only, C1).
+ * @param name the checkpoint name (ALREADY validated by the caller); prefixed with
+ *             `mulligan:checkpoint:` exactly as setCheckpoint wrote it.
+ */
+export function consumeCheckpointLabels(pi: ExtensionAPI, ctx: ExtensionContext, name: string): void {
+  try {
+    const needle = `mulligan:checkpoint:${name}`;
+    // (1) collect candidate targetIds whose raw label string === needle (a cleared checkpoint still
+    //     has the historical set entry in the raw stream; getLabel below confirms current activity).
+    //     Set → a target set twice (or cleared-then-reset) is collected once.
+    const candidates = new Set<string>();
+    let entries: unknown;
+    try {
+      entries = ctx.sessionManager.getEntries();
+    } catch {
+      entries = undefined;
+    }
+    if (Array.isArray(entries)) {
+      for (const e of entries) {
+        if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+        try {
+          const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
+          if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
+            candidates.add(ee.targetId);
+          }
+        } catch {
+          // skip a throwing-Proxy entry
+        }
+      }
+    }
+    // (2) clear each candidate whose CURRENT getLabel still maps to the needle (latest-wins; only
+    //     ACTUALLY-active targets are cleared — a historical entry already cleared maps to undefined).
+    for (const id of candidates) {
+      try {
+        if (ctx.sessionManager.getLabel(id) === needle) pi.setLabel(id, undefined);
+      } catch {
+        // E13: a label-clear failure must never undo the rewind (marker already persisted).
+      }
+    }
+  } catch {
+    // E13: a label-clear failure must never undo the rewind (marker already persisted).
+  }
+}

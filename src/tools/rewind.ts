@@ -53,12 +53,14 @@ import {
   type SessionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
-import { appendRewindMarker, leaveNote, type RewindMarkerInput } from "../markers.js"; // GOTCHA #13: .js
+import { appendRewindMarker, leaveNote, consumeCheckpointLabels, type RewindMarkerInput } from "../markers.js"; // GOTCHA #13: .js; consumeCheckpointLabels [v1.2] extracted from step 7b (flush replays it)
 import { validateNote, renderNote, NOTE_INVALID_REASON, type NoteInput } from "../notes.js";
 import { extractFileLedger, type FileLedger } from "../ledger.js";
 import { getConfig, type Granularity } from "../config.js"; // GOTCHA #14: read ONCE at the top of execute
 import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `note` coercion (host edit.js precedent)
 import { getRuntime, type SessionRuntime } from "../runtime.js"; // [P4.M1.T2.S3] latch rewindRefusedTurnIndex
+import { submitRewrite } from "../rewrite-budget.js"; // [v2] moment-capped queueing (queue-first, flush on triggers)
+import { estimateTokens } from "../tokens.js"; // [v1.2] flush-trigger shed estimate (scope: estimation only)
 import { readMarkers } from "../filter.js"; // [P4.M1.T2.S3] readMarkers(ctx).metric?.turnIndex (precedent: audit.ts L51)
 import {
   partitionIntoUnits,
@@ -164,6 +166,12 @@ export interface RewindDetails {
   hideEntryIds?: string[];
   /** The persisted marker's entry id (success path; null/omitted when append returned null). */
   markerId?: string | null;
+  /** [v1.2] true when the op was QUEUED for batched application (no marker, no note yet — the span
+   *  stays visible until a flush activates the whole queue). Present ONLY on the queued path. */
+  queued?: boolean;
+  /** [v1.2] the flush size when queueing this op IMMEDIATELY crossed the flushShedTokens threshold
+   *  (trigger (a)): the batch (incl. this op) activated in the same turn. Present ONLY on that path. */
+  flushed?: number;
 }
 
 /**
@@ -558,7 +566,7 @@ function resolvePreview(
   ctx: ExtensionContext,
   params: RewindArgs,
   toolCallId: string,
-): { ledger: FileLedger; k: number; hideEntryIds: string[] } {
+): { ledger: FileLedger; k: number; hideEntryIds: string[]; shedTokens: number } {
   const entries = ctx.sessionManager.buildContextEntries(); // GOTCHA #5: snapshot, compaction-aware
   // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free
   // structural type with a narrower content-block index signature that TS rejects across the boundary.
@@ -581,7 +589,15 @@ function resolvePreview(
   // against this current snapshot (the correct session state); the captured entry ids are stable forever, so the
   // filter can re-resolve them by identity every later fire (permanent hiding — BUG-001/002 fix).
   const hideEntryIds = captureHideEntryIds(entries, remove);
-  return { ledger, k: remove.length, hideEntryIds };
+  // [v1.2] shed estimate for the flush trigger (a): the summed token estimate of the removed messages
+  // (estimateTokens — src/tokens.ts). ESTIMATION ONLY; it never gates or alters the removal set.
+  // (transforms.MessageLike vs tokens.MessageLike are distinct structural types — cast through unknown
+  // at this single boundary, the established audit.ts idiom.)
+  const shedTokens = remove.reduce(
+    (sum, i) => sum + estimateTokens([messages[i]] as unknown as Parameters<typeof estimateTokens>[0]).tokens,
+    0,
+  );
+  return { ledger, k: remove.length, hideEntryIds, shedTokens };
 }
 
 // ── execute (spec/05 §1 behavior; shared tool convention = never throws — E13) ─────
@@ -717,22 +733,39 @@ async function rewindExecute(
     }
 
     // (5) read-only ledger + K preview (step 5; best-effort — GOTCHA #6). A failure falls back to empty ledger +
-    //     K=0 + STILL succeeds (the marker spec is what matters; the ledger is ADVISORY).
+    //     K=0 + STILL succeeds (the marker spec is what matters; the ledger is ADVISORY). shedTokens is the
+    //     [v1.2] flush-trigger shed estimate (0 on the fallback path).
     let ledger: FileLedger;
     let k: number;
     let hideEntryIds: string[];
+    let shedTokens: number;
     try {
-      ({ ledger, k, hideEntryIds } = resolvePreview(ctx, params, toolCallId));
+      ({ ledger, k, hideEntryIds, shedTokens } = resolvePreview(ctx, params, toolCallId));
     } catch {
       // Snapshot/resolution failure → best-effort: empty ledger + K=0 + hideEntryIds=[] + STILL proceed (E13/E8).
       // (captureHideEntryIds itself doesn't try/catch — a throw inside resolvePreview lands here.)
       ledger = emptyLedger();
       k = 0;
       hideEntryIds = [];
+      shedTokens = 0;
     }
 
     // (6) render note (step 6 — note already validated by step 2; renderNote does NOT re-validate).
     const rendered = renderNote((params.note as NoteInput) ?? ({} as NoteInput), ledger, granularity);
+
+    // (8-computed-early) mutation warning inputs (spec/08 E5) — needed by BOTH the queue path (the
+    //     flushed result text) and the immediate success text. Reads the ledger only; no side effects.
+    const hasWarning =
+      config.rewind.requireMutationWarning &&
+      (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
+
+    // (4d/7) [v2] rewrite budget — "cap at one moment": EVERY op is submitted to the budget
+    //       (queue-first). submitRewrite refuses (maxMoments 0), queues (inert — no marker, no
+    //       note, no context change; rides the next free moment), or applies NOW (a trigger spent
+    //       the moment and flushed the queue; the flush replays the op VERBATIM — marker + note +
+    //       checkpoint-label consumption). Refusals route through refuse() so the [P4.M1.T2.S3]
+    //       drift-nudge mute latch applies. No runtime (E13 fail-open) → the old immediate path,
+    //       unchanged.
 
     // (7) persist (step 7 — GOTCHA #1: checkpoint MUST be in the payload even though the frozen
     //     RewindMarkerInput TYPE omits it; the wrapper spread preserves it at runtime. GOTCHA #2:
@@ -749,67 +782,67 @@ async function rewindExecute(
       hideEntryIds,
       checkpoint: params.checkpoint, // GOTCHA #1: persists even when undefined; spec/04 §3 omits it (cast below)
     };
+
+    if (rt !== null) {
+      const r = submitRewrite(pi, ctx, rt, {
+        kind: "rewind",
+        payload: payload as unknown as Record<string, unknown>,
+        reason: `${granularity} rewind`,
+        renderedNote: rendered,
+        rewindText: { k, hasWarning, granularity },
+        toolCallId, // [v2] leaveNote rewindId fallback inside a flush (GOTCHA #10 parity)
+        estimatedTokens: Math.max(0, shedTokens),
+      });
+      if (r.status === "refused") return refuse(r.reason, granularity);
+      if (r.status === "queued") {
+        // INERT — no marker, no note, no label consumption yet (events mean "now active").
+        // Honest wording: queued, still visible, applies at the next free moment.
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Mulligan: rewind queued — ${r.label} — the span stays fully visible in your context for now ` +
+                "(no change yet, and no note is left). It applies at the next free moment: your next mulligan_audit " +
+                "call, a context compaction, or when the queued batch is worth spending the session's rewrite " +
+                "moment on. Do not try to shed the same span again in the meantime",
+            },
+          ],
+          details: { granularity, k, ledger, hideEntryIds, markerId: null, queued: true },
+        };
+      }
+      // applied — a trigger spent the moment and flushed the queue (incl. this op).
+      // [v2.0 merged] the E22 identical-note advisory rides the applied path too (identicalNote was
+      // computed at step 8 alongside the ledger — the budget path must not silently drop it).
+      const mine = r.flush.applied.length > 0 ? r.flush.applied[r.flush.applied.length - 1] : null;
+      const { text } = successText(granularity, k, hasWarning, identicalNote);
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          granularity,
+          k,
+          ledger,
+          hideEntryIds,
+          markerId: mine ? mine.markerId : null,
+          flushed: r.flush.count,
+        },
+      };
+    }
+
+    // E13 fail-open path (no runtime): the ORIGINAL immediate persistence, unchanged.
     const markerId = appendRewindMarker(pi, ctx, payload as RewindMarkerInput); // cast: frozen type omits checkpoint
     leaveNote(pi, rendered, markerId ?? toolCallId); // GOTCHA #10: entry id; fallback toolCallId
 
     // (7b) checkpoint consumption — spec/05 §3 step 5 ("Auto-expiry on consumption (REQUIRED)").
-    //      ONLY on the checkpoint-granularity success path (step 7 persist + leaveNote already completed).
-    //      A checkpoint label (`mulligan:checkpoint:<name>`) is consumed by the rewind that targets it: clear
-    //      the label so a second rewind by the same name can't re-target stale state (single-source downstream
-    //      effect). Mirrors checkpointExists' pattern EXACTLY (this file, lines ~302-336): (1) collect candidate
-    //      targetIds from raw label entries whose label string === needle; (2) confirm each via
-    //      getLabel(id)===needle (Pi's latest-wins map — undefined once a clear follows the set); (3) clear each
-    //      CURRENTLY-active target. There is NO break: Pi's labelsById is Map<targetId,label> with NO
-    //      cross-target uniqueness, so when the same name is set on two targets BOTH carry the label and BOTH
-    //      must be cleared or checkpointExists stays true via the survivor (BUG-001 — the old
-    //      break-after-first-clear cleared only the oldest target, while resolveCheckpoint targets the newest).
-    //      Defensive inline `(e as {...})` casts + per-entry try/catch (no readOwn/isRecord import — matches
-    //      the file's idiom). E13: best-effort, own try/catch + per-candidate try/catch — a label-clear failure
-    //      must never undo the rewind (the marker is already persisted at step 7).
+    //      [v1.2] the body is EXTRACTED VERBATIM into markers.ts consumeCheckpointLabels (behavior
+    //      unchanged) so the rewrite-budget flush can replay the SAME consumption when a QUEUED
+    //      checkpoint rewind activates. E13: never throws; a label-clear failure must never undo the
+    //      rewind (the marker is already persisted above).
     if (granularity === "checkpoint") {
-      try {
-        const needle = `mulligan:checkpoint:${params.checkpoint}`;
-        // (1) collect candidate targetIds whose raw label string === needle (a cleared checkpoint still has
-        //     the historical set entry in the raw stream; getLabel below confirms current activity). Set → a
-        //     target set twice (or cleared-then-reset) is collected once.
-        const candidates = new Set<string>();
-        let entries: unknown;
-        try {
-          entries = ctx.sessionManager.getEntries();
-        } catch {
-          entries = undefined;
-        }
-        if (Array.isArray(entries)) {
-          for (const e of entries) {
-            if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
-            try {
-              const ee = e as { type?: unknown; label?: unknown; targetId?: unknown };
-              if (ee.type === "label" && ee.label === needle && typeof ee.targetId === "string" && ee.targetId.length > 0) {
-                candidates.add(ee.targetId);
-              }
-            } catch {
-              // skip a throwing-Proxy entry
-            }
-          }
-        }
-        // (2) clear each candidate whose CURRENT getLabel still maps to the needle (latest-wins; only
-        //     ACTUALLY-active targets are cleared — a historical entry already cleared maps to undefined).
-        for (const id of candidates) {
-          try {
-            if (ctx.sessionManager.getLabel(id) === needle) pi.setLabel(id, undefined);
-          } catch {
-            // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
-          }
-        }
-      } catch {
-        // E13: a label-clear failure must never undo the rewind (marker already persisted at step 7).
-      }
+      // (granularity === "checkpoint" implies step 3 verified a non-empty name; the ?? "" fallback is
+      // a defensive no-op — the needle would match no label entries.)
+      consumeCheckpointLabels(pi, ctx, params.checkpoint ?? "");
     }
-
-    // (8) mutation warning (step 7 / E5) — VERBATIM (spec/08 E5) iff configured + the ledger shows side effects.
-    const hasWarning =
-      config.rewind.requireMutationWarning &&
-      (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
 
     // (9) return success (step 8 — K + K=0 honesty via successText).
     const { text } = successText(granularity, k, hasWarning, identicalNote);

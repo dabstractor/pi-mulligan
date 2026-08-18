@@ -22,6 +22,7 @@ describe("DEFAULT_CONFIG", () => {
         requireMutationWarning: true,
       },
       shrink: { enabled: true, maxActive: 32, staleAfterFires: 3, notifyMaxChars: 2048 },           // no autoOnBloat (not v1)
+      rewrites: { maxMoments: 1, flushShedTokens: 4000, safetyValveTokens: 16000 },                 // v2 rewrite budget (moments)
       nudges: {
         bloatReminder: true,
         perTurnDrift: true,
@@ -79,6 +80,7 @@ describe("validateConfig", () => {
       enabled: false,
       rewind: { enabled: false, protectedRoles: ["first:user"], maxDepth: 2, maxRetriesPerPrompt: 5, abortContextFraction: 0.9, requireMutationWarning: false },
       shrink: { enabled: false, maxActive: 8, staleAfterFires: 2, notifyMaxChars: 2048 },
+      rewrites: { maxMoments: 1, flushShedTokens: 4000, safetyValveTokens: 16000 },
       nudges: { bloatReminder: false, perTurnDrift: false, bloatThresholdBytes: 1, driftThresholdTokens: 1, bloatThresholdBytesByTool: { read: 24576 }, driftWindowTurns: 3, highWaterFraction: 0.7 },
       audit: { estimateConfidence: "low" },
       ui: { activeCheckpointBanner: false },

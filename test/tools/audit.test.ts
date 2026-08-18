@@ -31,7 +31,7 @@
  */
 import { describe, it, expect, expectTypeOf, beforeEach, afterEach } from "vitest";
 import {
-  auditTool,
+  makeAuditTool,
   AuditParams,
   AUDIT_DESC,
   describeMessage,
@@ -43,12 +43,17 @@ import {
   type AuditDetails,
   type AuditRow,
 } from "../../src/tools/audit.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// [v1.2] mulligan_audit is now a makeAuditTool(pi) FACTORY (calling it is rewrite-flush trigger (b) —
+// the flush persists through pi). The tests below never queue rewrites, so the captured pi is never
+// touched; a minimal no-op stand-in keeps all `auditTool.execute(...)` call sites unchanged.
+const auditTool = makeAuditTool({ appendEntry() {} } as unknown as ExtensionAPI);
 import { setConfig } from "../../src/config.js";
 import { clearAll, getRuntime } from "../../src/runtime.js";
 import type { RewindMarker } from "../../src/markers.js"; // type-only fixture cast
 import type {
   AgentToolResult,
-  ExtensionAPI,
   ExtensionContext,
   SessionEntry,
   ToolDefinition,

@@ -5,9 +5,10 @@ import { setLogFile } from "./log.js";
 import { resetRuntime, clearAll } from "./runtime.js";
 import { registerFilterHandler } from "./filter.js";
 import { registerBloatReminder, registerTurnEndMetric } from "./nudges.js";
+import { registerRewriteTurnReset } from "./rewrite-budget.js"; // [v2] per-turn op counter reset (natural-batching scope)
 import { makeRewindTool } from "./tools/rewind.js";
 import { makeShrinkTool } from "./tools/shrink.js";
-import { auditTool } from "./tools/audit.js";
+import { makeAuditTool } from "./tools/audit.js"; // [v1.2] FACTORY: mulligan_audit is flush trigger (b) — it captures pi
 import { makeCancelTool } from "./tools/cancel.js"; // 4th agent-callable tool (P3.M1.T3.S1)
 import { makeCheckpointCommand, makeCheckpointRevokeCommand, makeAuditCommand } from "./commands.js"; // 3 human slash commands (P2.M1.T1.S1 + P2.M2.T1.S1)
 import { reconcileBanner } from "./banner.js"; // [P2.M3.T1.S3 / spec/13 §5] restore/refresh the active-checkpoint banner at the refresh points
@@ -49,10 +50,11 @@ export default function (pi: ExtensionAPI): void {
   // 3. Register all 4 agent-callable tools (spec/03 §2.1; v1.1: mulligan_checkpoint moved to a human
   //    slash command — spec/05 §3). rewind/shrink/cancel are FACTORIES capturing `pi` via closure (their
   //    execute() needs pi for appendXxxMarker(pi, …)/leaveNote(pi, …) but execute() does NOT receive pi).
-  //    auditTool is a PLAIN const (audit needs no pi).
+  //    [v1.2] auditTool → makeAuditTool(pi) TOO: calling mulligan_audit is rewrite-flush trigger (b) —
+  //    the flush persists queued markers through pi (appendRewindMarker/appendShrinkMarker/leaveNote).
   pi.registerTool(makeRewindTool(pi));
   pi.registerTool(makeShrinkTool(pi));
-  pi.registerTool(auditTool);
+  pi.registerTool(makeAuditTool(pi));
   pi.registerTool(makeCancelTool(pi)); // 4th tool — marker retraction (P3.M1.T3.S1 / E21)
 
   // 4. Register the 3 human slash commands (spec/13 §2–§4; v1.1 replaces the v1 mulligan_checkpoint
@@ -68,6 +70,7 @@ export default function (pi: ExtensionAPI): void {
   registerFilterHandler(pi); // pi.on("context", contextHandler)          — the filter heart
   registerBloatReminder(pi); // pi.on("tool_result", bloatReminderHandler) — Nudge A
   registerTurnEndMetric(pi); // pi.on("turn_end", …)                       — Nudge B Phase 1
+  registerRewriteTurnReset(pi); // [v2] pi.on("turn_end", …) — zero rt.opsThisTurn (moment/batching bookkeeping)
 
   // 6. session_start → re-read config with the AUTHORITATIVE ctx.cwd on EVERY reason
   //    (startup|reload|new|resume|fork) — fulfills spec/09 §1 ("re-read on /reload"). The factory

@@ -33,6 +33,11 @@ describe("fresh runtime defaults (spec/04 §8 + spec/06 §7)", () => {
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
+      momentsSpent: 0, // [v2] rewrite budget — moments spent, reset with the rest on session_start
+      opsThisTurn: 0, // [v2] ops submitted this turn (natural-batching scope; zeroed on turn_end)
+      activatedThisTurn: false, // [v2] markers already active this turn (same-turn rides are free)
+      compactionWatermark: null, // [v2] compaction-ride watermark (first observation only initializes)
+      rewriteQueue: [], // [v2] queued ops (inert until a flush trigger)
     });
   });
 
@@ -133,6 +138,11 @@ describe("resetRuntime — session_start re-initialization (GOTCHA #6)", () => {
       shrinkMissCounts: new Map(),
       aboveHighWater: false,
       rewindRefusedTurnIndex: null,
+      momentsSpent: 0, // [v2] rewrite budget — cleared with the rest (counters reset on session_start)
+      opsThisTurn: 0, // [v2] ops this turn — cleared with the entry
+      activatedThisTurn: false, // [v2] same-turn activation flag — cleared with the entry
+      compactionWatermark: null, // [v2] compaction watermark — cleared with the entry
+      rewriteQueue: [], // [v2] queued ops — dropped with the entry
     });
   });
 

@@ -180,6 +180,8 @@ src/
   index.ts            // factory: registers tools + handlers, wires config
   config.ts           // load + validate settings; defaults
   markers.ts          // appendEntry/setLabel/sendMessage wrappers + id capture
+  rewrite-budget.ts   // v2.1: per-session rewrite budget — queue-first submit, flush triggers, moment accounting, compaction rider
+  runtime.ts          // per-session in-memory state (Map keyed by sessionId; reset on session_start)
   filter.ts           // the context handler + ordering + fail-open
   transforms.ts       // PURE: resolveRewind, resolveShrink, applyRewind, applyShrink, findToolCallPairs
   ledger.ts           // PURE: extractFileLedger (deterministic read/modified files)

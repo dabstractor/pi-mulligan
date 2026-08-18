@@ -38,15 +38,15 @@ import type {
 
 // GOTCHA (shared with markers.test.ts): nextSeq mutates the SHARED module-scoped runtime map. clearAll() before
 // AND after each test so a previous test's seq can't leak in (appendRewindMarker calls nextSeq internally).
-// ALSO reset the config cache to defaults (setConfig(undefined)) — several tests setConfig({rewind:{enabled:false}})
+// ALSO reset the config cache to defaults (setConfig(undefined)) — several tests setConfig({ rewrites: { flushShedTokens: 0 },rewind:{enabled:false}})
 // or custom maxDepth/requireMutationWarning; without the reset, the poisoned cache leaks into sibling tests.
 beforeEach(() => {
   clearAll();
-  setConfig(undefined); // reset the config cache to validated DEFAULT_CONFIG
+  setConfig({ rewrites: { flushShedTokens: 0 } }); // DEFAULTS except the rewrite budget: contract tests opt out of queueing (0 = flush every op immediately)
 });
 afterEach(() => {
   clearAll();
-  setConfig(undefined);
+  setConfig({ rewrites: { flushShedTokens: 0 } });
 });
 
 // ── the canonical valid note (3 non-empty fields — S3: the former 4th field folded into what_happened) ──
@@ -335,7 +335,7 @@ describe("mulligan_rewind — registration metadata (spec/05 §5)", () => {
 
 describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
   it("config.rewind.enabled === false → refusal text; appendRewindMarker NOT called", async () => {
-    setConfig({ rewind: { enabled: false } });
+    setConfig({ rewind: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { appended, sent, pi } = makePi();
     const { ctx } = makeCtx();
     const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
@@ -346,7 +346,7 @@ describe("mulligan_rewind — refusal: config disabled (step 1; E14)", () => {
   });
 
   it("the disabled refusal does NOT depend on note validity (config gate is step 1, BEFORE note validation)", async () => {
-    setConfig({ rewind: { enabled: false } });
+    setConfig({ rewind: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx();
     const res = await run(pi, ctx, { note: { ...VALID_NOTE, what_happened: "" }, granularity: "last_turn" });
@@ -449,7 +449,7 @@ describe("mulligan_rewind — refusal: depth guard (step 4; E4; default maxDepth
   });
 
   it("honors a custom maxDepth (set via config)", async () => {
-    setConfig({ rewind: { maxDepth: 1 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxDepth: 1 } });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({ entries: [rewindEntry(1)] });
     const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_tool_call_group" });
@@ -670,7 +670,7 @@ describe("mulligan_rewind — mutation warning (spec/08 E5 VERBATIM; requireMuta
   });
 
   it("requireMutationWarning === false → NO warning even when modifiedFiles non-empty", async () => {
-    setConfig({ rewind: { requireMutationWarning: false } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { requireMutationWarning: false } });
     const { pi } = makePi();
     const { ctx } = makeCtx({
       contextEntries: [
@@ -797,7 +797,7 @@ describe("mulligan_rewind — result shape (CRITICAL GOTCHA #4: details on every
   });
 
   it("refusal (disabled): content is [{type:'text', text:string}] AND details present", async () => {
-    setConfig({ rewind: { enabled: false } });
+    setConfig({ rewind: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const res = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
@@ -1018,7 +1018,7 @@ async function shrinkCall(
 // (a) RETRY BUDGET — refuses at exactly the budget with the named text and persists nothing (spec/08 E22 a).
 describe("mulligan_rewind — retry budget: per-prompt cap (P4.M1.T3.S1 / spec/08 E22 a, spec/10 §1.10)", () => {
   it("refuses at exactly the budget (maxRetriesPerPrompt:3) with the named text and persists nothing", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { appended, pi } = makePi();
     // countRetriesAtLatestPrompt: latest user at idx 0 → 3 rewind markers AFTER it → 3 >= 3 → refuse (3/3).
     const { ctx } = makeCtx({
@@ -1034,7 +1034,7 @@ describe("mulligan_rewind — retry budget: per-prompt cap (P4.M1.T3.S1 / spec/0
 // (b) ZERO-HIDE STILL COUNTS — countRetriesAtLatestPrompt counts markers, not what they hid (spec/08 E22 c).
 describe("mulligan_rewind — retry budget: zero-hide markers still count (P4.M1.T3.S1 / spec/08 E22 c)", () => {
   it("a rewind marker that hid nothing still counts toward the budget", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { appended, pi } = makePi();
     // countRetriesAtLatestPrompt does NOT inspect hideEntryIds — it counts customType:"mulligan:rewind"
     // unconditionally. These 3 markers represent zero-hide rewinds; if they did NOT count, the next rewind
@@ -1051,7 +1051,7 @@ describe("mulligan_rewind — retry budget: zero-hide markers still count (P4.M1
 // (c) NEW PROMPT RESETS BUDGET — a later user message makes countRetries find 0 rewinds after it (spec/08 E22 b/g).
 describe("mulligan_rewind — retry budget: a new prompt resets it (P4.M1.T3.S1 / spec/08 E22 b, spec/10 §1.10)", () => {
   it("a LATER user message resets the budget → the next rewind succeeds", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { appended, pi } = makePi();
     // The NEW user message is AFTER the rewind markers → countRetriesAtLatestPrompt finds the NEW user and
     // counts 0 rewinds after it → budget NOT hit → rewind succeeds (persists a marker, possibly K=0).
@@ -1073,7 +1073,7 @@ describe("mulligan_rewind — retry budget: a new prompt resets it (P4.M1.T3.S1 
 // (d) NON-REWIND TOOLS UNAFFECTED — after the budget is hit, mulligan_shrink returns a non-refusal (spec/08 E22 d).
 describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T3.S1 / spec/08 E22 d)", () => {
   it("after the retry budget is hit, mulligan_shrink still returns a non-refusal", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { pi } = makePi();
     const { ctx } = makeCtx({
       entries: [msgEntry(user("budget hit")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
@@ -1096,7 +1096,7 @@ describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T
 describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e, spec/10 §1.10)", () => {
   it("refuses when filtered context ≥ abortContextFraction of the window even though budget remains; shrink still callable", async () => {
     // HIGH budget → (4b) won't fire first; ONLY the context-fraction (4c) refuses here.
-    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
       contextUsage: { contextWindow: 10000 }, // windowTokens=10000 → (4c) is armed (not skipped)
@@ -1123,7 +1123,7 @@ describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e
 // (f) NEVER THROW / NEVER BLOCK TEXT — the guards are defensive; every result is a text block (E13; spec/08 E22 f).
 describe("mulligan_rewind — guards never throw; refusals are always text blocks (P4.M1.T3.S1 / spec/08 E22 f, E13)", () => {
   it("a throwing getEntries → countRetriesAtLatestPrompt returns 0 (no crash); execute resolves to a text result", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { pi } = makePi();
     // throwOnGetEntries makes BOTH countRewindMarkers AND countRetriesAtLatestPrompt return 0 (both defensive)
     // → the rewind passes (4b) and proceeds (may succeed). The assertion is ONLY "no throw + text block".
@@ -1133,7 +1133,7 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
   });
 
   it("a throwing getContextUsage → context-fraction guard skipped (no crash)", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 100, abortContextFraction: 0.9 } });
     const { pi } = makePi();
     // computeFilteredTotal's try/catch → {0,0} → windowTokens:0 → (4c) skipped. No throw either way.
     const { ctx } = makeCtx({ entries: [msgEntry(user("x"))] });
@@ -1145,7 +1145,7 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
   });
 
   it("every refusal result is content:[{type:'text'}] (E13 — never blocks a normal text reply)", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 3 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 3 } });
     const { pi } = makePi();
     const { ctx } = makeCtx({
       entries: [msgEntry(user("x")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
@@ -1164,7 +1164,7 @@ describe("mulligan_rewind — guards never throw; refusals are always text block
 // id-less rewinds (rewindEntry(seq)) are still COUNTED (defensive — never exclude on bad data).
 describe("mulligan_rewind — retry budget: cancelled rewinds excluded (BUG-005 / spec/08 E22)", () => {
   it("a rewind retired by a later mulligan:cancel does NOT consume budget", async () => {
-    setConfig({ rewind: { maxRetriesPerPrompt: 2 } });
+    setConfig({ rewrites: { flushShedTokens: 0 }, rewind: { maxRetriesPerPrompt: 2 } });
     const { appended, pi } = makePi();
     // countRetriesAtLatestPrompt: after the user prompt there are TWO mulligan:rewind markers (rw1, rw2),
     // but rw1 is retired by a mulligan:cancel(targetId=rw1). WITHOUT the fix → count=2 → 2>=2 → refuse.

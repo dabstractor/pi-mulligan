@@ -8,11 +8,12 @@
  * `ctx.getContextUsage()` (which counts already-hidden tokens — bookkeeping drift; D5 / GOTCHA #5).
  *
  * DESIGN (read the gotchas + the PRP):
- * - CRITICAL INSIGHT #1: the audit needs NO `pi` at all (unlike checkpoint/rewind/shrink). Every read goes
+ * - [v1.2] the audit is now a `makeAuditTool(pi)` FACTORY (like its siblings): calling mulligan_audit is
+ *   rewrite-flush trigger (b) — the flush persists queued markers through pi. With an empty queue (the
+ *   common case) pi is never touched; every REPORT read still goes through ctx/pure helpers alone.
+ * - CRITICAL INSIGHT #1 (v1.0 heritage): the audit needs NO `pi` for its READS. Every read goes
  *   through `ctx` (readMarkers + buildContextEntries + getEntries + getBranch) or a pure helper
- *   (estimateTokens / resultBytes / getRuntime / getConfig). There is no `makeAuditTool(pi)` factory and no
- *   module-scoped `pi` — `auditTool` is a PLAIN `export const`. index.ts (P1.M7.T1.S1) does
- *   `pi.registerTool(auditTool)` directly (no factory call).
+ *   (estimateTokens / resultBytes / getRuntime / getConfig).
  * - It is the ONLY tool that reads `rt.lastFiltered` (the filter's cached output, spec/06 §7). Using the
  *   cache avoids re-running filterPipeline on the hot path and guarantees the audit reflects exactly what
  *   the model saw on the last inference (spec/06 §7: "rt.lastFiltered … written by the filter each fire").
@@ -49,6 +50,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { estimateTokens, resultBytes } from "../tokens.js"; // GOTCHA #3: .js extension (ESM/Bundler resolution)
 import { getRuntime } from "../runtime.js"; // primary path: rt.lastFiltered (the cached filtered view)
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"; // [v1.2] the audit tool now captures pi (flush trigger (b))
+import { flushRewrites, type FlushResult } from "../rewrite-budget.js"; // [v1.2] flush queued rewrites — honest moment
 import { getConfig } from "../config.js"; // estimateConfidence + bloatThresholdBytes + protectedRoles
 import { filterPipeline } from "../transforms.js"; // GOTCHA #2: upstream (E16 fallback only)
 import { readMarkers } from "../filter.js"; // GOTCHA #2: upstream (active markers — rewinds/shrinks)
@@ -125,6 +128,9 @@ export interface AuditDetails {
   top: AuditRow[];
   /** Present ONLY on the catch path — the failure reason (the execute never throws; GOTCHA #10). */
   error?: string;
+  /** [v1.2] Present ONLY when this audit call FLUSHED queued rewrites (trigger (b)): the flush size +
+   *  summed estimated shed tokens of the ops that just became active. */
+  flushedRewrites?: { count: number; estimatedTokens: number };
 }
 
 // ── module-private defensive helpers (mirror tokens.ts/filter.ts — never throw) ───────────────
@@ -573,9 +579,11 @@ export function computeFilteredTotal(ctx: ExtensionContext): { totalTokens: numb
  *
  * The WHOLE body is wrapped in ONE try/catch → failure text + details.error (GOTCHA #10: the audit never
  * throws — it sits on the tool hot path; a throwing getEntries()/buildContextEntries()/Proxy trap must not
- * crash the turn). `auditTool` is a PLAIN `export const` (CRITICAL INSIGHT #1) — there is no `pi` here.
+ * crash the turn). [v1.2] `makeAuditTool(pi)` is the FACTORY (the flush trigger needs pi); the report
+ * path itself still touches pi only when a queued batch actually flushes.
  */
 async function auditExecute(
+  pi: ExtensionAPI,
   _toolCallId: string,
   params: Static<typeof AuditParams>,
   _signal: AbortSignal | undefined,
@@ -590,6 +598,18 @@ async function auditExecute(
     if (!config.enabled) return refusal("Mulligan is disabled");
     const sessionId = ctx.sessionManager.getSessionId(); // read FRESH (C12)
     const rt = getRuntime(sessionId);
+
+    // [v1.2] flush trigger (b): the model is asking about its context — the honest moment to apply any
+    //        QUEUED rewrites (they activate TOGETHER, so the cache breaks once). Runs BEFORE the report so
+    //        readMarkers below reflects the activated markers. fail-open: flushRewrites never throws + the
+    //        belt-and-suspenders catch — an audit must never fail because of the flush.
+    let flushed: FlushResult | null = null;
+    try {
+      const f = flushRewrites(pi, ctx, rt, "audit");
+      if (f.count > 0) flushed = f;
+    } catch {
+      /* fail-open: the audit proceeds regardless */
+    }
 
     // (1) Resolve the FILTERED view. NEVER ctx.getContextUsage() (D5 / GOTCHA #5).
     let filtered: Record<string, unknown>[];
@@ -646,19 +666,23 @@ async function auditExecute(
     const checkpointNames = listCheckpoints(ctx.sessionManager.getEntries() as unknown as unknown[]);
 
     // (4) Render the spec/05 §4 report. The suggestion names rows[0].label (omitted if filtered empty).
-    const report = renderAuditReport({
-      totalTokens,
-      confidence,
-      rewinds: markers.rewinds as RewindMarker[],
-      shrinks: markers.shrinks as ShrinkMarker[],
-      checkpointNames,
-      protectedRoles: config.rewind.protectedRoles,
-      rows,
-      filtered,
-      cancelledCount: markers.cancelledIds.size, // P3.M1.T4.S1 — retired-marker count (E21 (c))
-    });
+    //     [v1.2] when this call FLUSHED queued rewrites, append the flush summary (additive line only on
+    //     that path — the pure renderer + its exact-string tests are UNTOUCHED).
+    const report =
+      renderAuditReport({
+        totalTokens,
+        confidence,
+        rewinds: markers.rewinds as RewindMarker[],
+        shrinks: markers.shrinks as ShrinkMarker[],
+        checkpointNames,
+        protectedRoles: config.rewind.protectedRoles,
+        rows,
+        filtered,
+        cancelledCount: markers.cancelledIds.size, // P3.M1.T4.S1 — retired-marker count (E21 (c))
+      }) + (flushed !== null ? `\n\n${flushed.text}` : "");
 
-    // (5) Return. `details` is REQUIRED (CRITICAL GOTCHA #1). Persist NOTHING (no pi.* calls — CRITICAL INSIGHT #1).
+    // (5) Return. `details` is REQUIRED (CRITICAL GOTCHA #1). Persist NOTHING beyond what flushRewrites
+    //     applied ([v1.2] trigger (b) — flushed markers are the queued ops' own payloads, verbatim).
     return {
       content: [{ type: "text" as const, text: report }],
       details: {
@@ -670,6 +694,7 @@ async function auditExecute(
         nCheckpoints: checkpointNames.length,
         nCancelled: markers.cancelledIds.size, // P3.M1.T4.S1 — retired-marker count (E21 (c))
         top: rows,
+        ...(flushed !== null ? { flushedRewrites: { count: flushed.count, estimatedTokens: flushed.estimatedTokens } } : {}),
       },
     };
   } catch (e) {
@@ -692,23 +717,27 @@ async function auditExecute(
   }
 }
 
-// ── The tool definition (PLAIN `export const` — CRITICAL INSIGHT #1: no `pi` factory) ─────────
+// ── The tool definition (a `makeAuditTool(pi)` FACTORY — [v1.2] flush trigger (b) needs pi) ─────────
 
 /**
- * auditTool — the `mulligan_audit` tool definition (spec/05 §4/§5). A PLAIN `export const` (NOT a
- * `makeAuditTool(pi)` factory): the audit needs NO `pi` at all — every read goes through `ctx` or a pure
- * helper (CRITICAL INSIGHT #1). `defineTool` preserves `AuditParams`/`AuditDetails` inference.
+ * makeAuditTool — the `mulligan_audit` tool factory. [v1.2] the audit now CAPTURES `pi` via closure
+ * (like its siblings makeRewindTool/makeShrinkTool/makeCancelTool): calling mulligan_audit is flush
+ * trigger (b) — a queued rewrite batch is activated (persisted) BEFORE the report renders, the
+ * "honest moment to apply". With an empty queue (the common case) pi is never touched — the report
+ * path itself still reads ONLY through ctx/pure helpers. `defineTool` preserves AuditParams/AuditDetails
+ * inference.
  *
- * index.ts (P1.M7.T1.S1) does: `pi.registerTool(auditTool);` (NO factory call — unlike
- * makeCheckpointTool/makeRewindTool/makeShrinkTool which capture `pi`).
- * Unit tests do: `const res = await auditTool.execute("c1", {top:8}, undefined, undefined, fakeCtx);`.
+ * index.ts does: `pi.registerTool(makeAuditTool(pi));`.
+ * Unit tests do: `const tool = makeAuditTool(fakePi); const res = await tool.execute("c1", {top:8}, undefined, undefined, fakeCtx);`.
  */
-export const auditTool: ToolDefinition<typeof AuditParams, AuditDetails> = defineTool({
-  name: "mulligan_audit",
-  label: "Mulligan Audit",
-  description: AUDIT_DESC, // spec/05 §5 VERBATIM
-  parameters: AuditParams,
-  async execute(toolCallId, params, signal, onUpdate, ctx) {
-    return auditExecute(toolCallId, params, signal, onUpdate, ctx);
-  },
-});
+export function makeAuditTool(pi: ExtensionAPI): ToolDefinition<typeof AuditParams, AuditDetails> {
+  return defineTool({
+    name: "mulligan_audit",
+    label: "Mulligan Audit",
+    description: AUDIT_DESC, // spec/05 §5 VERBATIM
+    parameters: AuditParams,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return auditExecute(pi, toolCallId, params, signal, onUpdate, ctx); // pi captured via closure
+    },
+  });
+}

@@ -99,6 +99,59 @@ export interface SessionRuntime {
    *  proceeds). Mirrors aboveHighWater: in-memory, non-persisted; auto-reset to `null` by resetRuntime
    *  (entry deleted on session_start) and clearAll (shutdown). Consumed by filter.ts's drift-nudge guard. */
   rewindRefusedTurnIndex: number | null;
+  /** v2 rewrite budget: distinct TURNS with marker activation ("moments") spent this session.
+   *  A moment = a turn in which at least one marker became active (five parallel shrinks in one
+   *  turn = one moment). Paid flushes (volume/batch/valve triggers) and pre-spend audit flushes
+   *  increment this; compaction-riding flushes never do (the break is already free). Compared
+   *  against config.rewrites.maxMoments. Reset by resetRuntime (session_start). */
+  momentsSpent: number;
+  /** v2 rewrite budget: marker-creating ops submitted THIS TURN (since the last turn_end).
+   *  Drives the natural-batching trigger: the 2nd op in a turn flushes the queue (all ops of
+   *  the turn activate together — one moment for the whole batch). Reset by the turn_end
+   *  handler registered from src/rewrite-budget.ts. */
+  opsThisTurn: number;
+  /** v2 rewrite budget: whether a flush already ACTIVATED markers THIS TURN (since the last
+   *  turn_end). Same-turn follow-up ops ride it: they flush immediately without spending a NEW
+   *  moment (a moment is a TURN with activation — the 5-parallel-shrinks case is ONE moment).
+   *  Set by every flush; reset by the turn_end handler alongside opsThisTurn. */
+  activatedThisTurn: boolean;
+  /** v2 rewrite budget: count of `type:"compaction"` entries last observed on the branch
+   *  (the compaction-ride watermark). When the count INCREASES while ops are queued, the
+   *  queue flushes (the provider cache is already destroyed by compaction — a free break).
+   *  null = not yet initialized (the first observation only initializes; it never flushes). */
+  compactionWatermark: number | null;
+  /** v2 rewrite batching: ops not yet active, waiting for a flush trigger (shed volume over
+   *  flushShedTokens, a second op this turn, an audit call, a compaction, or the safety
+   *  valve). Each fresh runtime gets its OWN array (GOTCHA #5). A queued op is INERT — no
+   *  marker, no event — until flushRewrites activates it. */
+  rewriteQueue: QueuedRewrite[];
+}
+
+/**
+ * QueuedRewrite — one deferred marker-creating operation (v1.2 batching). Carries EVERYTHING the
+ *  flush needs to replay the op verbatim at activation time (scope guard: WHAT gets shed, target
+ *  resolution, and note format are the tool's own — captured at queue time, unchanged):
+ *  - kind "shrink": payload + reason (telemetry only) + estimated shed tokens.
+ *  - kind "rewind": payload (incl. checkpoint + hideEntryIds + excludeToolCallId), the RENDERED note
+ *    text (rendered at queue time — the resumed model must read the note the queuing model wrote),
+    *    ledger/hideEntryIds/k/granularity (for the post-flush result text), reason, estimated shed tokens.
+ *  estimatedTokens = the op's ESTIMATED SHED VOLUME (what the op removes from context), used for
+ *  flush trigger (a): the queued total exceeding flushShedTokens.
+ */
+export interface QueuedRewrite {
+  kind: "shrink" | "rewind";
+  /** The exact marker payload the tool built (ShrinkMarkerInput / RewindMarkerInput + checkpoint). */
+  payload: Record<string, unknown>;
+  /** Telemetry/audit short reason (config.reason for shrink; "<granularity> rewind" for rewind). */
+  reason?: string;
+  /** The RENDERED note text (rewind only) — left as the mulligan:note CustomMessage at flush. */
+  renderedNote?: string;
+  /** Rewind success-text inputs (rewind only): k, hasWarning, granularity. */
+  rewindText?: { k: number; hasWarning: boolean; granularity: string };
+  /** The op's own toolCallId (rewind only) — the leaveNote rewindId fallback at flush time. */
+  toolCallId?: string;
+  /** Estimated shed volume in tokens (estimateTokens over the target messages at queue time). */
+  estimatedTokens: number;
 }
 
 /**
@@ -125,6 +178,11 @@ function freshRuntime(sessionId: string): SessionRuntime {
     shrinkMissCounts: new Map(),
     aboveHighWater: false,
     rewindRefusedTurnIndex: null,
+    momentsSpent: 0,
+    opsThisTurn: 0,
+    activatedThisTurn: false,
+    compactionWatermark: null,
+    rewriteQueue: [],
   };
 }
 

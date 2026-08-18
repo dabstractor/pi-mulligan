@@ -191,7 +191,7 @@ function toolResult(toolCallId: string, toolName: string, text: string): Record<
 // ── registration metadata (spec/05 §5: name/label/description/parameters) ────
 
 describe("mulligan_shrink — registration metadata (spec/05 §5)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("name === 'mulligan_shrink', label === 'Mulligan Shrink', description === SHRINK_DESC verbatim", () => {
     const { pi } = makePi();
@@ -221,7 +221,7 @@ describe("mulligan_shrink — registration metadata (spec/05 §5)", () => {
 // ── config-disabled refusal (spec/05 §2 step 1; spec/08 E14) ────────────────
 
 describe("mulligan_shrink — config-disabled refusal (spec/05 §2 step1; E14)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: false } }));
+  beforeEach(() => setConfig({ shrink: { enabled: false }, rewrites: { flushShedTokens: 0 } }));
 
   it("refuses with 'shrink is disabled' and does NOT call appendShrinkMarker", async () => {
     const { appended, pi } = makePi();
@@ -247,7 +247,7 @@ describe("mulligan_shrink — config-disabled refusal (spec/05 §2 step1; E14)",
 // ── empty-replacement refusal (spec/05 §2 step 2) ───────────────────────────
 
 describe("mulligan_shrink — empty-replacement refusal (spec/05 §2 step2)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it.each([
     ["empty string", ""],
@@ -266,7 +266,7 @@ describe("mulligan_shrink — empty-replacement refusal (spec/05 §2 step2)", ()
 // ── structurally-impossible-target refusal (spec/05 §2 step 3; GOTCHA #7) ───
 
 describe("mulligan_shrink — structurally-impossible-target refusal (spec/05 §2 step3; GOTCHA #7)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it.each([
     ["by_tool_call_id empty", { by_tool_call_id: "" }],
@@ -296,7 +296,7 @@ describe("mulligan_shrink — structurally-impossible-target refusal (spec/05 §
 // ── best-effort match: YES for EACH matcher + persistence payload (spec/05 §2 step 3/4/5; spec/04 §4) ────
 
 describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + persistence payload", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("by_tool_call_id: matched:yes; persists the marker with {target, replacement} stamped with envelope+id+seq+ts", async () => {
     const { appended, pi } = makePi();
@@ -364,6 +364,10 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
   });
 
   it("FINDING 3: matched → marker.pinnedEntryId === the matched ENTRY id (pinned shrink), per matcher", async () => {
+    // [v1.2] this test creates FOUR markers in ONE session (one per matcher block) — raise the
+    // per-session rewrite cap so all four persist immediately (the cap itself is unit-tested in
+    // test/rewrite-budget.test.ts).
+    setConfig({ rewrites: { flushShedTokens: 0 } });
     // by_tool_call_id → the single matched entry
     {
       const e = msgEntry("toolResult", toolResult("call-A", "read", "x"));
@@ -438,7 +442,9 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
 // ── v2.0 no-in-turn-match hard refusal + best-effort failure (spec/05 §2 step3; spec/08 E8/E13) ────────
 
 describe("mulligan_shrink — v2.0 no-in-turn-match hard refusal + best-effort failure (E8/E13)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  // [r1v2 merged] flushShedTokens 0 = flush every op immediately: keeps these single-op v2.0
+  // refusal/persistence tests on the IMMEDIATE path (never queued) under the moment-cap budget.
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("v2.0: by_tool_call_id with no IN-TURN match → HARD REFUSAL (exact text), nothing persisted", async () => {
     const { appended, pi } = makePi();
@@ -485,7 +491,7 @@ describe("mulligan_shrink — v2.0 no-in-turn-match hard refusal + best-effort f
 // ── never-throws (shared tool convention; GOTCHA #5/E13) ─────────────────────
 
 describe("mulligan_shrink — never throws (spec/05 shared tool convention; GOTCHA #5/E13)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("a throwing getSessionId (inside appendShrinkMarker → returns null) → tool STILL succeeds with markerId:null", async () => {
     const { appended, pi } = makePi();
@@ -552,7 +558,7 @@ describe("mulligan_shrink — never throws (spec/05 shared tool convention; GOTC
 // ── result shape (incl. `details` on EVERY path — CRITICAL GOTCHA #4) ────────
 
 describe("mulligan_shrink — result shape (CRITICAL GOTCHA #4: `details` REQUIRED on every path)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("success: content is [{type:'text', text:string}] AND details present", async () => {
     const { pi } = makePi();
@@ -566,7 +572,7 @@ describe("mulligan_shrink — result shape (CRITICAL GOTCHA #4: `details` REQUIR
   });
 
   it("refusal (disabled): content is [{type:'text', text:string}] AND details present", async () => {
-    setConfig({ shrink: { enabled: false } });
+    setConfig({ shrink: { enabled: false }, rewrites: { flushShedTokens: 0 } });
     const { pi } = makePi();
     const { ctx } = makeCtx();
     const res = await run(pi, ctx, { target: { by_tool_call_id: "x" }, replacement: "y" });
@@ -643,7 +649,8 @@ describe("mulligan_shrink — types (ToolDefinition + ShrinkParams inference)", 
 // ── v2.0 current-turn scoping lock (R2 — P1.M2.T2.S1 cases a–d) ─────────────
 
 describe("mulligan_shrink — v2.0 current-turn scoping (R2 lock)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  // [r1v2 merged] flushShedTokens 0 keeps these scoping tests on the IMMEDIATE path (no queueing).
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   // (a) a toolResult that lives ONLY before the last user message → HARD refusal, exact text, zero persistence
   it("(a) by_tool_call_id matching only an EARLIER turn → exact hard refusal; nothing persisted", async () => {
@@ -757,6 +764,8 @@ describe("mulligan_shrink — schema (typebox) rejects the removed content arm (
 });
 
 describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", () => {
+  // [r1v2 merged] flushShedTokens 0 keeps these on the IMMEDIATE path (no queueing).
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
   // shared matched:yes setup — clone of the by_tool_call_id matched case (see L279-289).
   // hasUI defaults to true (matches ctx.hasUI in TUI/RPC modes).
   const matchedYes = ({ hasUI = true }: { hasUI?: boolean } = {}) => {
@@ -834,7 +843,7 @@ function expectedShed(origText: string, replacement: string): number {
 }
 
 describe("mulligan_shrink — v1.2 orientation line (fixed final line on ACTIVE activation; guard)", () => {
-  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+  beforeEach(() => setConfig({ shrink: { enabled: true }, rewrites: { flushShedTokens: 0 } }));
 
   it("shrinkOrientationLine: EXACT bench-stable text — single (k=1) AND aggregate (k>1) forms", () => {
     // single form (every shrink activation today). Literal-string assertion: this line is the contract.
@@ -892,7 +901,7 @@ describe("mulligan_shrink — v1.2 orientation line (fixed final line on ACTIVE 
     }
     // (b) shrink sub-feature disabled (E14)
     {
-      setConfig({ shrink: { enabled: false } });
+      setConfig({ shrink: { enabled: false }, rewrites: { flushShedTokens: 0 } });
       const { pi, ctx } = mk();
       const res = await run(pi, ctx, { target: { by_tool_call_id: "c1" }, replacement: "X" });
       expect(firstText(res)).toMatch(/^Mulligan: refused — shrink is disabled\.$/);

@@ -35,6 +35,12 @@
       // "autoOnBloat": false         // NOT in v1; reserved. Auto-shrink would risk data loss.
     },
 
+    "rewrites": {
+      "maxMoments": 1,                  // v2.1: max TURNS-with-marker-activation ("moments") per session. 0 = never create markers.
+      "flushShedTokens": 4000,          // v2.1: pre-spend flush trigger — queued ops activate together once their estimated shed volume reaches this
+      "safetyValveTokens": 16000        // v2.1: safety valve — queued volume STRICTLY above this spends an extra moment even at the cap
+    },
+
     "nudges": {
       "bloatReminder": true,          // tool_result annotation when a result exceeds threshold
       "perTurnDrift": true,           // context-annotation when a turn grew past threshold
@@ -77,6 +83,9 @@
 | `shrink.maxActive` | `32` | Bounds long-session filter cost and marker accumulation; the oldest shrink is retired when exceeded. Mirrors `rewind.maxDepth`. |
 | `shrink.staleAfterFires` | `3` | Auto-retire a pinned shrink whose target has been absent this many consecutive fires (`@08-edge-cases.md` E15/E21). Stops dead markers from being walked every fire. |
 | `shrink.notifyMaxChars` | `2048` | Caps the replacement text shown to the operator via `ctx.ui.notify` when a shrink is recorded. Pure UI side-channel — **zero context cost** (the tool result itself stays terse). `@05-tools.md` §2. |
+| `rewrites.maxMoments` | `1` | v2.1: max distinct **turns with marker activation** ("moments") per session. A moment = one cache break that re-bills the session tail; the bench shows a cliff between one and two moments (1 moment: −2…−13% vs no-tool twins; 2+: +16…+37%). 0 = never create markers (ops refuse; `mulligan_audit`/`mulligan_cancel` still work). The unit is MOMENTS, not tool operations — the model batches parallel calls into one turn, so an operation cap never binds. (`@05` §1/§2, `@08` E28.) |
+| `rewrites.flushShedTokens` | `4000` | v2.1: pre-spend flush trigger — while the session's allowed moment(s) are unspent, queued ops activate together (spending a moment) once the queued ESTIMATED shed volume (`src/tokens.ts` estimate, summed across the queue) REACHES this many tokens. 0 = flush every op immediately (the aggressive off-position for the queue). Must be ≥ 0. |
+| `rewrites.safetyValveTokens` | `16000` | v2.1: safety valve — if the queued estimated shed volume STRICTLY exceeds this many tokens, spend an EXTRA moment and flush even at the cap: pathological sessions must still be able to shed. An exception, not a path. Must be > 0. |
 | `nudges.bloatReminder` | `true` | Advisory; cheap; co-located with the problem. High value. |
 | `nudges.perTurnDrift` | `true` | The signature "free ride" mechanism; cheap. High value. |
 | `nudges.bloatThresholdBytes` | `16384` (16 KB) | Global catch-all for tools without a per-tool override. Raised from 8 KB after observation: the 8 KB default nagged on every routine source-file read (9–17 KB) — i.e. it fired on results the agent still needed. 16 KB lets a typical source file through while still catching genuinely catastrophic results (the 50 KB un-redirected `grep`, etc.). |
@@ -97,6 +106,7 @@
 - `estimateConfidence`: must be one of `"low"|"medium"|"high"`; else default.
 - `log.file`: if set, must be a string; opening is deferred to first write (and wrapped — a bad path must not crash the extension).
 - `ui.activeCheckpointBanner`: boolean (coerce with `!!`); invalid → default `true`.
+- `rewrites.*` (v2.1): `maxMoments` — finite number ≥ 0, floored to an integer (fractions floor; invalid → default 1). `flushShedTokens` — finite number ≥ 0 (0 = flush every op immediately; invalid → default). `safetyValveTokens` — finite number > 0 (invalid → default). The earlier v1 keys (`maxPerSession`, `batching`) are **no longer valid** — queue-first is unconditional and the budgeted unit is moments; they are ignored if present.
 - `rewind.maxRetriesPerPrompt`: integer ≥ 1; non-integer or `<1` → default.
 - `rewind.abortContextFraction`: number in (0,1]; out of range or non-number → default.
 - On any per-field validation failure: log a warn naming the field and the value, use the default, continue. **Never throw.**

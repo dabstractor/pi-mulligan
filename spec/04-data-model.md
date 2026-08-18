@@ -291,6 +291,27 @@ interface SessionRuntime {
   seq: number;                       // monotonic marker counter; persisted INTO each marker
   tokenBaseline: number | null;      // for turn metric delta
   lastTurnIndex: number | null;
+  // v2.1 rewrite budget (queue-first, "cap at one moment"):
+  momentsSpent: number;              // distinct TURNS-with-marker-activation spent this session; compared against rewrites.maxMoments
+  opsThisTurn: number;               // marker-creating ops submitted this turn; the 2nd+ op flushes the queue (natural batching)
+  activatedThisTurn: boolean;        // a flush already activated markers THIS TURN; same-turn follow-up ops ride it for free
+  compactionWatermark: number | null;// count of "compaction" entries last observed; an INCREASE while ops are queued → free-break flush (null = not yet initialized)
+  rewriteQueue: QueuedRewrite[];     // ops not yet active, waiting for a flush trigger — INERT until flushRewrites activates them
+}
+
+// v2.1: one deferred marker-creating op. Carries EVERYTHING the flush needs to replay the op
+// verbatim (scope guard: WHAT gets shed, target resolution, and note format stay the tool's own,
+// captured at queue time). estimatedTokens = the op's ESTIMATED SHED VOLUME (what it removes
+// from context), summed across the queue for the volume trigger and the safety valve.
+interface QueuedRewrite {
+  kind: "shrink" | "rewind";
+  payload: Record<string, unknown>;  // the EXACT marker payload the tool built (incl. checkpoint / hideEntryIds / pinnedEntryId)
+  reason?: string;                   // short telemetry/audit reason
+  renderedNote?: string;             // rewind only: the RENDERED note (rendered at queue time — the resumed model must read
+                                     //   the note the queuing model wrote), flushed as the mulligan:note CustomMessage
+  rewindText?: { k: number; hasWarning: boolean; granularity: string }; // rewind success-text inputs
+  toolCallId?: string;               // rewind only: leaveNote rewindId fallback inside a flush
+  estimatedTokens: number;           // ≥ 0; drives flushShedTokens + safetyValveTokens
 }
 ```
 
@@ -310,7 +331,7 @@ interface LogLine {
 }
 ```
 
-The logger is the primary observability surface in non-TUI modes and is what the test suite asserts against (`@10-testing.md`).
+The logger is the primary observability surface in non-TUI modes and is what the test suite asserts against (`@10-testing.md`). v2.1 adds two events (additive; existing events unchanged): `mulligan:rewrite-queued` `{kind, reason, estimatedTokens, queued}` when an op is stored inert, and `mulligan:rewrite-flush` `{count, estimatedTokens, trigger, momentsSpent}` when a flush activates the queue (trigger ∈ `volume | batch | valve | audit | compaction`).
 
 ## 10. Cross-references
 

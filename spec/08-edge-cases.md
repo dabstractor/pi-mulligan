@@ -154,8 +154,20 @@
 - **Required behavior (REQUIRED):** every tool whose schema has an OBJECT-typed parameter MUST register a `ToolDefinition.prepareArguments` shim that JSON-parses each listed key's value when it is a string, replacing it with the parsed value **only if** that value is a non-null, non-array object (the only shape an object-typed schema accepts). Malformed JSON, arrays, and scalars are passed through untouched so the host's normal validation still reports them honestly (clear schema errors, never a silent swallow). Implementation: `src/prepare-args.ts` `prepareObjectArgs<T>(keys)`, wired into the three object-param tools — `mulligan_rewind` (`note`), `mulligan_shrink` (`target`), `mulligan_cancel` (`target`, whose union is structurally identical to shrink's). Scalar-only tools (`mulligan_audit`) are immune and carry no shim.
 - **Acceptance:** (a) a JSON-string object param on any of the three tools is accepted and behaves identically to a proper-object call; (b) a proper-object call is unchanged; (c) a malformed JSON string, or a JSON value that is an array/scalar/null, is **not** coerced — it fails validation with a clear schema error; (d) the shim never throws (E13); (e) regression tests run the exact host pipeline (`prepareArguments` → `Value.Convert` → `Compile.Check`) on the literal field-report args, all three `anyOf` arms, markerId-only cancel calls (no `target` → pass-through), and proper-object passthrough.
 
+## E28. Rewrite budget — queueing, moments, and the safety valve (v2.1)
+
+- **Situation:** the session's budget of cache-breaking activation turns (`rewrites.maxMoments`, default 1) is the bound on marker creation. An op may be QUEUED inert (no marker, no note, no event, content fully visible) until a flush trigger activates the whole queue at once.
+- **Required behavior:**
+  - `maxMoments = 0`: every marker-creating op (rewind/shrink) refuses with text pointing to `mulligan_audit`; audit and cancel still work (they are not ops).
+  - Queue-first: EVERY op is queued, then triggers decide: queued volume reaches `flushShedTokens` (while a moment is unspent), 2nd+ op this turn (natural batching), `mulligan_audit` (honest moment), a NEW compaction entry (free break — never spends a moment), queued volume strictly above `safetyValveTokens` (valve exception — spends an EXTRA moment even at the cap). Volume alone NEVER opens a second moment after the cap is spent. **Never auto-flush at shutdown.**
+  - Same-turn ride: ops arriving after a flush already activated markers THIS TURN flush immediately without a new moment (five parallel shrinks = one moment).
+  - **Honesty (hard requirement):** a queued op emits NO `mulligan:shrink`/`mulligan:rewind` activation event and its tool result must say the content is still fully visible; "Context updated" must not lie.
+  - **Flush crash-safety:** the queue is drained BEFORE appending (a crash mid-flush must not re-activate the same ops — `appendEntry` always appends); a per-op failure does not stop the batch (fail-open per op), and flushed ops leave the queue regardless of append success.
+  - **Fail-open (E13):** any throw inside submit/flush degrades to apply-immediately — the budget must never block a legitimate op or crash a turn on a bookkeeping bug. No session runtime → apply immediately, no bookkeeping.
+- **Acceptance:** see `@10-testing.md` §1.13 — queue-vs-apply under each trigger, refusal at `maxMoments=0`, per-session counter reset, moment accounting per trigger, config fail-open.
+
 ## Cross-references
 - Filter algorithms that implement these behaviors → `@06-context-filter.md`
 - Tool refusal conditions → `@05-tools.md`
 - Proven host-validation constraint underpinning E27 → `@02-proven-constraints.md` C13
-- Config knobs referenced (maxDepth, maxRetriesPerPrompt, abortContextFraction, thresholds, protect) → `@09-configuration.md`
+- Config knobs referenced (maxDepth, maxRetriesPerPrompt, abortContextFraction, thresholds, protect, rewrites.*) → `@09-configuration.md`
