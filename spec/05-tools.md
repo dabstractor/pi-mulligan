@@ -126,12 +126,18 @@ const ShrinkParams = Type.Object({
 
 ### Return shape
 ```ts
-{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched: yes/no." }] }
+{ content: [{ type:"text", text: "Mulligan: shrink recorded. Matched: yes/no.\nContext updated: 1 result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed." }] }
 // The replacement is NOT echoed in the result. Echoing it would place a second
 // copy in the model's context — defeating the tool's entire purpose. The operator
 // sees the extracted summary via ctx.ui.notify (behavior step 5) at ZERO context
 // cost; the model sees only this terse line, then the replacement applied to the
-// target message on the next turn.
+// target message on the next turn. The SECOND line is the v1.2 re-orientation guard
+// (bench-stable, exact): it is appended as the FINAL line on every ACTIVE-activation
+// path — a persisted marker (k=1 here; a future batched flush emits it once with the
+// aggregate k/t) — so the resumed model does not spend turns re-orienting (the bench
+// measured +2.4 requests/event without it). Refusals and failed appends never carry
+// it (nothing was activated). ~<t> is the NET chars/4 estimate of original minus
+// replacement, floored at 0.
 ```
 
 ### Behavior
@@ -146,6 +152,12 @@ if (ctx.hasUI) ctx.ui.notify(
   "info");
 ```
 Guard with `ctx.hasUI` (no-op in print/JSON mode — there is no user to show). The tool RESULT (returned to the model) stays terse — the model does not need its own summary echoed back. `config.shrink.notifyMaxChars` (default **2048**) caps the toast for *UI ergonomics only* (not context); over-cap, append `…(<N> chars total)`. **Why not echo in the result / `sendMessage`:** both enter the model's context. `ctx.ui.notify` is the only user-facing channel that costs zero tokens — the whole point of the tool is to reduce context, so the summary must reach the human without re-entering the model's view.
+6. **Return with the re-orientation guard (v1.2, REQUIRED):** the result is the terse feedback line, then — **iff the marker persisted** (`appendShrinkMarker` returned an entry id) — a FIXED final line, verbatim:
+```
+Mulligan: shrink recorded. Matched: <yes|no>.
+Context updated: 1 result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.
+```
+   The second line is **exact and bench-stable** (a grep contract — do not reword; the exported `shrinkOrientationLine` helper is its single source, so a future batched flush emits the same line once with aggregate `k`/`t` instead of a variant). `~<t>` = NET `estimateTokens` (chars/4) of the matched original minus the replacement, floored at 0 — a persisted-but-currently-unmatched target reports `~0` (the filter live-resolves it later). A failed append persists nothing, so the line MUST NOT appear there; refusal paths (steps 1–3) never reach this step: **"Context updated" must not lie.** Rationale: a bench campaign measured losing sessions averaging **+2.4 requests per rewrite event** re-orienting (re-reading files, re-verifying state); one stable imperative cue at the rewrite point removes that churn. Rewind is deliberately exempt — its orientation travels in the structured self-authored note (`@04-data-model.md` §2.1), which is unchanged.
 
 The filter applies shrinks **after** rewinds and substitutes content in place, preserving `role:"toolResult"`, `toolCallId`, `toolName`, `isError` so the tool pairing invariant holds (C-pairing). Only the `content` array is replaced — and it is wrapped in a render-time `<context-shrunk>` awareness stamp (`@06-context-filter.md` §5.1) so the model has a durable, in-context signal that this message was shrunk and will not redundantly re-shrink already-compact content. The tool result itself stays terse (the stamp is added by the filter at render time, not by the tool); the persisted `replacement` field stays raw.
 

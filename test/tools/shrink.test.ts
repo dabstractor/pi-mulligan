@@ -26,9 +26,11 @@ import {
   makeShrinkTool,
   ShrinkParams,
   SHRINK_DESC,
+  shrinkOrientationLine,
   type ShrinkArgs,
   type ShrinkDetails,
 } from "../../src/tools/shrink.js";
+import { estimateTokens } from "../../src/tokens.js"; // the SAME estimator the tool uses (v1.2 ~<t> numbers)
 import { setConfig } from "../../src/config.js";
 import { clearAll } from "../../src/runtime.js";
 import type {
@@ -284,8 +286,11 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
     const replacement = "(shrink) the big log was ~9k tokens; the bug is on line 42.";
     const res = await run(pi, ctx, { target, replacement });
 
-    // feedback text VERBATIM (spec/05 §2) with the yes slot filled
-    expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+    // feedback text (spec/05 §2) with the yes slot filled, ENDING with the v1.2 orientation line (exact, k=1,
+    // ~<t> = NET shed via the same estimator — see the v1.2 describe block below)
+    expect(firstText(res)).toBe(
+      `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed("big log...", replacement))}`,
+    );
     expect(res.details).toEqual({ matched: true, markerId: "leaf-9" });
 
     // persistence payload (spec/04 §4; appendShrinkMarker stamps envelope + id + seq + ts over the caller payload)
@@ -648,7 +653,9 @@ describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", ()
     const { pi, ctx, target } = matchedYes();
     const replacement = "COMPACT-9f2a only keep the summary"; // distinctive; must NOT appear in the result
     const res = await run(pi, ctx, { target, replacement });
-    expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+    expect(firstText(res)).toBe(
+      `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed("big log...", replacement))}`,
+    );
     // echoing the replacement into the result would re-bloat context — the tool's whole purpose. Guard it:
     expect(firstText(res)).not.toContain(replacement);
   });
@@ -660,7 +667,9 @@ describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", ()
     {
       const { pi, ctx, notifyCalls } = matchedYes({ hasUI: true });
       const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
-      expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+      expect(firstText(res)).toBe(
+        `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed("big log...", replacement))}`,
+      );
       expect(notifyCalls).toHaveLength(1);
       expect(notifyCalls[0].message).toContain(replacement); // replacement is in the toast
       expect(notifyCalls[0].type).toBe("info");
@@ -670,7 +679,9 @@ describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", ()
     {
       const { pi, ctx, notifyCalls } = matchedYes({ hasUI: false });
       const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
-      expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes.");
+      expect(firstText(res)).toBe(
+        `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed("big log...", replacement))}`,
+      );
       expect(notifyCalls).toHaveLength(0);
     }
   });
@@ -684,5 +695,114 @@ describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", ()
     expect(notifyCalls[0].message).toContain(`…(${replacement.length} chars total)`);
     // the FULL uncapped replacement is NOT in the toast (it was actually truncated to 2048 chars):
     expect(notifyCalls[0].message).not.toContain(replacement);
+  });
+});
+
+// ── v1.2 re-orientation guard: the FIXED final line on every ACTIVE-activation path (bench-stable) ────────────
+
+/**
+ * Mirror of the tool's v1.2 NET-shed arithmetic (shrink.ts): max(0, estimateTokens(original) - estimateTokens(replacement)).
+ * The toolResult fixture's content is ONE text block, and messageCharLength counts content ONLY (role/toolCallId/
+ * toolName contribute nothing), so a bare {content:[{type:"text",text}]} estimates identically. Using the SAME
+ * estimateTokens keeps the expected numbers deterministic without re-implementing the heuristic.
+ */
+function expectedShed(origText: string, replacement: string): number {
+  const orig = estimateTokens([{ content: [{ type: "text", text: origText }] }]).tokens;
+  const repl = estimateTokens([{ content: replacement }]).tokens;
+  return Math.max(0, orig - repl);
+}
+
+describe("mulligan_shrink — v1.2 orientation line (fixed final line on ACTIVE activation; guard)", () => {
+  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+
+  it("shrinkOrientationLine: EXACT bench-stable text — single (k=1) AND aggregate (k>1) forms", () => {
+    // single form (every shrink activation today). Literal-string assertion: this line is the contract.
+    expect(shrinkOrientationLine(1, 42)).toBe(
+      "Context updated: 1 result(s) summarized (~42 tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.",
+    );
+    // aggregate form — the BATCHED/FLUSH seam (reserved for future work): the flush result carries the
+    // SAME line ONCE with aggregate numbers. Locked here so the flush cannot drift to a variant.
+    expect(shrinkOrientationLine(3, 1250)).toBe(
+      "Context updated: 3 result(s) summarized (~1250 tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.",
+    );
+  });
+
+  it("single ACTIVE activation (matched:yes, persisted): the line is the FINAL line with NET ~<t> (orig minus replacement)", async () => {
+    const { pi } = makePi();
+    const origText = "X".repeat(4000); // 4000 chars / 4 = 1000 tokens
+    const { ctx } = makeCtx({
+      contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", origText))],
+    });
+    const replacement = "compact"; // ceil(7/4) = 2 tokens → NET 998
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
+    expect(expectedShed(origText, replacement)).toBe(998); // pin the arithmetic
+    expect(firstText(res)).toBe(
+      `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, 998)}`,
+    );
+    // the line ENDS the tool result (the resumed model's last-read cue) — full-equality above already proves it;
+    // endsWith makes the intent explicit for future edits:
+    expect(firstText(res).endsWith(shrinkOrientationLine(1, 998))).toBe(true);
+  });
+
+  it("matched:no STILL persists (E8) → the marker IS ACTIVE → line present with ~0 (nothing shed YET; the filter live-resolves)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ contextEntries: [msgEntry("user", { content: "hi" })] });
+    const res = await run(pi, ctx, { target: { by_content_includes: "not-present-anywhere" }, replacement: "compact" });
+    expect(appended).toHaveLength(1); // persisted → ACTIVE (live resolution at filter time)
+    expect(firstText(res)).toBe(
+      `Mulligan: shrink recorded. Matched: no.\n${shrinkOrientationLine(1, 0)}`,
+    );
+  });
+
+  it("refusals keep their OWN honest text — NO orientation line (nothing was activated)", async () => {
+    const mk = () => {
+      const { pi } = makePi();
+      const { ctx } = makeCtx();
+      return { pi, ctx };
+    };
+
+    // (a) master disabled (E14)
+    {
+      setConfig({ enabled: false });
+      const { pi, ctx } = mk();
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "c1" }, replacement: "X" });
+      expect(firstText(res)).toMatch(/^Mulligan: refused — Mulligan is disabled\.$/);
+      expect(firstText(res)).not.toContain("Context updated:");
+    }
+    // (b) shrink sub-feature disabled (E14)
+    {
+      setConfig({ shrink: { enabled: false } });
+      const { pi, ctx } = mk();
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "c1" }, replacement: "X" });
+      expect(firstText(res)).toMatch(/^Mulligan: refused — shrink is disabled\.$/);
+      expect(firstText(res)).not.toContain("Context updated:");
+    }
+    // (c) empty replacement (spec/05 §2 step 2) — re-enable first: setConfig MERGES, so (b)'s disabled
+    //     sub-feature would otherwise leak into this sub-block
+    {
+      setConfig({ enabled: true, shrink: { enabled: true } });
+      const { pi, ctx } = mk();
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "c1" }, replacement: "   " });
+      expect(firstText(res)).toMatch(/^Mulligan: refused — replacement must be non-empty\.$/);
+      expect(firstText(res)).not.toContain("Context updated:");
+    }
+    // (d) structurally-impossible target (GOTCHA #7)
+    {
+      setConfig({ enabled: true, shrink: { enabled: true } });
+      const { pi, ctx } = mk();
+      const res = await run(pi, ctx, { target: { by_tool_call_id: "  " }, replacement: "X" });
+      expect(firstText(res)).toMatch(/^Mulligan: refused — target discriminator must be non-empty\.$/);
+      expect(firstText(res)).not.toContain("Context updated:");
+    }
+  });
+
+  it("append FAILED (markerId null → NO active marker) → terse text only, NO line ('Context updated' must not lie)", async () => {
+    const { pi } = makePi({ throwOnAppend: true });
+    const { ctx } = makeCtx({ contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "big log..."))] });
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "compact" });
+    expect(firstText(res)).toBe("Mulligan: shrink recorded. Matched: yes."); // pre-existing terse form, unchanged
+    expect(firstText(res)).not.toContain("Context updated:");
+    expect(res.details.matched).toBe(true);
+    expect(res.details.markerId).toBeNull(); // the honest signal that nothing persisted
   });
 });
