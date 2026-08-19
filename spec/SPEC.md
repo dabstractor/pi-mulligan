@@ -1,12 +1,18 @@
 # pi-mulligan — Specification
 
-**Status:** Draft 1.1 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
+**Status:** Draft 1.2 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
 
 > **v1.1 amendment (human-facing surface + consent model).** Live use surfaced two design defects that this amendment corrects (full spec in `@13-human-facing-surface.md`):
 > 1. **Checkpoint is exposed to the wrong actor** (`@08` E23). A checkpoint only pays off when set *before* a mistake — which needs *foresight* the agent lacks. v1.1 moves checkpoint to a **user slash command** and removes the agent tool. The agent *keeps* the rewind-to-checkpoint power, now **legitimized by the user's opt-in**: a user-set checkpoint grants the agent, for the checkpoint's lifetime, the power to rewind across the user's subsequent prompts back to that point.
 > 2. **`mulligan_audit` is human-facing.** Its context-bloat diagnostic is the thing a person watching the window wants on demand; `/tree` serves only the audit-*trail*. v1.1 adds `/mulligan_audit`.
 > 3. **Drift nudge counted user prompts as bloat.** The rewind/shrink-prescribing nudge now measures **agent-attributable** growth only (user messages excluded).
 > Net: agent tools drop 5→4 (checkpoint removed); 3 human slash commands added (`/mulligan_checkpoint`, `/mulligan_checkpoint_revoke`, `/mulligan_audit`); a persistent **active-checkpoint banner** above the prompt box prevents the user from forgetting they have granted destructive power. `first:user` (the original task) remains unconditionally protected.
+
+> **v1.2 amendment (re-orientation guard).** A bench campaign measured losing sessions averaging **+2.4 requests per rewrite event** re-orienting after a context rewrite (re-reading files, re-verifying state). v1.2 closes the shrink half of that gap with one fixed line (full spec in `@05-tools.md` §2, Behavior step 6):
+> 1. **Every ACTIVE `mulligan_shrink` activation ends its tool result with an exact final line** — `Context updated: <k> result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.` (`k`=1 today; a future batched flush emits it once with aggregate numbers — the exported `shrinkOrientationLine` is the single source, so the text cannot drift).
+> 2. **Honesty gating.** The line appears iff a marker actually persisted: refusals and failed appends carry no line — "Context updated" must not lie. A persisted-but-currently-unmatched target reports `~0` (the filter live-resolves it later; `@06` §5).
+> 3. **Rewind is untouched.** Its orientation already travels in the structured self-authored note (`@04` §2.1) — no duplication was introduced. No new tools, knobs, or config; no other behavioral change.
+> Net: the smallest change in the series — one appended line on the shrink success path, with exact-text unit tests in both single (`k=1`) and aggregate (`k>1`) forms (`@10-testing.md` §1.12).
 
 ---
 

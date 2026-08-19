@@ -73,6 +73,12 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 
 ---
 
+### 1.12 Shrink activation orientation line (v1.2 guard)
+- Single ACTIVE activation (persisted marker): the result ENDS with the exact line `Context updated: 1 result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.` — `~<t>` is the NET `estimateTokens` (chars/4) of matched original minus replacement, floored at 0; assert a deterministic value (e.g. a 4000-char original + 7-char replacement → `~998`).
+- Persisted-but-unmatched target (`Matched: no`, E8): line present with `~0` (the filter live-resolves it later).
+- The line-builder is asserted verbatim for BOTH the single (`k=1`) and aggregate (`k>1`) forms — the aggregate is reserved for a future batched flush and is locked now so it cannot drift to a variant.
+- NO line on any refusal (disabled / empty replacement / structurally-impossible target) or on a failed append (`markerId:null`) — those paths keep their own honest text.
+
 ## 2. Tier 2 — Integration smoke harness (real `pi`)
 
 Adapt `@reference/looper-smoke.proto.ts` (rename `looper_*` → `mulligan_*`, restructure into the Mulligan module layout). It registers the tools/handlers, logs structured JSONL to a temp file, and is driven by `pi -e ./dist/index.ts -p "..."` in known scenarios. Assertions read the log + the resulting session JSONL.

@@ -60,7 +60,7 @@ import { resolveShrinkTarget } from "../transforms.js"; // Pi-free (0 imports) �
 import type { ShrinkTarget } from "../transforms.js"; // structurally identical to markers.ts ShrinkTarget
 import type { MessageLike } from "../transforms.js";
 import { getConfig } from "../config.js"; // GOTCHA #10: read ONCE per execute
-import { estimateTokens } from "../tokens.js"; // pure Pi-free estimator (chars/4 heuristic) — R6 orientation line
+import { estimateTokens } from "../tokens.js"; // pure Pi-free estimator (chars/4 heuristic) — v1.2 orientation line
 import type { MessageLike as EstMessageLike } from "../tokens.js"; // tokens.ts structural flavor (same cast idiom as below)
 import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
 
@@ -150,15 +150,14 @@ function feedbackText(matched: boolean): string {
 }
 
 /**
- * shrinkOrientationLine — the R6 re-orientation guard's FIXED final line, appended as the LAST line of the
+ * shrinkOrientationLine — the v1.2 re-orientation guard's FIXED final line, appended as the LAST line of the
  * shrink success tool result (k=1, the single-activation form). EXACT TEXT, do not reword: the bench greps it
  * ("Context updated: <k> result(s) summarized (~<t> tokens shed). Continue exactly where you left off — no
  * re-verification or re-reading is needed."). WHY: an earlier bench campaign found losing sessions averaged
  * +2.4 requests after each rewrite event re-orienting (re-reading files, re-verifying state); one stable,
  * imperative cue at the rewrite point keeps the resumed model on-task. Rewind gets its orientation from the
  * structured note (src/notes.ts — unchanged); shrink has no note, so its cue lives here. EXPORTED so a future
- * BATCHED/FLUSH activation (R1/R4 — not landed in this worktree) can emit the SAME line ONCE with the AGGREGATE
- * numbers (k = total results flushed, t = total tokens shed) instead of re-inventing a variant.
+ * BATCHED/FLUSH activation can emit the SAME line ONCE with the AGGREGATE numbers (k = total results flushed, t = total tokens shed) instead of re-inventing a variant.
  *
  * `t` is the NET heuristic estimate (estimateTokens: ~chars/4) of original matched content minus the
  * replacement, floored at 0 — "~" conveys the approximation.
@@ -267,7 +266,7 @@ function resolveTargetEntryId(
     const messages = entries.flatMap((e) => sessionEntryToContextMessages(e)) as unknown as MessageLike[];
     const i = resolveShrinkTarget(messages, target as ShrinkTarget); // PURE resolver (transforms.ts)
     if (i === null) return { entryId: null, origTokens: 0 };
-    // R6: estimate the matched original's tokens IN THE SAME SNAPSHOT (feeds the orientation line's ~<t>;
+    // v1.2: estimate the matched original's tokens IN THE SAME SNAPSHOT (feeds the orientation line's ~<t>;
     // estimateTokens never throws — tokens.ts GOTCHA #3 — and a missing messages[i] estimates to 0).
     const origTokens = estimateTokens([messages[i]] as unknown as EstMessageLike[]).tokens;
     return { entryId: entryIdAtMessageIndex(entries, i), origTokens }; // map message index → stable ENTRY id
@@ -322,7 +321,7 @@ async function shrinkExecute(
 
     // (3/4) best-effort yes/no match + PIN the matched entry id (spec/05 §2 step 3 — ADVISORY; never blocks
     //       persistence — GOTCHA #6). resolveTargetEntryId returns the stable ENTRY id of the matched message
-    //       (or null) PLUS its original token estimate (R6 — feeds the orientation line). matched = (entryId !==
+    //       (or null) PLUS its original token estimate (v1.2 — feeds the orientation line). matched = (entryId !==
     //       null); the ENTRY id becomes the marker's pinnedEntryId so applyShrink resolves by identity at filter
     //       time (FINDING 3 fix — no moving-target drift). Inner try/catch is belt-and-suspenders
     //       (resolveTargetEntryId already catches → {entryId:null, origTokens:0} — E13).
@@ -358,7 +357,7 @@ async function shrinkExecute(
       // E13: a UI failure must never break the tool — the marker is already persisted.
     }
 
-    // (6) return (spec/05 §2 step 5) — feedback text (yes/no from the best-effort match) + details. R6 guard:
+    // (6) return (spec/05 §2 step 5) — feedback text (yes/no from the best-effort match) + details. v1.2 guard:
     //     when the marker ACTUALLY persisted (markerId truthy → it is ACTIVE), the result ENDS with the fixed
     //     orientation line (single form k=1). t = NET estimate shed: original content minus the replacement,
     //     floored at 0 (estimateTokens is defensive — never throws; a Matched:no marker reports ~0 until the

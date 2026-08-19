@@ -30,7 +30,7 @@ import {
   type ShrinkArgs,
   type ShrinkDetails,
 } from "../../src/tools/shrink.js";
-import { estimateTokens } from "../../src/tokens.js"; // the SAME estimator the tool uses (R6 ~<t> numbers)
+import { estimateTokens } from "../../src/tokens.js"; // the SAME estimator the tool uses (v1.2 ~<t> numbers)
 import { setConfig } from "../../src/config.js";
 import { clearAll } from "../../src/runtime.js";
 import type {
@@ -286,8 +286,8 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
     const replacement = "(shrink) the big log was ~9k tokens; the bug is on line 42.";
     const res = await run(pi, ctx, { target, replacement });
 
-    // feedback text (spec/05 §2) with the yes slot filled, ENDING with the R6 orientation line (exact, k=1,
-    // ~<t> = NET shed via the same estimator — see the R6 describe block below)
+    // feedback text (spec/05 §2) with the yes slot filled, ENDING with the v1.2 orientation line (exact, k=1,
+    // ~<t> = NET shed via the same estimator — see the v1.2 describe block below)
     expect(firstText(res)).toBe(
       `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed("big log...", replacement))}`,
     );
@@ -698,10 +698,10 @@ describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", ()
   });
 });
 
-// ── R6 re-orientation guard: the FIXED final line on every ACTIVE-activation path (bench-stable) ────────────
+// ── v1.2 re-orientation guard: the FIXED final line on every ACTIVE-activation path (bench-stable) ────────────
 
 /**
- * Mirror of the tool's R6 NET-shed arithmetic (shrink.ts): max(0, estimateTokens(original) - estimateTokens(replacement)).
+ * Mirror of the tool's v1.2 NET-shed arithmetic (shrink.ts): max(0, estimateTokens(original) - estimateTokens(replacement)).
  * The toolResult fixture's content is ONE text block, and messageCharLength counts content ONLY (role/toolCallId/
  * toolName contribute nothing), so a bare {content:[{type:"text",text}]} estimates identically. Using the SAME
  * estimateTokens keeps the expected numbers deterministic without re-implementing the heuristic.
@@ -712,7 +712,7 @@ function expectedShed(origText: string, replacement: string): number {
   return Math.max(0, orig - repl);
 }
 
-describe("mulligan_shrink — R6 orientation line (fixed final line on ACTIVE activation; guard)", () => {
+describe("mulligan_shrink — v1.2 orientation line (fixed final line on ACTIVE activation; guard)", () => {
   beforeEach(() => setConfig({ shrink: { enabled: true } }));
 
   it("shrinkOrientationLine: EXACT bench-stable text — single (k=1) AND aggregate (k>1) forms", () => {
@@ -720,7 +720,7 @@ describe("mulligan_shrink — R6 orientation line (fixed final line on ACTIVE ac
     expect(shrinkOrientationLine(1, 42)).toBe(
       "Context updated: 1 result(s) summarized (~42 tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.",
     );
-    // aggregate form — the R1/R4 BATCHED/FLUSH seam (not landed in this worktree): the flush result carries the
+    // aggregate form — the BATCHED/FLUSH seam (reserved for future work): the flush result carries the
     // SAME line ONCE with aggregate numbers. Locked here so the flush cannot drift to a variant.
     expect(shrinkOrientationLine(3, 1250)).toBe(
       "Context updated: 3 result(s) summarized (~1250 tokens shed). Continue exactly where you left off — no re-verification or re-reading is needed.",
