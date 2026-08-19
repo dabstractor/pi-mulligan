@@ -45,8 +45,10 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"   # e.g. v0.1.2
           VERSION="${TAG#v}"               # e.g. 0.1.2
           # `npm version` validates semver and refuses garbage; --no-git-tag-version
-          # keeps it from trying to commit/tag inside CI.
-          npm version "$VERSION" --no-git-tag-version
+          # keeps it from trying to commit/tag inside CI. --allow-same-version
+          # makes it a no-op (exit 0) when package.json is already at $VERSION
+          # (manual bump or re-run) instead of erroring with "Version not changed".
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
           echo "Publishing pi-mulligan@$VERSION (from tag $TAG)"
 
       - name: Typecheck
@@ -76,7 +78,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "$DEFAULT_BRANCH"
           git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
-          npm version "$VERSION" --no-git-tag-version
+          # --allow-same-version: if the bump already landed (re-run), exit 0
+          # instead of failing, so this step stays a true no-op.
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
           git add package.json package-lock.json
           if git diff --cached --quiet; then
             echo "No version change to commit (package.json already at v$VERSION)."
