@@ -261,7 +261,12 @@ export function validateConfig(raw: unknown): MulliganConfig {
       v = safeGet(rewindRaw, "protectedRoles");
       if (v !== undefined) cfg.rewind.protectedRoles = coerceProtectedRoles(v, cfg.rewind.protectedRoles);
       v = safeGet(rewindRaw, "maxDepth");
-      if (v !== undefined) cfg.rewind.maxDepth = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, false);
+      if (v !== undefined) {
+        // BUG-002/003 convention: floor fractional values, minimum 1 (same as maxRetriesPerPrompt / maxActive /
+        // staleAfterFires / driftWindowTurns) — 0 would silently disable rewinds via refusal, 2.5 is not a depth.
+        const n = coerceNumber("rewind.maxDepth", v, cfg.rewind.maxDepth, true);
+        cfg.rewind.maxDepth = Number.isFinite(n) && Math.floor(n) >= 1 ? Math.floor(n) : cfg.rewind.maxDepth;
+      }
       v = safeGet(rewindRaw, "maxRetriesPerPrompt");
       if (v !== undefined) {
         const n = coerceNumber("rewind.maxRetriesPerPrompt", v, cfg.rewind.maxRetriesPerPrompt, true);

@@ -110,7 +110,7 @@ export const RewindParams = Type.Object({
   checkpoint: Type.Optional(
     Type.String({
       description:
-        "Required when granularity=checkpoint. The name of a checkpoint set via mulligan_checkpoint.",
+        "Required when granularity=checkpoint. The name of a checkpoint set via the /mulligan_checkpoint command.",
     }),
   ),
 });
@@ -125,7 +125,7 @@ export type RewindArgs = Static<typeof RewindParams>;
  * This string IS the tool's documentation. Copy verbatim — it drives LLM usage.
  */
 export const REWIND_DESC =
-  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.";
+  "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. granularity 'checkpoint' rewinds back to a checkpoint a user set — and may hide the user's prompts after it (they consented by setting it).";
 
 // ── Mutation warning (spec/08 E5 — VERBATIM warning string) ──────────────────
 
@@ -137,6 +137,16 @@ export const REWIND_DESC =
 const MUTATION_WARNING =
   "⚠ The hidden span modified files/ran side-effecting commands (see note). " +
   "Those effects PERSIST on disk; do not blindly redo them.";
+
+/**
+ * IDENTICAL_NOTE_ADVISORY — the spec/08 E22 (line 117) VERBATIM SHOULD-level advisory appended to the
+ * success text when the previous same-prompt rewind's what_happened (trim+lowercase) is identical to the
+ * current one. Steers only — the maxRetriesPerPrompt budget (step 4b) and abortContextFraction stop (4c)
+ * are the MUST-level backstops that ultimately refuse. Module-local.
+ */
+const IDENTICAL_NOTE_ADVISORY =
+  "⚠ You have rewound with an identical note — the re-attempt is reproducing the mistake. " +
+  "Change approach or shrink the offending result rather than rewinding again.";
 
 // ── Result builders (always include `details` — CRITICAL GOTCHA #4) ──────────
 
@@ -173,16 +183,24 @@ function refusal(reason: string, granularity: Granularity): AgentToolResult<Rewi
 /**
  * successText — build the success text (spec/05 §1 Return shape + step 8 K=0 honesty). Returns just the `text`
  * (the caller wraps it into the content block + details). K=0 appends "(nothing matched to hide)" so the agent is
- * not misled (GOTCHA #12). The mutation warning is appended VERBATIM (spec/08 E5) when hasWarning is true.
+ * not misled (GOTCHA #12). The mutation warning is appended VERBATIM (spec/08 E5) when hasWarning is true, and
+ * the E22 identical-note advisory (spec/08:117, VERBATIM) is appended LAST when identicalNote is true — all
+ * three clauses can coexist in a fixed order: k-clause → note → E5 warning → E22 advisory.
  * Module-local.
  */
-function successText(granularity: Granularity, k: number, hasWarning: boolean): { text: string } {
+function successText(
+  granularity: Granularity,
+  k: number,
+  hasWarning: boolean,
+  identicalNote = false,
+): { text: string } {
   const kClause =
     k === 0
       ? "0 messages will be hidden from your view starting next turn (nothing matched to hide)"
       : `${k} messages will be hidden from your view starting next turn`;
   let text = `Mulligan: rewound ${granularity}. ${kClause}. Note left.`;
   if (hasWarning) text += " " + MUTATION_WARNING; // spec/08 E5 VERBATIM
+  if (identicalNote) text += " " + IDENTICAL_NOTE_ADVISORY; // spec/08 E22 VERBATIM — appended LAST
   return { text };
 }
 
@@ -343,6 +361,90 @@ function countRetriesAtLatestPrompt(ctx: ExtensionContext): number {
     }
   }
   return count;
+}
+
+/**
+ * prevRewindNoteAtLatestPrompt — the read-side primitive for the E22 identical-note advisory (spec/08 §E22,
+ * SHOULD; BUG-002): returns the PREVIOUS same-prompt rewind's normalized `note.what_happened`, so the caller
+ * (P1.M1.T2.S2 — the success-text wiring) can compare it against the CURRENT call's note (also normalized via
+ * trim().toLowerCase()) and append the spec-verbatim identical-note warning. "Substantively identical" per
+ * spec/08 E22 = same `what_happened` after trim/lowercase — one field suffices because what_happened already
+ * absorbs the avoid/lesson per the v1.2 note-merge. Every production mulligan:rewind marker persists its raw
+ * NoteInput in data.note (markers.ts RewindMarker) — no new state needed.
+ *
+ * A structural sibling of countRetriesAtLatestPrompt (same last-user-entry scan + post-prompt slice + BUG-005
+ * cancel-exclusion set). Cancel semantics mirror it exactly: rewinds retired by a mulligan:cancel in the slice
+ * are excluded; a rewind with an UNREADABLE/absent data.id is NOT excluded (never exclude on bad data — here
+ * "keep" means its note is still readable). Only entries AFTER the LAST user-message entry are scanned — a
+ * rewind issued before the latest prompt belongs to a DIFFERENT prompt and is invisible here. The LAST
+ * surviving marker in entry order is the "previous rewind" relative to the CURRENT call (whose marker is
+ * appended only later, after this helper runs).
+ *
+ * Fail-open per E13: getEntries() throwing, non-array entries, no user prompt, no surviving rewind with a
+ * readable note → null (nothing to compare → caller skips the advisory). An empty/whitespace note normalizes
+ * to "" and IS returned — the S2 equality comparison handles it; do not over-filter here. Pure read; never
+ * throws. EXPORTED for P1.M1.T2.S2 + tests (first export in this pure-helper cluster — siblings stay local).
+ */
+export function prevRewindNoteAtLatestPrompt(ctx: ExtensionContext): string | null {
+  let entries: unknown;
+  try {
+    entries = ctx.sessionManager.getEntries();
+  } catch {
+    return null; // never throw on the tool hot path (E13 fail-open)
+  }
+  if (!Array.isArray(entries)) return null;
+
+  // Find the INDEX of the LAST user-prompt entry (type:"message" with message.role:"user").
+  let latestPromptIndex = -1;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; message?: { role?: unknown } };
+      if (ee.type === "message" && ee.message?.role === "user") latestPromptIndex = i;
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+  if (latestPromptIndex === -1) return null; // no user prompt → nothing to compare against
+
+  // BUG-005: collect the uuid ids of rewinds RETIRED by a mulligan:cancel in the post-prompt slice
+  // (order-independent — a cancel may appear after the rewind it retires). Malformed cancels are skipped.
+  const cancelledRewindIds = new Set<string>();
+  for (let i = latestPromptIndex + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown; data?: { targetId?: unknown } };
+      if (ee.type === "custom" && ee.customType === "mulligan:cancel") {
+        const targetId = ee.data?.targetId;
+        if (typeof targetId === "string" && targetId.length > 0) cancelledRewindIds.add(targetId);
+      }
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+
+  // Walk the SAME post-prompt slice; the LAST SURVIVING rewind's readable note wins. A surviving marker with
+  // an absent/unreadable note does not overwrite a previously-recorded note (and null stays null if NO
+  // surviving marker ever had one → the caller skips the advisory).
+  let lastNote: string | null = null;
+  for (let i = latestPromptIndex + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+    try {
+      const ee = e as { type?: unknown; customType?: unknown; data?: { id?: unknown; note?: { what_happened?: unknown } } };
+      if (ee.type === "custom" && ee.customType === "mulligan:rewind") {
+        const id = ee.data?.id;
+        if (typeof id === "string" && cancelledRewindIds.has(id)) continue; // cancelled → skip
+        const wh = ee.data?.note?.what_happened;
+        if (typeof wh === "string") lastNote = wh; // LAST surviving marker's note wins
+      }
+    } catch {
+      // a throwing-Proxy entry → skip (never throw on the tool hot path)
+    }
+  }
+  return lastNote === null ? null : lastNote.trim().toLowerCase();
 }
 
 /**
@@ -603,6 +705,17 @@ async function rewindExecute(
       );
     }
 
+    // (4d) E22 SHOULD-level identical-note advisory flag (spec/08:117). Computed BEFORE step 7 so "previous"
+    //      means the prior marker (the current one is persisted at step 7). Steers only — never refuses.
+    let identicalNote = false;
+    try {
+      const prev = prevRewindNoteAtLatestPrompt(ctx); // S1: normalized or null, cancel-aware, never throws
+      const cur = params?.note?.what_happened;
+      identicalNote = prev !== null && typeof cur === "string" && prev === cur.trim().toLowerCase();
+    } catch {
+      /* E13 — advisory is best-effort; on any failure simply omit it */
+    }
+
     // (5) read-only ledger + K preview (step 5; best-effort — GOTCHA #6). A failure falls back to empty ledger +
     //     K=0 + STILL succeeds (the marker spec is what matters; the ledger is ADVISORY).
     let ledger: FileLedger;
@@ -699,7 +812,7 @@ async function rewindExecute(
       (ledger.modifiedFiles.length > 0 || ledger.bashSideEffects.length > 0);
 
     // (9) return success (step 8 — K + K=0 honesty via successText).
-    const { text } = successText(granularity, k, hasWarning);
+    const { text } = successText(granularity, k, hasWarning, identicalNote);
     return {
       content: [{ type: "text", text }],
       details: { granularity, k, ledger, hideEntryIds, markerId },

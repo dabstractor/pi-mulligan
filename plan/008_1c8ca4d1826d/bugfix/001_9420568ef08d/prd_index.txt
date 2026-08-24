@@ -1,0 +1,12 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.0 Issue 1: REWIND_DESC omits the v1.1 checkpoint clause; checkpoint param docs reference the removed agent tool
+  h3.1 Issue 2: E22 advisory identical-note repeat-detection hint is not implemented
+  h3.2 Issue 3: v1.1 integration scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt) are missing from the smoke suite
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:15 list:5

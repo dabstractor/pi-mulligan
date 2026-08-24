@@ -285,16 +285,19 @@ export function renderBloatReminder(toolName: string, bytes: number): string {
  * handler injects as a NON-persisted `mulligan:nudge` custom message (via injectNudge — spec/06 §1 + spec/07 §2)
  * when the previous turn grew context over threshold OR produced bloated results. ~25–40 tokens, only when it fires.
  *
- * FORMAT (spec/07 §2 — VERBATIM; a SINGLE physical string with NO embedded "\n"; the LEAD varies by input,
+ * FORMAT (spec/07 §2 v2.0 — VERBATIM; a SINGLE physical string with NO embedded "\n"; the LEAD varies by input,
  * the tail after "<lead>." is FIXED in all cases):
- *     <lead>. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.
+ *     <lead>. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.
  * <lead> is a 3-branch selection (delta WINS regardless of bloat):
  *   - delta != null:         "Previous turn added ~<k> tokens to your context"   (NO bloat mention)
  *   - delta == null, bloat>0: "Previous turn produced <N> bloated <resultWord>"   (the only bloat path)
  *   - both empty:            "Previous turn changed your context"                 (unreachable; totality fallback)
  * <k> = kTokens(delta) (delta/1000, 1 decimal: 4200→"4.2k", 3000→"3k"); <N> = bloatHits.length;
  * resultWord = resultWord(N) (1→"result", else "results"). NO [mulligan] prefix. NO trailing newline.
- * NO embedded newline. The tail is a terse "If wasteful, … to undo / compact a result." suggestion; no `mulligan_audit` clause (§2 dropped it).
+ * NO embedded newline. The tail is AWARENESS-ONLY (spec/07 §2 v2.0): under current-turn scoping (spec/05 §2) the
+ * reported turn is already out of modification scope, so the nudge must not prescribe rewind/shrink of past content;
+ * it gives forward-looking advice to keep THIS turn's outputs lean instead. Nudge A (renderBloatReminder) is the only
+ * prescribing nudge (it rides the result inside the producing turn, when the shrink is still issuable).
  *
  * BLOAT IS COSMETIC ON THE DELTA PATH: pendingBloatHits are collected at tool_result time and are NOT subtracted
  * when a later mulligan_rewind/shrink hides those results, so a bloat count on the delta path could surface stale
@@ -334,7 +337,7 @@ export function renderDriftNudge(metric: DriftNudgeInput): string {
   } else {
     lead = "Previous turn changed your context"; // unreachable via shouldNudge; totality fallback
   }
-  return `${lead}. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result.`;
+  return `${lead}. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.`;
 }
 
 /**

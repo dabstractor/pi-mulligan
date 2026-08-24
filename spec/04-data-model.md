@@ -155,8 +155,10 @@ Stored via `pi.appendEntry("mulligan:shrink", data)`:
 ```ts
 type ShrinkTarget =
   | { by_tool_call_id: string }
-  | { by_tool_name: string; occurrence: "last" | "first" }
-  | { by_content_includes: string };
+  | { by_tool_name: string; occurrence: "last" | "first" };
+// v2.0: `by_content_includes` REMOVED. Both remaining arms resolve ONLY within the
+// CURRENT turn's tool-result span (see Matching semantics below) — a shrink may never
+// target a message from an earlier turn.
 
 interface ShrinkMarker extends MulliganEnvelope {
   kind: "shrink";
@@ -175,7 +177,7 @@ interface ShrinkMarker extends MulliganEnvelope {
   /**
    * Pinned stable ENTRY id of the message the target matched at marker-creation time (FINDING 3 — pinned shrink).
    * When present, the filter resolves the target by IDENTITY instead of re-resolving the selector live each
-   * inference, so `by_tool_name`+`last` / `by_content_includes` no longer drift onto later, unrelated messages as
+   * inference, so `by_tool_name`+`last` no longer drift onto later, unrelated messages as
    * the session grows (the moving-target footgun). Mirrors `RewindMarker.hideEntryIds`. Absent when the target did
    * not match at creation (then the filter falls back to live resolution — backward compat / compaction-robust).
    * Holds an ENTRY id (stable), NOT a message index. OPTIONAL.
@@ -186,9 +188,9 @@ interface ShrinkMarker extends MulliganEnvelope {
 }
 ```
 
-**Matching semantics** (`@06-context-filter.md` §5): targets resolve against the *current* `event.messages` each inference (compaction-robust). If multiple markers match the same target, the **last** one wins (applied last in order). If a target matches nothing (already removed/compacted), the marker is a no-op for that inference (and silently retried next inference, in case the content reappears — e.g. before a compaction settles).
+**Matching semantics** (`@06-context-filter.md` §5): targets resolve against the *current* `event.messages` each inference (compaction-robust), **restricted to the current turn's tool-result span** (v2.0). If multiple markers match the same target, the **last** one wins (applied last in order). If a target matches nothing — including a selector that would only match in an EARLIER turn — the marker is a no-op for that inference (and silently retried next inference, in case the content reappears — e.g. before a compaction settles). The current-turn bound is enforced at BOTH creation (the tool refuses out-of-scope targets) and resolution (the filter drops out-of-scope matches) — scope holds under all circumstances.
 
-**Pinned shrinks (FINDING 3).** When the tool resolves the target at marker-creation time it records the matched message's stable ENTRY id as `pinnedEntryId`. The filter then resolves that id by **identity** (not the live selector) on every later inference, locking the substitution to ONE message forever — `by_tool_name`+`last` and `by_content_includes` can no longer silently rewrite a *later*, unrelated message that happens to match (the moving-target footgun). If the pinned entry is no longer present (compaction), the marker no-ops that inference rather than re-resolving the selector (identity-or-nothing, mirroring the rewind `hideEntryIds` precedent). `by_tool_call_id` is already stable, so pinning it is a harmless no-op. Markers without a `pinnedEntryId` (old markers, or a target that did not match at creation) fall back to the live selector as before.
+**Pinned shrinks (FINDING 3).** When the tool resolves the target at marker-creation time it records the matched message's stable ENTRY id as `pinnedEntryId`. The filter then resolves that id by **identity** (not the live selector) on every later inference, locking the substitution to ONE message forever — `by_tool_name`+`last` can no longer silently rewrite a *later*, unrelated message that happens to match (the moving-target footgun). If the pinned entry is no longer present (compaction), the marker no-ops that inference rather than re-resolving the selector (identity-or-nothing, mirroring the rewind `hideEntryIds` precedent). `by_tool_call_id` is already stable, so pinning it is a harmless no-op. Markers without a `pinnedEntryId` (old markers, or a target that did not match at creation) fall back to the live selector as before.
 
 ## 5. Turn metric (for the nudge)
 

@@ -1,0 +1,510 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "v2.0 Current-Turn Scoping Delta (Draft 2.0)",
+      "status": "Complete",
+      "description": "Implement the single normative v2.0 design change: the agent may only modify context it produced in the CURRENT turn. Realized as: (1) mulligan_shrink targets current-turn-scoped with the by_content_includes arm removed and hard refusals for out-of-scope targets; (2) a filterPipeline turn-span scope guard (defense in depth, issuing-turn bound, persistence retained per the PRD §2 interpretation ruling); (3) Nudge B re-worded awareness-only; (4) mulligan_cancel two-arm lockstep with full-history marker resolution; (5) test-suite reconciliation (~46 by_content_includes occurrences); (6) changeset-level README sync. Spec/ is ALREADY at v2.0 — NO spec edits. Research is complete: see plan/008_1c8ca4d1826d/architecture/{system_context.md, scope_guard_design.md, external_deps.md, _scouts/*.md}.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "R1 — Pure tier: scoped resolver, removed arm, filter scope guard",
+          "status": "Complete",
+          "description": "transforms.ts + markers.ts (+ filter.ts read-side only if entry-id threading requires it): 2-arm write ShrinkTarget with deprecated legacy read field, currentTurnSpan helper, span-bounded resolveShrinkTarget, and the filterPipeline marker-turn-span guard on both pinned and live paths (fail-safe no-op; issuing-turn bound so in-turn shrinks persist across later turns).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Scoped resolver primitives (ShrinkTarget v2.0 + currentTurnSpan + span-bounded resolveShrinkTarget)",
+              "status": "Complete",
+              "description": "The pure-tier vocabulary every other task consumes: the 2-arm write type, the legacy read field, the turn-span helper, and the optional span bound on the resolver.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Split ShrinkTarget: 2-arm write union + @deprecated legacy read field (transforms.ts + markers.ts)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ShrinkTarget is DECLARED LOCALLY TWICE and the two declarations must stay structurally identical (hard contract): src/transforms.ts:740 (Pi-free pure tier, 0 imports) and src/markers.ts:96-99. Today both are 3-arm unions including { by_content_includes: string }. The read-type precedent is RewindMarker.options.to_previous_prompt at src/markers.ts:60-62 (optional legacy field, kept so old persisted markers type-check). See architecture/system_context.md §2 and architecture/_scouts/pure-tier.md.\n2. INPUT: none (type-level only; no behavior yet).\n3. LOGIC: In BOTH files change the WRITE-path ShrinkTarget to exactly two arms: { by_tool_call_id: string } | { by_tool_name: string; occurrence: \"last\" | \"first\" }. Introduce (or widen to) a READ type — e.g. export type ShrinkTargetRead = the 2-arm union & { /** @deprecated legacy v1.x field — ignored by the v2.0 resolver; legacy content-shrinks resolve null and no-op */ by_content_includes?: string } — following the to_previous_prompt precedent so OLD persisted markers with data.target.by_content_includes still type-check against read sites (markers.ts read paths, filterPipeline's ShrinkMarkerLike.target, tests' legacy fixtures). Ensure a fresh 2-arm write target is assignable to the read type. Update the JSDoc on both declarations to cite spec/06 §5 v2.0 (current-turn scope, defense in depth) and the PRD §2 ruling. DO NOT change resolveShrinkTarget behavior in this subtask (next subtask does).\n4. OUTPUT: exported ShrinkTarget (2-arm write) and ShrinkTargetRead (read, with deprecated optional field) from BOTH src/transforms.ts and src/markers.ts, structurally identical; `tsc --noEmit` passes with existing call sites adjusted only where the compiler forces it (by_content_includes literals in src must move to the read type or be deleted — there are 8 in transforms.ts and 2 in markers.ts, mostly JSDoc/comments; the resolver branch at transforms.ts:800-807 is removed in S2, delete it here ONLY if types force it).\n5. DOCS: [Mode A] JSDoc on ShrinkTarget/ShrinkTargetRead in both files (current-turn scope, @deprecated legacy field) — rides with this work, no separate docs subtask.",
+                  "prd_selectors": [
+                    "h2.49",
+                    "h2.58",
+                    "h2.58/h3.28",
+                    "h2.68",
+                    "h2.44"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "currentTurnSpan helper + resolveShrinkTarget optional span bound; delete content arm from resolver",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: resolveShrinkTarget lives at src/transforms.ts:771 with signature (messages: MessageLike[], target: ShrinkTarget): number | null — full-list scan, NO span param today. The iLastUser scan precedent is resolveLastTurn at src/transforms.ts:331-337 (last role===\"user\" index; -1 when none). by_tool_call_id branch 775-781; by_tool_name+occurrence 784-797 (occurrence!=='first' → last, GOTCHA #6); by_content_includes 800-807 (empty needle → null, BUG-004). Purity rules: isRecord/readOwn everywhere, NEVER throws (E13 hot path), non-array messages → null, non-record target → null. See architecture/_scouts/pure-tier.md §2.\n2. INPUT: the 2-arm write ShrinkTarget + ShrinkTargetRead from P1.M1.T1.S1.\n3. LOGIC: (a) Add an exported pure helper currentTurnSpan(messages: MessageLike[]): { start: number; end: number } where end === messages.length (or a [start, end) pair type — follow the repo's plain-primitive convention; no Span class) computing start = iLastUser + 1 via the SAME last-user scan as resolveLastTurn (when no user message exists, start = 0 — session-start edge; document it). Optionally also export turnSpanAfter(iLastUser: number, len: number). (b) Change resolveShrinkTarget to resolveShrinkTarget(messages, target, span?: { start: number; end: number }): number | null — the by_tool_call_id and by_tool_name arms search ONLY indices in [span.start, span.end); a match outside the span returns null; span undefined → full range (this is mulligan_cancel's usage — full history). (c) DELETE the by_content_includes branch (transforms.ts:800-807): a target whose only discriminator is by_content_includes now falls through to the final `return null` — legacy content-shrinks resolve null → no-op (scope holds under all circumstances). Keep the empty-needle/stringifyContent machinery only if still referenced; otherwise remove stringifyContent if now dead (verify with grep before deleting). Mock nothing — pure tier, zero Pi imports.\n4. OUTPUT: exported currentTurnSpan (+ optional turnSpanAfter) and the 3-arg resolveShrinkTarget from src/transforms.ts; all existing in-repo callers compile (filterPipeline live path at transforms.ts:986/1546 calls it without span for now — S4 adds the bound; cancel.ts:268 keeps no-span full history). Test-first per TDD: the failing tests for span semantics are P1.M1.T3.S1.\n5. DOCS: [Mode A] JSDoc on resolveShrinkTarget (span semantics: in-span-only match, undefined = full range, cancel usage) and on currentTurnSpan (cite spec/06 §5 v2.0 + PRD §2 ruling: the bound for the TOOL is the current turn; the FILTER uses the marker's issuing-turn span). Rides with the work.",
+                  "prd_selectors": [
+                    "h2.67",
+                    "h2.68",
+                    "h2.58/h3.30",
+                    "h2.42",
+                    "h2.49",
+                    "h2.90"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "filterPipeline marker turn-span scope guard (both paths, fail-safe)",
+              "status": "Complete",
+              "description": "Defense in depth: a shrink marker must never substitute a message from a turn earlier than the marker's own, while an in-turn pinned shrink KEEPS applying after later user turns (persistence retained — the PRD §2 ruling).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Thread the marker's own ENTRY id + compute the marker's issuing-turn span from branchEntries",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: filterPipeline signature at src/transforms.ts:1374 — (messages, markers: MarkerBundle|undefined, config, branchEntries?: BranchEntry[], diag?); shrink pass 1522-1547; `branch = Array.isArray(branchEntries) ? branchEntries : []` (~1432). MarkerBundle.shrinks is ShrinkMarkerLike[] (~1126-1141: {seq; target; replacement; pinnedEntryId?}) — it does NOT yet carry the marker's own ENTRY id. The REAL ShrinkMarker (src/markers.ts:107-127) has id = the marker UUID stored in data.id; the marker's own ENTRY id is readOwn(entry, \"id\") on the session entry — readMarkers (src/filter.ts:118-190) scans ctx.sessionManager.getEntries() and can see both. The cursor-walk precedent mapping entries→message indices is entryIdAtMessageIndex (src/tools/shrink.ts:228-243, same entries.flatMap(sessionEntryToContextMessages) mapping) and resolvePinnedShrink's retained-tail alignment (transforms.ts:851). See architecture/scope_guard_design.md §2.\n2. INPUT: currentTurnSpan/turnSpanAfter + 3-arg resolveShrinkTarget from P1.M1.T1.S2.\n3. LOGIC: (a) Widen ShrinkMarkerLike with an optional markerEntryId?: string (and keep it structurally assignable from the real ShrinkMarker — you may need readMarkers/filter.ts to ALSO copy the entry id into the bundle object it builds; that is the ONE permitted filter.ts read-side edit — no behavior change). (b) Add a module-private (exported for tests) pure helper markerTurnSpan(messages: MessageLike[], branchEntries: BranchEntry[], markerEntryId: string): { start; end } | null — walk branchEntries with the entryMessageYield cursor to locate the marker entry's position; then find the last USER-role message index BEFORE/at the marker's message position (scan messages for role===\"user\" with index < markerMsgPos, using the same defensive readOwn style); span = [iLastUserBeforeMarker + 1, messages.length). Return null when the marker entry cannot be located or the alignment is indeterminate (compaction misalignment, non-array inputs) — callers treat null as fail-safe no-op. No Pi imports; never throws (E13).\n4. OUTPUT: exported markerTurnSpan + widened ShrinkMarkerLike (and the filter.ts read-side threading if needed); consumed by P1.M1.T2.S2 and by cancel's covering-check live fallback (P1.M2.T3.S2).\n5. DOCS: [Mode A] JSDoc on markerTurnSpan (issuing-turn bound per PRD §2 ruling — NOT fire-time current turn; cite spec/06 §5 v2.0). Rides with the work.",
+                  "prd_selectors": [
+                    "h2.15",
+                    "h2.41",
+                    "h2.49",
+                    "h2.68",
+                    "h2.64-77"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Enforce the span on both shrink paths (pinned identity + live selector; fail-safe no-op)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M1.T2.S1",
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: the shrink pass loop is src/transforms.ts:1522-1547. PINNED path: resolvePinnedShrink(messages /*ORIGINAL space*/, branch, pinnedId) → origIdx; removedOrig.has(origIdx) → continue; binary-search ascending reducedToOrig to translate orig→reduced; applyShrinkAt(m, sh, reducedIdx). LIVE path: applyShrink(m, sh, branchEntries) re-resolves the selector against the reduced m (applyShrink at transforms.ts:963 calls resolveShrinkTarget at :986 — currently unbounded). The §2 RULING (binding): the bound is the MARKER'S ISSUING TURN, not the fire-time current turn — an in-span pinned shrink issued in turn N must KEEP applying after the user sends turn N+1 (persistence, cache rationale); the guard exists to no-op markers whose target predates the marker's own turn (malformed/legacy). See architecture/scope_guard_design.md §§1-2.\n2. INPUT: markerTurnSpan + markerEntryId threading from P1.M1.T2.S1; 3-arg resolveShrinkTarget from P1.M1.T1.S2.\n3. LOGIC: In filterPipeline's shrink loop, per marker: span = markerTurnSpan(messages, branch, markerEntryId); if span === null → continue (fail-safe no-op, E8-style silence). PINNED path: after origIdx resolves, additionally require origIdx ∈ [span.start, span.end) else continue (identity resolution is inherently scope-safe for well-formed markers; this no-ops malformed/legacy ones — pure defense in depth; KEEP the existing removedOrig + translation logic unchanged). LIVE path: resolve the selector WITH the span bound — recommended: thread an optional span into applyShrink (new 4th param span?) and pass it to resolveShrinkTarget, computing the span in ORIGINAL message space and translating/clamping into reduced space via reducedToOrig (conservative: if the span boundary cannot be translated, no-op — never WIDEN the span; a live selector must never re-target beyond its marker's turn, earlier or later). applyShrink substitution body, stampShrink/<context-shrunk>, and E25 render-only discipline: UNCHANGED. Mock nothing — pure tier.\n4. OUTPUT: filterPipeline enforcing the issuing-turn bound on both paths; behavior surface for the critical persistence regression test (P1.M1.T3.S2). filter.ts stale-retirement pass (src/filter.ts:380-410) needs NO change — a permanently out-of-scope pinned marker now misses every fire and auto-retires via shrinkMissCounts (correct disposition; document in the wrap-up, do not special-case).\n5. DOCS: [Mode A] JSDoc on filterPipeline's shrink pass + applyShrink's new span param (cite spec/06 §5 v2.0: 'a marker whose target predates its turn no-ops at every fire'; PRD §2 ruling). Rides with the work.",
+                  "prd_selectors": [
+                    "h2.68",
+                    "h2.76",
+                    "h2.42",
+                    "h2.90",
+                    "h2.107",
+                    "h2.64-77"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "R1 test lock: resolver span semantics + the persistence regression",
+              "status": "Complete",
+              "description": "Lock the pure-tier contract: span-restricted resolution, legacy no-op, and the issuing-turn persistence guarantee across later user turns.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "resolveShrinkTarget span tests (both arms, out-of-span → null, omitted span = full range, legacy content → null)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/transforms.test.ts is vitest, imports the pure tier from ../src/transforms.js (import list at :2), uses literal message-array factories user()/asst()/result()/toolResult() (transforms.test.ts:32-42) and multi-user arrays for turn simulation (e.g. :1391-1399). Existing content-arm tests live at 1032, 1067-1079, 1092-1093, 1116-1125 — they are REWRITTEN here only as legacy-null expectations (the bulk migration is P1.M4.T1.S1; do the minimal resolver-level set here). See architecture/_scouts/tests.md.\n2. INPUT: 3-arg resolveShrinkTarget + currentTurnSpan from P1.M1.T1.S2.\n3. LOGIC: In test/transforms.test.ts add: (a) by_tool_call_id matching INSIDE [start,end) → index; matching only BEFORE span.start → null; (b) by_tool_name+occurrence first/last restricted to the span (a later out-of-span same-name result must not win occurrence:'last'); (c) span omitted → full range (back-compat, cancel usage); (d) a target {by_content_includes:'x'} (typed via the READ type) → null ALWAYS (legacy no-op); (e) currentTurnSpan: last-user boundary, no-user-message → start 0, empty array. Follow house style (no vi.fn, .js imports). No mocks needed — pure functions.\n4. OUTPUT: green `npx vitest run test/transforms.test.ts` covering the contract consumed by the filter guard (P1.M1.T2.S2) and both tools.\n5. DOCS: none — no user-facing/config/API surface change (test-only).",
+                  "prd_selectors": [
+                    "h2.117",
+                    "h2.117/h3.62",
+                    "h2.117/h3.66",
+                    "h2.90",
+                    "h2.101"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S2",
+                  "title": "filterPipeline scope-guard tests — CRITICAL persistence regression + out-of-scope no-op + live no-re-target",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M1.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: NO existing test shows a shrink marker re-applying after a NEW user message (closest: transforms.test.ts:1434-1454 pinned no-drift with session growth, no new user msg) — this regression test is NEW work. filterPipeline tests build MarkerBundle literals {rewinds:[], shrinks:[{seq, target, replacement, pinnedEntryId?, markerEntryId?}]} and BranchEntry arrays (id/type fields; entryMessageYield counts message/custom_message/branch_summary). See architecture/_scouts/tests.md §7 and architecture/scope_guard_design.md §3.\n2. INPUT: the guarded filterPipeline from P1.M1.T2.S2 (markerTurnSpan + both-path enforcement).\n3. LOGIC: In test/transforms.test.ts add: (a) CRITICAL — pinned in-turn shrink issued in turn N KEEPS applying after the user sends message N+1: messages=[user(u0), asst(c1), toolResult(c1,'read',BIG)] with branchEntries mapping, marker with markerEntryId of the shrink entry + pinnedEntryId of c1's result entry; then a SECOND filterPipeline fire with messages=[user(u0), asst(c1), result(c1), user(u1), asst(c2), result(c2)] (same markers, branchEntries extended) → c1's result STILL substituted (<context-shrunk>), c2 untouched. This guards the PRD §2 issuing-turn ruling against any fire-time-bound regression. (b) Out-of-scope marker no-ops: a pinnedEntryId resolving to an entry BEFORE the marker's turn (malformed/legacy) → no substitution, no throw, same-shape output. (c) markerTurnSpan indeterminable (markerEntryId absent from branchEntries) → no-op. (d) LIVE selector never re-targets beyond its marker's turn: unpinned marker with by_tool_name:'read', occurrence:'last' whose turn contains one read; append a LATER-turn read after a new user message → the later read is NOT substituted (span bound); the in-turn one is. Pure fixtures only; no mocks.\n4. OUTPUT: green vitest run locking the guard; the contract the smoke scenario (P1.M4.T1.S3) mirrors end-to-end.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.117",
+                    "h2.117/h3.66",
+                    "h2.42",
+                    "h2.90",
+                    "h2.68"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "R2+R3 — Tools: mulligan_shrink hard refusal + mulligan_cancel two-arm lockstep",
+          "status": "Complete",
+          "description": "The LLM-facing surface: 2-arm schemas with current-turn wording, match-now restricted to the current turn with exact hard-refusal text, E13 advisory-throw path preserved, and cancel's covering-check upgraded to pinned-identity preference with full-history hint resolution.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "mulligan_shrink v2.0 (schema, match-now in-span, hard refusals, descriptions)",
+              "status": "Complete",
+              "description": "Make mulligan_shrink refuse anything not produced this turn, and say so in its schema and description.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "ShrinkParams 2-arm union + current-turn field descriptions + SHRINK_DESC reword",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ShrinkParams is src/tools/shrink.ts:80-106 (typebox Type.Union, 3 arms today); SHRINK_DESC at :112-116 currently says 'Replace a specific past tool result…' — the spec @05 §6 description string is INTERNALLY STALE ('past tool result'); the NORMATIVE source is §2's purpose text ('(v2.0: only current-turn results are eligible — the shrink cannot touch earlier turns.)'). Host validates args BEFORE execute (C13) — removing the arm makes by_content_includes calls dead-on-arrival schema rejections. See architecture/_scouts/tools.md §1 and architecture/external_deps.md.\n2. INPUT: the 2-arm write ShrinkTarget from P1.M1.T1.S1 (parity reference for the schema arms).\n3. LOGIC: (a) Reduce the union to the two arms by_tool_call_id / by_tool_name+occurrence with v2.0 wording: by_tool_call_id description 'The toolCallId of the result to shrink — must be a call from the CURRENT turn.'; by_tool_name 'e.g. read, bash — matches only results from the CURRENT turn' with occurrence 'first/last matching result within the current turn'; union description 'How to identify the CURRENT-TURN tool result to shrink. Only results produced this turn are eligible; earlier turns are out of scope. Resolved live each turn (robust to compaction).' (b) SHRINK_DESC: reword to current-turn scope per the normative §2 purpose (e.g. 'Replace the current turn's tool result with a compact summary you provide…'), explicitly NOT copying spec §6's stale string; mention the hard refusal for earlier-turn targets. (c) Update the ShrinkArgs Static type fallouts. Keep prepareArguments shim (line 400) and notify echo unchanged. Mock nothing (schema-level edit; tests use the existing makePi/makeCtx fakes).\n4. OUTPUT: 2-arm ShrinkParams + reworded SHRINK_DESC exported from src/tools/shrink.ts; by_content_includes now fails HOST validation (anyOf must-be-object ×2) — schema-rejection tests in P1.M2.T2.S1.\n5. DOCS: [Mode A] ShrinkParams descriptions + SHRINK_DESC ARE the LLM-facing docs — they ride with this work (no separate docs subtask).",
+                  "prd_selectors": [
+                    "h2.58",
+                    "h2.58/h3.26",
+                    "h2.58/h3.28",
+                    "h2.62/h3.43",
+                    "h2.36",
+                    "h2.109"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Match-now within currentTurnSpan + hard-refusal texts + drop content branches (structural validity, describeTarget)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S1",
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: resolveTargetEntryId is src/tools/shrink.ts:258-275 — snapshot via ctx.sessionManager.buildContextEntries() flatMap sessionEntryToContextMessages → resolveShrinkTarget → entryIdAtMessageIndex + estimateTokens; try/catch → {entryId:null, origTokens:0} (E13). refusal(reason) at :135-139 returns {content:[{type:'text',text:`Mulligan: refused — ${reason}.`}],details:{}} — return objects, NEVER throws. targetIsStructurallyValid :215-222 and describeTarget :185-192 both have content branches to drop. feedbackText 'Mulligan: shrink recorded. Matched: yes|no.'; orientation line shrinkOrientationLine at :165-167 appended when markerId truthy (the ~0 path). Execute order: config gates → replacement → structural validity → advisory match+pin → appendShrinkMarker → feedback. See architecture/_scouts/tools.md §1.\n2. INPUT: 3-arg resolveShrinkTarget + currentTurnSpan from P1.M1.T1.S2; 2-arm ShrinkParams from P1.M2.T1.S1.\n3. LOGIC: (a) In resolveTargetEntryId: const span = currentTurnSpan(messages); resolve with the span; on match also return the resolved index (extend the return to {entryId, origTokens, index?}) so the caller can distinguish in-span success. (b) Execute step 3 outcomes: in-span match → proceed exactly as today (appendShrinkMarker with ...(entryId ? {pinnedEntryId: entryId} : {})); selector resolves ONLY to an earlier-turn result, or NO in-turn match, or span empty-but-nonempty-history → HARD REFUSAL with reason string 'that result is from a previous turn; only this turn's tool calls can be shrunk' (rendered by refusal() as 'Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.' — exact spec @05 §2 step 3 text); structurally-invalid keeps its own discriminator message ('target discriminator must be non-empty'). To distinguish 'earlier-turn match' from 'no match at all' you may resolve WITHOUT the span once (full history) purely to classify the refusal — both end in the SAME refusal text per spec. (c) Advisory throw (buildContextEntries throws → entryId null, origTokens 0): KEEP the E13 rule — persist with matched:false; the filter guard makes an unverifiable marker inherently safe (it can only ever apply within its own turn); the v1.2 orientation line ~0 path stays reachable exactly here. (d) targetIsStructurallyValid + describeTarget: delete the by_content_includes branches. Mock: tests script makeCtx({contextEntries}) — no external services.\n4. OUTPUT: shrinkExecute with current-turn eligibility + exact refusal text; consumed by R2 tests (P1.M2.T2.S1) and the smoke scenario (P1.M4.T1.S3).\n5. DOCS: [Mode A] JSDoc on resolveTargetEntryId + shrinkExecute steps (cite @05 §2 step 3 v2.0 + the exact refusal string). Rides with the work.",
+                  "prd_selectors": [
+                    "h2.58/h3.30",
+                    "h2.58/h3.22",
+                    "h2.95",
+                    "h2.90",
+                    "h2.117/h3.69",
+                    "h2.58"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "R2 test lock (refusals, pin, advisory path, schema rejection)",
+              "status": "Complete",
+              "description": "Lock the tool's v2.0 behavior with exact-text assertions.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "shrink tests: earlier-turn → hard refusal; no in-turn match → hard refusal; in-span → success+pin; advisory orientation path; content arm fails schema",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/tools/shrink.test.ts house idiom — makePi({throwOnAppend})/makeCtx({contextEntries, throwOnBuildContextEntries, hasUI})/run() helpers at :55-116; clearAll() from src/runtime.js around each test; it.each tables; existing structural-invalid table at :248-264 (content rows move OUT per PRD R5); pinning block :385-392; E8 persist :459-468; orientation ~0 :750-756. Snapshot the shrink entry payload via appended[0]. Schema-level rejection must go through the typebox schema (host validates pre-execute — C13): reuse/extend the hostPipelinePasses harness pattern from test/prepare-args.test.ts. See architecture/_scouts/tests.md §§1-2.\n2. INPUT: the v2.0 shrinkExecute + 2-arm ShrinkParams from P1.M2.T1.\n3. LOGIC: Add tests: (a) by_tool_call_id resolving only BEFORE the last user message → refusal text EXACTLY 'Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.' and appended.length === 0; (b) well-formed by_tool_name with NO in-turn match (match exists in an earlier turn, and also a variant with no match anywhere) → same hard refusal, no persist; (c) in-span match → 'Mulligan: shrink recorded. Matched: yes.' + appended marker carries pinnedEntryId = matched entry id; (d) advisory-throw path (throwOnBuildContextEntries) → persists, Matched: no, orientation line present with ~0 (v1.2 line unchanged); (e) schema: {by_content_includes:'x'} as target FAILS host validation (dead on arrival, execute never runs) — via the typebox Check, not execute; (f) type test: ShrinkArgs.target union has exactly 2 arms (expectTypeOf). Keep existing E14/replacement/structural-discriminator tests green.\n4. OUTPUT: green vitest run test/tools/shrink.test.ts; contract mirrored by smoke (P1.M4.T1.S3).\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.117",
+                    "h2.117/h3.69",
+                    "h2.90",
+                    "h2.95",
+                    "h2.109",
+                    "h2.58/h3.30"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "mulligan_cancel v2.0 (two-arm lockstep, full-history hints, covering-check upgrade)",
+              "status": "Complete",
+              "description": "Cancel follows the shrink schema in lockstep while its MARKER resolution stays full-history.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "CancelParams two-arm union + CANCEL_DESC (drop by_content_includes)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: CancelParams.target is src/tools/cancel.ts:93-133 — Optional 3-arm union in HARD structural parity with ShrinkParams (params.target is handed straight to resolveShrinkTarget); CANCEL_DESC at :140-148 currently enumerates 'by_tool_name+occurrence, or by_content_includes'. Spec @05 §6's cancel description string is STALE (still lists the content arm) — the §5 two-arm schema is normative. 'At least one of target/markerId' is a no-op not a refusal (D1/D2). See architecture/_scouts/tools.md §2.\n2. INPUT: the 2-arm write ShrinkTarget from P1.M1.T1.S1.\n3. LOGIC: Remove the by_content_includes arm from the union; update the union description to 'How to identify the marker to cancel — the SAME (two-arm, v2.0) hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired.'; CANCEL_DESC: drop 'or by_content_includes' from the hint enumeration; keep markerId fallback wording, idempotency wording, and all refusal/no-op/success texts unchanged. markerId-only calls pass through prepareObjectArgs untouched (line 466).\n4. OUTPUT: 2-arm CancelParams + reworded CANCEL_DESC in src/tools/cancel.ts; parity restored with P1.M2.T1.S1's ShrinkParams.\n5. DOCS: [Mode A] CANCEL_DESC + union description are LLM-facing docs — ride with this work.",
+                  "prd_selectors": [
+                    "h2.61",
+                    "h2.61/h3.37",
+                    "h2.62/h3.43",
+                    "h2.61/h3.35",
+                    "h2.36"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S2",
+                  "title": "Covering-marker check: prefer pinned identity; live fallback within the MARKER's turn span; hint resolution stays full-history",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T3.S1",
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: resolveTargetUuid (src/tools/cancel.ts:256-316, call site :387) snapshots buildContextEntries() and calls resolveShrinkTarget(messages, target) — FULL history (correct per @05 §5 v2.0: cancel acts on the marker, not the old content; DO NOT add a span here). Covering check ~:285-305: for mulligan:shrink entries covers = resolveShrinkTarget(messages, data.target) === matchedIndex — LIVE resolution, deliberately not pinnedEntryId (documented at :241); for rewinds covers = hideEntryIds.includes(matchedEntryId). LIFO: highest data.seq wins. markerId fallback :372-385; idempotency :412-420. See architecture/_scouts/tools.md §2.\n2. INPUT: 3-arg resolveShrinkTarget (P1.M1.T1.S2) and markerTurnSpan + marker-entry-id access (P1.M1.T2.S1).\n3. LOGIC: Upgrade the shrink covering-check: covers = (shrink.pinnedEntryId !== null-ish && shrink.pinnedEntryId === matchedEntryId) — PINNED IDENTITY preferred; LIVE fallback (markers without pinnedEntryId): resolve the shrink's target WITH span = markerTurnSpan(snapshotMessages, snapshotBranchEntries, shrinkEntryId) (the marker's OWN turn span — never onto earlier or later content); if the span is indeterminable, fall back to today's unspanned resolution rather than failing the cancel (cancel is retraction — prefer reachability; document the choice). You will need the branch entries in resolveTargetUuid — ctx.sessionManager.getBranch() or equivalent read surface already used elsewhere (verify the exact API in filter.ts/markers.ts; use the same read path). markerId fallback, idempotency, refusal/no-op/success texts, D1/D2 semantics: UNCHANGED. Never throws (E13); tests script makeCtx with entries + contextEntries.\n4. OUTPUT: cancel covering-check with pinned-identity preference; consumed by P1.M2.T4.S1.\n5. DOCS: [Mode A] JSDoc on the covering-check (cite @05 §5 v2.0 note: marker resolution is NOT current-turn-scoped). Rides with the work.",
+                  "prd_selectors": [
+                    "h2.61/h3.40",
+                    "h2.61/h3.39",
+                    "h2.61/h3.41",
+                    "h2.103",
+                    "h2.49",
+                    "h2.68"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "R3 test lock (full-history hints, pinned covering, two-arm schema)",
+              "status": "Complete",
+              "description": "Lock cancel's v2.0 behavior.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "cancel tests: last-turn marker cancellable by hint; covering pinned-identity path; schema two-arm",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/tools/cancel.test.ts — makeCtx scripts BOTH contextEntries (flattened messages) and entries (marker custom entries via makeShrinkEntry(entryId, uuid, {target, seq, pinnedEntryId?})); existing by_content_includes cases at :658-691 (rewrite targets here minimally: case (c) → two-arm equivalents; full migration in P1.M4.T1.S2); CANCEL_DESC verbatim assertion at :466 must track the new string. See architecture/_scouts/tests.md §2.\n2. INPUT: the v2.0 cancel from P1.M2.T3.\n3. LOGIC: Add/retain: (a) FULL-HISTORY hint resolution — a shrink marker issued LAST turn (before the latest user message) is still cancellable by by_tool_call_id hint matching its (now previous-turn) target → cancelled:true (locks @05 §5 v2.0: cancel is not current-turn-scoped); (b) covering-check pinned path — hint matches message M; shrink marker S has pinnedEntryId === entryId(M) → S retired even if S.target's live resolution has drifted; (c) live fallback resolves within the marker's turn span and does NOT cover a later-turn message; (d) schema: content-arm target fails host validation (typebox Check via the hostPipelinePasses pattern); (e) markerId fallback + idempotency + no-op texts unchanged (regression-guard the exact strings). clearAll() per test; no vi.fn.\n4. OUTPUT: green vitest run test/tools/cancel.test.ts.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.117/h3.68",
+                    "h2.117",
+                    "h2.103",
+                    "h2.61/h3.40",
+                    "h2.61/h3.41"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "R4 — Nudge B awareness-only",
+          "status": "Complete",
+          "description": "Replace only the prescribing tail of renderDriftNudge; everything else in the nudge machinery is untouched.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "renderDriftNudge v2.0 tail + FORMAT JSDoc + test lock",
+              "status": "Complete",
+              "description": "One-string change with exact-text test coverage.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Replace the prescribing tail with the awareness-only tail + update FORMAT JSDoc",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: renderDriftNudge is src/notes.ts:310-338 (pure, Pi-free). The three lead variants (delta 'Previous turn added ~<k> tokens to your context' / bloat-fallback 'Previous turn produced <N> bloated result(s)' / totality 'Previous turn changed your context') and the optional ' (sustained over the last N turns)' clause (when sustainedN > 0 && delta < LARGE_SINGLE_TURN_DELTA=4000) are UNCHANGED. The fixed tail at :337 is `${lead}. If wasteful, \\`mulligan_rewind\\` to undo the turn or \\`mulligan_shrink\\` to compact a result.` FORMAT JSDoc at :288-297 quotes the tail and must move in lockstep. renderBloatReminder (Nudge A, :278-282) prescribes mulligan_shrink and is UNTOUCHED (compliant — rides the result inside the producing turn). nudges.ts treats the rendered line as opaque (injectNudge :395) — zero changes there. See architecture/_scouts/nudges-docs.md §1-2.\n2. INPUT: none (self-contained renderer).\n3. LOGIC: Change ONLY line 337's tail to `${lead}. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.` (exact @07 §2 v2.0 text — em-dash and all). Update the FORMAT JSDoc block (288-297) to the new tail + cite spec/07 §2 v2.0 (awareness-only; the reported turn is out of modification scope; Nudge A is the only prescribing nudge). Single physical line, no \\n, no [mulligan] prefix, no trailing newline — preserve all invariants. shouldNudge/injectNudge/windowing/high-water/suppression: untouched.\n4. OUTPUT: new renderDriftNudge output string for P1.M3.T1.S2 tests and the README quote (P1.M4.T2.S1).\n5. DOCS: [Mode A] the FORMAT JSDoc IS the doc — rides with the work.",
+                  "prd_selectors": [
+                    "h2.79",
+                    "h2.79/h3.50",
+                    "h2.79/h3.51",
+                    "h2.6",
+                    "h2.78",
+                    "h2.82",
+                    "h2.82/h3.56"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S2",
+                  "title": "Nudge tests: exact new tail (3 notes + 2 drift + injectNudge sites) + negative no-prescription assertion",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact-string sites — test/notes.test.ts: module const DRIFT_TAIL at :396 (update to the new tail); inline snapshots at :646 and :660 (re-snapshot); the fixed-tail loop at :522-534 (toContain(DRIFT_TAIL)); test/drift_nudge.test.ts: :243 and :250 exact toBe strings (rewrite tails); injectNudge content test :198-204 (currently does NOT pin the tail — strengthen it to assert the new tail). renderBloatReminder phrasing pinned at notes.test.ts:418-421 must stay UNCHANGED (Nudge A still prescribes). See architecture/_scouts/tests.md §4.\n2. INPUT: the new tail string from P1.M3.T1.S1.\n3. LOGIC: Update all listed sites to `Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.`; ADD a negative assertion (notes.test.ts, near the fixed-tail loop): the drift nudge output for every DriftNudgeInput case contains NO 'mulligan_rewind' and NO 'mulligan_shrink' mention (awareness-only lock). Keep the sustained-clause and lead-variant tests green (leads unchanged).\n4. OUTPUT: green vitest run test/notes.test.ts + test/drift_nudge.test.ts.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.79",
+                    "h2.79/h3.54",
+                    "h2.82",
+                    "h2.82/h3.55",
+                    "h2.117",
+                    "h2.78"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M4",
+          "title": "R5 reconciliation sweep + R6 changeset-level documentation",
+          "status": "Complete",
+          "description": "Sweep the remaining ~46 by_content_includes test occurrences (incl. the E19 blocks and integration smoke), then sync README/VERIFICATION and report the spec-staleness wrap-up.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M4.T1",
+              "title": "Test-suite reconciliation sweep (all remaining by_content_includes occurrences)",
+              "status": "Complete",
+              "description": "One coherent pass over the 8 test files so no v1.x content-arm usage remains except deliberate legacy-read fixtures.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S1",
+                  "title": "Sweep transforms/markers/prepare-args/edge-cases tests + rewrite the E19 unit block",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M1.T3.S1",
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: occurrences — test/transforms.test.ts (13: 1032, 1067-1079, 1092-1093, 1116-1125 — the resolver-level subset already handled by P1.M1.T3.S1; rewrite the applyShrink-level ones as legacy no-op expectations); test/markers.test.ts (2: 538 type fixture + 544 expectTypeOf union — becomes the LEGACY-READ fixture: ShrinkTargetRead accepts {by_content_includes:'substr'}, ShrinkTarget (write) does NOT; update the '3-arm discriminated union' naming); test/prepare-args.test.ts (1: :151 anyOf fixture → a two-arm JSON-string fixture e.g. {\"by_tool_call_id\":\"call_x\"}; update the '×3'/'three object-param' comments at :3,:11 to ×2/two arms); test/edge-cases.test.ts E19 block (7: describe at :992 — user/assistant shrink at 992-1010, filterPipeline E19 at 1013-1024, immutability at 1030-1055) → REWRITE per PRD R5 as 'no longer expressible / legacy marker no-ops': keep the immutability invariants but re-target them at toolResult fixtures; replace the user/assistant-message shrink cases with legacy-marker no-op cases (a persisted by_content_includes marker passed through filterPipeline applies NOTHING). See architecture/_scouts/tests.md §2.\n2. INPUT: legacy no-op semantics from P1.M1.T1.S2 (content-arm targets resolve null → no-op everywhere).\n3. LOGIC: Execute the rewrites above; run `npx vitest run` for the four files; E27 regression language 'all three anyOf arms' → 'both anyOf arms' wherever it appears (prepare-args.test.ts :3,:11; markers.test.ts '3-arm' naming). No mocks beyond the existing factories.\n4. OUTPUT: zero by_content_includes occurrences in these four files except the deliberate legacy-read fixtures (markers.test.ts) — verifiable via grep -rn by_content_includes test/transforms.test.ts test/markers.test.ts test/prepare-args.test.ts test/edge-cases.test.ts.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.101",
+                    "h2.117",
+                    "h2.117/h3.62",
+                    "h2.117/h3.66",
+                    "h2.109",
+                    "h2.90"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S2",
+                  "title": "Sweep tools tests: structural-invalid rows → schema-rejection; cancel cases 658-690",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T2.S1",
+                    "P1.M2.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/tools/shrink.test.ts — the structural-invalid it.each rows at :253-254 (['by_content_includes empty', {by_content_includes:''}], ['by_content_includes whitespace', {by_content_includes:' \\t '}]) MOVE to schema-rejection tests (host typebox Check — the arm no longer exists; execute never runs); the remaining matched/persist content cases at :344-356, :385-392, :459-468, :750-756 are already superseded by P1.M2.T2.S1's new cases — delete the stale ones. test/tools/cancel.test.ts — cases at :658-690 (case (c) content covering + (c-neg)) → replace with two-arm equivalents (by_tool_call_id covering + a no-match no-op); CANCEL_DESC verbatim assertion at :466 → new string from P1.M2.T3.S1. See architecture/_scouts/tests.md §§2,6.\n2. INPUT: v2.0 tools + their new tests from P1.M2.\n3. LOGIC: Apply the moves/deletions/replacements; keep refusal-text exactness; run vitest for both files.\n4. OUTPUT: grep -c by_content_includes test/tools/*.test.ts → 0.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h2.117",
+                    "h2.109",
+                    "h2.103",
+                    "h2.101"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S3",
+                  "title": "Integration smoke: F-shrink-persist current-turn case; E19 user-message case replaced; run-smoke.mjs synced",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test/integration/smoke.ts — F-shrink-persist at :187-196 uses {target:{by_content_includes: MSG_CANARY}} against the session_start MSG-canary custom_message; the E19 user-message case at :206-213 shrinks USER_CANARY (role user). run-smoke.mjs drives `pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id … -p '/mulligan_smoke <scenario>' -p 'Reply with exactly: OK'` and parses the smoke + session JSONL; CANARIES MUST STAY BYTE-IDENTICAL between smoke.ts and run-smoke.mjs (GOTCHA #8) — any scenario/canary change requires synchronized edits to BOTH files; scenarios.md :134 documents the model-driven prompt mentioning by_content_includes. See architecture/_scouts/tests.md §§1-2.\n2. INPUT: v2.0 shrink semantics (P1.M2.T1.S2) + its unit contract (P1.M2.T2.S1).\n3. LOGIC: (a) F-shrink-persist: retarget to a CURRENT-TURN toolResult (the deterministic setup turn's own tool result — e.g. the smoke command's tool call id or a by_tool_name+occurrence selector within the turn); keep the persistence assertion (substitution visible on the second -p turn; original on disk) — this is the end-to-end mirror of the P1.M1.T3.S2 regression. (b) E19 user-message case: REMOVE and replace with a current-turn toolResult case (per PRD R5) — e.g. an earlier-turn by_tool_call_id attempt asserting the refusal path end-to-end, or a second in-turn shrink; keep scenario naming/observability conventions. (c) Sync run-smoke.mjs assertions + canaries; update scenarios.md :134 wording (drop by_content_includes). Smoke needs a real pi binary — treat the harness itself as the environment (no other mocks).\n4. OUTPUT: `npm run smoke` green for the updated scenarios; grep by_content_includes test/integration/ → 0.\n5. DOCS: [Mode A] test/integration/scenarios.md rides with this work (it documents the scenario surface).",
+                  "prd_selectors": [
+                    "h2.118",
+                    "h2.118/h3.70",
+                    "h2.118/h3.72",
+                    "h2.101",
+                    "h2.120"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M4.T2",
+              "title": "Sync changeset-level documentation",
+              "status": "Complete",
+              "description": "Mode B final sweep: README.md sections that summarize the whole v2.0 delta, the VERIFICATION.md grep, and the owner-facing spec-staleness wrap-up. Runs LAST — depends on every implementing subtask.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S1",
+                  "title": "README.md: shrink blurb, drift paragraph, E19 note, matcher lists, BUG-004 note",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T3.S2",
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md hits (verified) — :157 shrink blurb 'Replace a specific past tool result…'; :169 target matcher list (by_content_includes); :173 E19 trust note 'even summarizing a user message (E19) is lossless'; :187-189 retract hint-shape mentions; :234 drift paragraph quoting the OLD nudge string; :266 BUG-004 note referencing the content arm. See architecture/_scouts/nudges-docs.md §3.\n2. INPUT: final strings from all implementing subtasks (SHRINK_DESC wording P1.M2.T1.S1, new nudge tail P1.M3.T1.S1, hard-refusal sentence P1.M2.T1.S2, two-arm cancel P1.M2.T3.S1).\n3. LOGIC: (a) §mulligan_shrink blurb ~:157 → current-turn eligibility + the hard-refusal sentence; (b) drift-nudge paragraph ~:234 → quote the v2.0 tail, note awareness-only (no rewind/shrink prescription; Nudge A is the prescribing one); (c) E19 trust note ~:173 → reword: E19 is MOOT under v2.0 (a non-toolResult shrink is no longer expressible); KEEP the view-substitution invariant framing (original on disk, recoverable via /tree) and DROP the user-message-shrink framing; (d) matcher lists :169/:187/:189 → two arms; (e) BUG-004 note :266 → mark the content-arm behavior as historical (v1.x) — the arm is gone; (f) sanity-check the tool tables/features sections for any other three-arm or past-turn language.\n4. OUTPUT: README.md consistent with the shipped v2.0 behavior.\n5. DOCS: [Mode B] this IS the changeset-level docs task.",
+                  "prd_selectors": [
+                    "h2.1",
+                    "h2.5",
+                    "h2.6",
+                    "h2.36",
+                    "h2.79",
+                    "h2.58"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S2",
+                  "title": "Stale-reference grep sweep (README + VERIFICATION) + spec-staleness wrap-up notes for the owner",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M4.T2.S1",
+                    "P1.M4.T1.S1",
+                    "P1.M4.T1.S2",
+                    "P1.M4.T1.S3",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T4.S1",
+                    "P1.M3.T1.S2",
+                    "P1.M1.T3.S1",
+                    "P1.M1.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VERIFICATION.md:209 has the historical BUG-004 row naming by_content_includes — historical log: do NOT rewrite history; append v2.0 delta rows instead (current-turn scope guard, removed arm, awareness-only nudge, persistence regression test). Spec staleness registry (verified, architecture/scope_guard_design.md §6): (1) spec/05 §6 SHRINK description string says 'past tool result'; (2) spec/05 §6 CANCEL description string still lists by_content_includes; (3) spec/05 §5 purpose prose enumerates three arms; (4) spec/10 §1.11 has NO content bullet (the PRD's claim it does is itself stale); (5) spec/10 §1.5/§2.1 lack current-turn scenarios (R5 supplied them). Spec is READ-ONLY for this delta.\n2. INPUT: the completed changeset (all implementing + sweep subtasks).\n3. LOGIC: (a) `grep -n 'by_content_includes\\|past tool result\\|If wasteful' README.md VERIFICATION.md` → fix any remaining README staleness; for VERIFICATION.md append (not rewrite) the v2.0 verification rows; (b) produce the WRAP-UP NOTES (deliverable text in the final report / commit notes) enumerating the spec-staleness registry above so the owner can patch spec/ — do NOT edit spec/ yourself; (c) final full gate: `npm run typecheck && npx vitest run && npm run smoke`.\n4. OUTPUT: zero stale references; wrap-up notes text; green full gate.\n5. DOCS: [Mode B] closing sweep of the changeset-level docs task.",
+                  "prd_selectors": [
+                    "h2.1",
+                    "h2.126",
+                    "h2.124",
+                    "h2.58",
+                    "h2.61"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

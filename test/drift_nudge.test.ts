@@ -201,6 +201,9 @@ describe("injectNudge — pure append, ephemeral (spec/07 §2)", () => {
     expect(typeof last.content).toBe("string");
     expect((last.content as string).startsWith("Previous turn")).toBe(true);
     expect((last.content as string)).not.toContain("[mulligan]");
+    expect((last.content as string)).toContain("Keep this turn's outputs lean");
+    expect((last.content as string)).not.toContain("mulligan_rewind");
+    expect((last.content as string)).not.toContain("mulligan_shrink");
   });
 
   it("does NOT stack when called repeatedly on the ORIGINAL input (ephemeral / recomputed each fire)", () => {
@@ -240,14 +243,14 @@ describe("injectNudge — sustained-growth clarification (Minor #3)", () => {
     const recent = [latest, metric({ deltaTokens: 5000, seq: 2, turnIndex: 2 }), metric({ deltaTokens: 5000, seq: 1, turnIndex: 1 })];
     const result = injectNudge([], latest, recent, config);
     const content = (result[0] as Record<string, unknown>).content as string;
-    expect(content).toBe("Previous turn added ~5k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.");
+    expect(content).toBe("Previous turn added ~5k tokens to your context. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.");
   });
 
   it("does NOT append the clause when recentMetrics/config are omitted (back-compat with single-metric callers)", () => {
     const latest = metric({ deltaTokens: 800 });
     const result = injectNudge([], latest);
     const content = (result[0] as Record<string, unknown>).content as string;
-    expect(content).toBe("Previous turn added ~0.8k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.");
+    expect(content).toBe("Previous turn added ~0.8k tokens to your context. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.");
   });
 
   it("does NOT append the clause when delta is null (bloat-only lead)", () => {

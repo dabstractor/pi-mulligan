@@ -102,7 +102,9 @@ describe("validateConfig", () => {
     expect(validateConfig({ nudges: { bloatThresholdBytes: NaN } }).nudges.bloatThresholdBytes).toBe(16384);
     expect(validateConfig({ nudges: { bloatThresholdBytes: Infinity } }).nudges.bloatThresholdBytes).toBe(16384);
     expect(validateConfig({ nudges: { bloatThresholdBytes: "8192" } }).nudges.bloatThresholdBytes).toBe(16384); // no string coercion
-    expect(validateConfig({ rewind: { maxDepth: 0 } }).rewind.maxDepth).toBe(0); // >=0 allowed
+    // maxDepth floors to min 1 (BUG-002/003 convention — 0 would silently disable rewinds; 2.5 is not a depth)
+    expect(validateConfig({ rewind: { maxDepth: 0 } }).rewind.maxDepth).toBe(5); // <1 → default
+    expect(validateConfig({ rewind: { maxDepth: 2.5 } }).rewind.maxDepth).toBe(2); // fractional → floor
     expect(validateConfig({ rewind: { maxDepth: -1 } }).rewind.maxDepth).toBe(5); // <0 → default
   });
 

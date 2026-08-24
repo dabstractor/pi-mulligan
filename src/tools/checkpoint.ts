@@ -49,6 +49,10 @@ import { getConfig } from "../config.js"; // BUG-007: E14 master-switch gate (en
 /**
  * CheckpointParams — the typebox parameter schema for `mulligan_checkpoint` (spec/05 §3, verbatim).
  * `Static<typeof CheckpointParams>` === `{ name: string }`. EXPORTED for tests + the index.ts wiring step.
+ *
+ * @deprecated Removed as an agent tool in v1.1 (spec/05 §3 / E23 — checkpoint creation is human-only
+ * via the `/mulligan_checkpoint` command). Not registered by src/index.ts (only rewind/shrink/audit/cancel).
+ * Retained because Static<typeof CheckpointParams> feeds this module's types and the test harness.
  */
 export const CheckpointParams = Type.Object({
   name: Type.String({
@@ -80,6 +84,10 @@ export function validCheckpointName(name: string): boolean {
 /**
  * CKPT_DESC — the LLM-facing description (spec/05 §5 "Description strings", Mode A LLM-facing docs).
  * This string IS the tool's documentation. Copy verbatim — it drives LLM usage.
+ *
+ * @deprecated Removed as an agent tool in v1.1 (spec/05 §3 / E23 — checkpoint creation is human-only
+ * via the `/mulligan_checkpoint` command). Not registered by src/index.ts (only rewind/shrink/audit/cancel
+ * are), so this string is never surfaced to an LLM. Retained solely with the dormant tool definition.
  */
 export const CKPT_DESC =
   "Name the current position so a later mulligan_rewind can jump straight back to it. " +
@@ -87,7 +95,13 @@ export const CKPT_DESC =
 
 // ── Result builders (always include `details` — CRITICAL GOTCHA #1) ──────────
 
-/** CheckpointDetails — the structured `details` payload surfaced to logs/audit/UI. */
+/**
+ * CheckpointDetails — the structured `details` payload surfaced to logs/audit/UI.
+ *
+ * @deprecated Removed as an agent tool in v1.1 (spec/05 §3 / E23 — checkpoint creation is human-only
+ * via the `/mulligan_checkpoint` command). Not registered by src/index.ts (only rewind/shrink/audit/cancel).
+ * Retained as the details type of the harness-driven tool.
+ */
 export interface CheckpointDetails {
   /** The (validated, or attempted) checkpoint name. Present on every path for correlation. */
   name: string;
@@ -178,6 +192,11 @@ async function checkpointExecute(
  *
  * index.ts (P1.M7.T1.S1) will do: `pi.registerTool(makeCheckpointTool(pi));`.
  * Unit tests do: `const tool = makeCheckpointTool(fakePi);`.
+ *
+ * @deprecated Removed as an agent tool in v1.1 (spec/05 §3 / E23 — checkpoint creation is human-only
+ * via the `/mulligan_checkpoint` command). Not registered by src/index.ts (only rewind/shrink/audit/cancel
+ * are). Only validCheckpointName remains live shared logic (consumed by src/commands.ts). This factory
+ * survives solely as the integration harness's deterministic label-setter (test/integration/smoke.ts).
  */
 export function makeCheckpointTool(pi: ExtensionAPI): ToolDefinition<typeof CheckpointParams, CheckpointDetails> {
   return defineTool({

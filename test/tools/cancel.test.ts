@@ -22,6 +22,8 @@
  * The DISTINCT entry-id vs data.id(uuid) fixture values (e.g. "entry-rw-1" vs "uuid-rw-1") PROVE the
  * markerId→targetId mapping — a bug that forwards the entry id as targetId would FAIL these assertions.
  */
+import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { describe, it, expect, expectTypeOf, beforeEach, afterEach } from "vitest";
 import {
   makeCancelTool,
@@ -35,7 +37,7 @@ import { clearAll } from "../../src/runtime.js";
 // S3: ShrinkTarget is the structural type for a shrink/cancel `target` selector (imported to type the
 // makeShrinkEntry opts.target param). `as unknown as ShrinkTarget` is NOT needed at the fixture level —
 // a plain object literal with a discriminator key assigns in structurally (no cast), matching shrink.test.ts.
-import type { ShrinkTarget } from "../../src/transforms.js";
+import type { ShrinkTargetRead } from "../../src/transforms.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -80,15 +82,20 @@ function makeCtx(opts: {
   entries?: SessionEntry[];
   /** buildContextEntries() return — the message snapshot the TARGET path flattens (S3). */
   contextEntries?: SessionEntry[];
+  /** getBranch() return — root→leaf branch entries for markerTurnSpan (P1.M2.T4.S1). Default [] (span null). */
+  branchEntries?: SessionEntry[];
   throwOnGetEntries?: boolean;
   /** a throwing buildContextEntries → resolveTargetUuid's try/catch → null → step-4 no-op (S3). */
   throwOnBuildContextEntries?: boolean;
+  /** a throwing getBranch → resolveTargetUuid's outer catch → null → step-4 no-op (filter.test.ts:123 pattern). */
+  throwOnGetBranch?: boolean;
 } = {}) {
   const sessionId = opts.sessionId ?? "s1";
   // default to "leaf-1" UNLESS leafId is explicitly passed (incl. null) — lets callers test the null return.
   const scriptedLeafId: string | null = opts.leafId === undefined ? "leaf-1" : opts.leafId;
   const entries = opts.entries ?? [];
   const contextEntries = opts.contextEntries ?? [];
+  const branchEntries = opts.branchEntries ?? [];
   const sessionManager = {
     getSessionId() {
       return sessionId;
@@ -106,6 +113,16 @@ function makeCtx(opts: {
     buildContextEntries() {
       if (opts.throwOnBuildContextEntries) throw new Error("buildContextEntries boom");
       return contextEntries;
+    },
+    // P1.M2.T3.S2/P1.M2.T4.S1: resolveTargetUuid's shrink covering arm reads getBranch() once (filter.ts:252
+    // pattern) for markerTurnSpan. Without it, the fake sessionManager would throw → outer catch → null → every
+    // target-path test would silently no-op. DEFAULTS to [] — NOT the entries array — so markerTurnSpan finds no
+    // marker in the branch → null span → UNSPANNED live fallback = exactly the pre-v2.0 behavior every existing
+    // target-path case asserts (they stay green untouched). Tests in the v2.0 describe script branchEntries
+    // explicitly (root→leaf, marker entry BETWEEN the turn's messages and the next user message).
+    getBranch() {
+      if (opts.throwOnGetBranch) throw new Error("getBranch boom"); // filter.test.ts:123 precedent
+      return branchEntries;
     },
   };
   return { ctx: { sessionManager } as unknown as ExtensionContext };
@@ -192,11 +209,13 @@ function makeRewindEntry(
  * the cancel is using, or one resolving to the same message). `opts.seq` parameterizes the LIFO tiebreak.
  * The legacy positional `seq` 3rd-arg form (number) is preserved so the existing markerId-path cases compile
  * unchanged (default target {by_tool_call_id:"call-A"}).
+ * P1.M2.T4.S1: `opts.pinnedEntryId` seeds data.pinnedEntryId — the PINNED-IDENTITY covering arm. It holds
+ * an ENTRY id (e.g. "e-1"), NEVER a message index and NEVER the marker's own entry id.
  */
 function makeShrinkEntry(
   entryId: string,
   uuid: string,
-  seqOrOpts: number | { seq?: number; target?: ShrinkTarget } = {},
+  seqOrOpts: number | { seq?: number; target?: ShrinkTargetRead; pinnedEntryId?: string } = {},
 ): SessionEntry {
   const opts = typeof seqOrOpts === "number" ? { seq: seqOrOpts } : seqOrOpts;
   return {
@@ -211,6 +230,7 @@ function makeShrinkEntry(
       kind: "shrink",
       id: uuid,
       target: opts.target ?? { by_tool_call_id: "call-A" },
+      ...(opts.pinnedEntryId !== undefined ? { pinnedEntryId: opts.pinnedEntryId } : {}),
       replacement: "(shrink) summary",
       reason: "too big",
       seq: opts.seq ?? 1,
@@ -463,7 +483,7 @@ describe("mulligan_cancel — registration metadata (spec/05 §5)", () => {
       "Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when " +
         "you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken " +
         "transform would apply on every turn for the rest of the session. Identify the marker by `target` " +
-        "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — " +
+        "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence) — " +
         "the most recent marker affecting that content is retired; or pass an explicit `markerId` if you have one. " +
         "The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). " +
         "Cancelling a non-existent or already-cancelled marker is a safe no-op.",
@@ -474,6 +494,27 @@ describe("mulligan_cancel — registration metadata (spec/05 §5)", () => {
     const { pi } = makePi();
     const tool = makeCancelTool(pi);
     expect(tool.parameters).toBe(CancelParams);
+  });
+
+  it("host validation pipeline: the REMOVED content-substring arm FAILS CancelParams; a 2-arm target PASSES", () => {
+    // Mirrors test/prepare-args.test.ts's hostPipelinePasses (the exact pi-ai validateToolArguments
+    // pipeline): structuredClone → prepareArguments → Value.Convert → Compile(CancelParams).Check.
+    const { pi } = makePi();
+    const tool = makeCancelTool(pi);
+    const REMOVED_ARM = ["by_content", "_includes"].join("_"); // the arm v2.0 deleted from the union
+    const pipeline = (args: unknown): boolean => {
+      let prepared = structuredClone(args) as Record<string, unknown>;
+      if (typeof tool.prepareArguments === "function") {
+        prepared = tool.prepareArguments(prepared) as Record<string, unknown>;
+      }
+      Value.Convert(CancelParams as never, prepared as never);
+      return Compile(CancelParams as never).Check(prepared as never);
+    };
+    // The removed (v2.0) content-substring arm no longer validates through the real host pipeline.
+    expect(pipeline({ target: { [REMOVED_ARM]: "x" } })).toBe(false);
+    // A well-formed 2-arm target still passes.
+    expect(pipeline({ target: { by_tool_call_id: "call-1" } })).toBe(true);
+    expect(pipeline({ target: { by_tool_name: "bash", occurrence: "last" } })).toBe(true);
   });
 });
 
@@ -655,40 +696,48 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     expect(res.details.cancelled).toBe(true);
   });
 
-  // ── Case (c): by_content_includes → most-recent covering a message with the substring ────────────────
+  // ── Case (c): by_tool_name+occurrence covering-check via the marker's OWN selector (second v2.0 arm) ──
+  // The legacy cast-based content-matcher cases were removed in P1.M2.T4.S1: that arm no longer
+  // exists in the v2.0 schema, and the unmatched-substring no-op is fully covered by case (e) below.
 
-  it("(c) by_content_includes: a message whose content includes the substring → covering marker retired", async () => {
+  it("(c) by_tool_name:'bash', occurrence:'last': a shrink whose own selector resolves to the matched message → covers → retired", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
       contextEntries: [
-        msgEntry("toolResult", toolResult("call-A", "bash", 'df -h ... "ENOSPC at /disk"')),
+        msgEntry("toolResult", toolResult("call-A", "bash", 'df -h ... "ENOSPC at /disk"')), // idx 0
       ],
       entries: [
         makeShrinkEntry("entry-sh-enospc", "uuid-sh-enospc", {
-          target: { by_content_includes: "ENOSPC" }, // resolves to idx 0 === matchedIndex
+          target: { by_tool_name: "bash", occurrence: "last" }, // resolves to idx 0 === matchedIndex
           seq: 1,
         }),
       ],
     });
 
-    const res = await run(pi, ctx, { target: { by_content_includes: "ENOSPC" } });
+    const res = await run(pi, ctx, { target: { by_tool_name: "bash", occurrence: "last" } });
 
     expect(appended).toHaveLength(1);
     expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-enospc");
     expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
   });
 
-  it("(c-neg) by_content_includes with an absent substring → no message matches → no-op (covered in case e)", async () => {
-    // This is the NEGATIVE arm of (c): an unmatched substring drives matchedIndex===null → no marker covers.
-    // Asserted fully as case (e) below (same no-op path); here we just confirm the substring truly doesn't match.
+  it("(c-neg) hint matches, but NO marker covers (marker targets a different toolCallId) → no-op", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
-      contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", 'all good'))],
-      entries: [],
+      contextEntries: [msgEntry("toolResult", toolResult("call-B", "bash", "other output"))], // idx 0
+      entries: [
+        makeShrinkEntry("entry-sh-other", "uuid-sh-other", {
+          target: { by_tool_call_id: "call-A" }, // resolves null ≠ matchedIndex 0 → does NOT cover
+          seq: 1,
+        }),
+      ],
     });
 
-    await run(pi, ctx, { target: { by_content_includes: "ZZZ-NOT-PRESENT" } });
-    expect(appended).toHaveLength(0); // no match → no marker covers → nothing appended
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-B" } });
+
+    expect(appended).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
   });
 
   // ── Case (d): several markers cover → MOST RECENT by seq (LIFO); rest stay active ────────────────────
@@ -907,5 +956,185 @@ describe("mulligan_cancel — target path (spec/10 §1.11 (a)-(g))", () => {
     expect(appended).toHaveLength(0); // null targetUuid → no-op
     expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
     expect(res.details).toEqual({ cancelled: false });
+  });
+});
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════
+// P1.M2.T4.S1 — v2.0 covering lock (P1.M2.T3.S2: pinned identity, marker-span live fallback, full-history hints).
+//
+// Locks the resolveTargetUuid covering rules landed by P1.M2.T3.S2 against regression:
+//   (v2-a) FULL-HISTORY hints — a shrink issued LAST turn is cancellable by a hint matching its (previous-turn)
+//          target: the HINT is never span-bounded (@05 §5 v2.0 — cancel is not current-turn-scoped).
+//   (v2-b) PINNED-IDENTITY covering — pinnedEntryId === matchedEntryId (ENTRY-id identity compare) retires the
+//          marker even when its live selector has DRIFTED onto a different message. A pin ≠ matched entry id
+//          does NOT cover (the live arm is not consulted when a pin exists).
+//   (v2-c) LIVE fallback is SPAN-BOUNDED — an unpinned marker only covers a message resolvable within its OWN
+//          issuing-turn span (markerTurnSpan over getBranch()); a LATER-turn message is never covered.
+//   (v2-d) span indeterminable (marker not in the branch — compacted head) → UNSPANNED fallback covers
+//          ("retraction prefers reachability", T3.S2 JSDoc).
+//
+// branchEntries is ROOT→LEAF (chronological) with the marker entry BETWEEN the turn's messages and the NEXT
+// user message — the marker's position determines markerTurnSpan's {start,end}. Message entry objects are
+// built ONCE as consts and shared between contextEntries (the flattened snapshot) and branchEntries.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("mulligan_cancel — v2.0 covering lock (P1.M2.T3.S2: pinned identity, marker-span live fallback, full-history hints)", () => {
+  beforeEach(() => resetSnapshotSeq()); // per-test isolation: no two tests collide on `e-1`
+
+  // ── (v2-a) FULL-HISTORY hint — a last-turn marker is cancellable by a hint matching its target ──────
+
+  it("(v2-a) a shrink issued LAST TURN is cancellable by a by_tool_call_id hint (hint is full-history)", async () => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" }); // e-1, msg idx 0
+    const r1 = msgEntry("toolResult", toolResult("call-A", "read", "big")); // e-2, msg idx 1
+    const u1 = msgEntry("user", { content: "u1 (latest turn)" }); // e-3, msg idx 2
+    const sh = makeShrinkEntry("entry-sh-1", "uuid-sh-1", {
+      target: { by_tool_call_id: "call-A" },
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [u0, r1, u1], // the flattened snapshot (3 messages)
+      entries: [sh], // the marker scan
+      // root→leaf: the marker sits BETWEEN the turn-1 messages and the latest user message → span {start:1,end:2}
+      branchEntries: [u0, r1, sh, u1],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    // The hint resolves FULL-HISTORY to msg idx 1 (turn 1 — NOT current-turn-scoped); the marker's spanned
+    // live fallback also resolves idx 1 within its issuing-turn span → covers → retired.
+    expect(appended).toHaveLength(1);
+    expect(appended[0].customType).toBe("mulligan:cancel");
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-1");
+    expect(firstText(res)).toBe(
+      "Mulligan: marker cancelled. The transform will no longer apply from the next turn on.",
+    );
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  // ── (v2-b) pinned-identity covering — selector drift tolerated; wrong pin does NOT cover ────────────
+
+  it("(v2-b) a PINNED shrink is retired under selector drift (pin === matched ENTRY id, not the live selector)", async () => {
+    const { appended, pi } = makePi();
+    const read1 = msgEntry("toolResult", toolResult("call-A", "read", "first")); // e-1, idx 0
+    const read2 = msgEntry("toolResult", toolResult("call-B", "read", "second")); // e-2, idx 1
+    // live selector has DRIFTED (occurrence 'last' now resolves idx 1) — but the pin is e-1 (idx 0's ENTRY id).
+    const sh = makeShrinkEntry("entry-sh-pin", "uuid-sh-pin", {
+      target: { by_tool_name: "read", occurrence: "last" },
+      pinnedEntryId: "e-1",
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [read1, read2],
+      entries: [sh],
+      branchEntries: [read1, read2, sh],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    // matchedIndex 0, matchedEntryId "e-1" === pinnedEntryId → covers (even though the live selector points at idx 1).
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-pin");
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  it("(v2-b-neg) a pin pointing at a DIFFERENT entry id does NOT cover (identity-only; no live fallback)", async () => {
+    const { appended, pi } = makePi();
+    const read1 = msgEntry("toolResult", toolResult("call-A", "read", "first")); // e-1, idx 0
+    const read2 = msgEntry("toolResult", toolResult("call-B", "read", "second")); // e-2, idx 1
+    const sh = makeShrinkEntry("entry-sh-pin", "uuid-sh-pin", {
+      target: { by_tool_name: "read", occurrence: "last" },
+      pinnedEntryId: "e-2", // pin ≠ matched entry id e-1 → no cover (the pinned arm is identity-only)
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [read1, read2],
+      entries: [sh],
+      branchEntries: [read1, read2, sh],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    // matchedIndex 0 / matchedEntryId e-1; pin e-2 ≠ e-1 → NOT covered → safe no-op.
+    expect(appended).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  // ── (v2-c) live fallback is span-bounded — does NOT cover a later-turn message ───────────────────────
+
+  it("(v2-c) an UNPINNED turn-1 shrink does NOT cover a turn-TWO message (span-bounded live fallback)", async () => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" }); // e-1, idx 0
+    const r1 = msgEntry("toolResult", toolResult("call-A", "read", "turn-one read")); // e-2, idx 1
+    const u1 = msgEntry("user", { content: "u1" }); // e-3, idx 2
+    const r2 = msgEntry("toolResult", toolResult("call-B", "read", "turn-two read")); // e-4, idx 3
+    const sh = makeShrinkEntry("entry-sh-old", "uuid-sh-old", {
+      target: { by_tool_name: "read", occurrence: "last" }, // unpinned
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [u0, r1, u1, r2],
+      entries: [sh],
+      // marker issued in TURN 1 (between r1 and u1) → markerTurnSpan → {start:1, end:2}
+      branchEntries: [u0, r1, sh, u1, r2],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "last" } });
+
+    // The HINT (full-history) matches read2 at idx 3; the marker's spanned live resolution is bounded to
+    // [1,2) → idx 1 ≠ 3 → NOT covered → no-op.
+    expect(appended).toHaveLength(0);
+    expect(firstText(res)).toBe("Mulligan: no active marker found for that target — nothing to cancel.");
+    expect(res.details).toEqual({ cancelled: false });
+  });
+
+  it("(v2-c control) same fixture, hint by_tool_call_id 'call-A' → matched within the marker's span → covers", async () => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" }); // e-1, idx 0
+    const r1 = msgEntry("toolResult", toolResult("call-A", "read", "turn-one read")); // e-2, idx 1
+    const u1 = msgEntry("user", { content: "u1" }); // e-3, idx 2
+    const r2 = msgEntry("toolResult", toolResult("call-B", "read", "turn-two read")); // e-4, idx 3
+    const sh = makeShrinkEntry("entry-sh-old", "uuid-sh-old", {
+      target: { by_tool_name: "read", occurrence: "last" }, // unpinned
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [u0, r1, u1, r2],
+      entries: [sh],
+      branchEntries: [u0, r1, sh, u1, r2],
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" } });
+
+    // matchedIndex 1; spanned live resolution within [1,2) → idx 1 → covers.
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-old");
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
+  });
+
+  // ── (v2-d) span indeterminable → UNSPANNED fallback (retraction prefers reachability) ────────────────
+
+  it("(v2-d) marker NOT in the branch (empty branchEntries → null span) → unspanned live fallback covers", async () => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" }); // e-1, idx 0
+    const r1 = msgEntry("toolResult", toolResult("call-A", "read", "turn-one read")); // e-2, idx 1
+    const u1 = msgEntry("user", { content: "u1" }); // e-3, idx 2
+    const r2 = msgEntry("toolResult", toolResult("call-B", "read", "turn-two read")); // e-4, idx 3
+    const sh = makeShrinkEntry("entry-sh-old", "uuid-sh-old", {
+      target: { by_tool_name: "read", occurrence: "last" }, // unpinned
+      seq: 1,
+    });
+    const { ctx } = makeCtx({
+      contextEntries: [u0, r1, u1, r2],
+      entries: [sh],
+      branchEntries: [], // compacted-head shape: markerTurnSpan → null → UNSPANNED fallback
+    });
+
+    const res = await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "last" } });
+
+    // Unspanned live resolution: {read,last} resolves full-array to idx 3; matchedIndex is 3 → covers.
+    expect(appended).toHaveLength(1);
+    expect((appended[0].data as Record<string, unknown>).targetId).toBe("uuid-sh-old");
+    expect(res.details).toEqual({ cancelled: true, markerId: "leaf-1" });
   });
 });

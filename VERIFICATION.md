@@ -14,12 +14,12 @@
 
 | # | Criterion (`spec/11` §3) | Gate command | Observed result | Status |
 |---|---|---|---|---|
-| 1 | All Tier-1 unit tests green (incl. pairing-invariant property test) | `npm test` | **671 passed, 0 failed** (18 files) | ✅ |
+| 1 | All Tier-1 unit tests green (incl. pairing-invariant property test) | `npm test` | **1104 passed, 0 failed** (25 files) | ✅ |
 | 2 | All F-* integration scenarios green | `npm run smoke` | **14/14 scenarios passed** (9 F-* + 5 E-*); F-protected now asserts the BUG-006 pre-persist refusal (see remediation table) | ✅ |
 | 3 | `mulligan:nudge` provably never persisted | grep smoke session JSONL for persisted `customType:"mulligan:nudge"` | **0** persisted nudge messages in any smoke session | ✅ |
-| 4 | `config.enabled=false` → pure no-op | grep the 7 master-switch gates + disabled unit tests | **7 gates present** (filter + all 5 tools [rewind/shrink/audit/cancel/checkpoint] + 2 nudges [bloatReminder/perTurnDrift]) + disabled-path tests green | ✅ |
+| 4 | `config.enabled=false` → pure no-op | grep the master-switch gates + disabled unit tests | **6 gates present** (filter + all 4 tools [rewind/shrink/audit/cancel] + 2 nudges [bloatReminder/perTurnDrift]) + disabled-path tests green (v1.1 removed the agent `mulligan_checkpoint` tool) | ✅ |
 | 5 | Intentional filter exception doesn't break a turn | `filter.test.ts -t fail-open` + smoke `F-failopen` | **10 fail-open tests green** + F-failopen PASS | ✅ |
-| 6 | README documents install, the five agent-callable tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **5 *_DESC verbatim + 20-knob config table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** (rewind, shrink, checkpoint, audit, cancel) | ✅ |
+| 6 | README documents install, the four agent-callable tools, configuration, the soft-delete guarantee | cross-check README vs `src/` | **4 *_DESC verbatim + 21-knob config table matches `DEFAULT_CONFIG` + Disabling note POST-E14 consistent + zero-config proven** (rewind, shrink, audit, cancel) | ✅ |
 | + | typebox schemas compile | `npx tsc --noEmit` | **exit 0** (strict + skipLibCheck; typebox `Type.Object` schemas compile) | ✅ |
 | + | zero-config smoke load (`spec/11` §2 Step 9) | `pi -e ./src/index.ts -p "Reply with the single word: ok"` | **no load error**; model responded `ok` | ✅ |
 
@@ -29,7 +29,7 @@
 
 ```bash
 # DoD #1 — Tier-1 unit tests (incl. pairing-invariant property test, transforms.test.ts:1420)
-npm test                                        # → 671 passed, 0 failed
+npm test                                        # → 1104 passed, 0 failed
 
 # Bonus — typebox + strict types compile
 npx tsc --noEmit                                # → exit 0
@@ -37,8 +37,8 @@ npx tsc --noEmit                                # → exit 0
 # DoD #6 / spec/11 §2 Step 9 — zero-config smoke load
 pi -e ./src/index.ts -p "Reply with the single word: ok"   # → no load error
 
-# DoD #2/#3/#5 — integration smoke (9 F-* + 5 E-* scenarios)
-npm run smoke                                   # → 14/14 scenarios passed (F-protected asserts the BUG-006 refusal)
+# DoD #2/#3/#5 — integration smoke (14 prior + 5 v1.1 scenarios: F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt)
+npm run smoke                                   # → 19/19 scenarios passed (post v2.0 post-validation fixes; F-protected asserts the BUG-006 refusal)
 
 # DoD #3 — nudge-leak (authoritative: persisted customType in smoke session JSONL)
 grep -h '"customType":"mulligan:nudge"' \
@@ -152,7 +152,7 @@ first clean run. No `src/` or `README.md` edits were made.
 - `test/` — untouched. The 4 edge-case tests that were red at PRP-research time (E5
   mutation-warning + E13 fail-open ×3 in `edge-cases.test.ts`) were resolved by P1.M7.T3.S1,
   which is now Complete; `npm test` is 671/671.
-- `README.md` — untouched (S1's output is fully accurate: 5 *_DESC verbatim, 20-knob config table
+- `README.md` — untouched (S1's output is fully accurate: 4 *_DESC verbatim, 21-knob config table
   matches `DEFAULT_CONFIG`, Disabling note POST-E14 consistent, zero-config claim true).
 - Final cleanup — none needed: `src/` contains only the single intentional `warnConfig`
   `console.warn` (`config.ts:311`, the documented v1 warn seam — GOTCHA #10); no stray
@@ -247,3 +247,53 @@ the identical failure class). Verified end-to-end against the REAL host pipeline
 | BUG-001 | Major | The host validates tool args **before** `execute()` runs (pi-agent-core agent-loop → pi-ai `validateToolArguments`: `Value.Convert` + compiled `Check`). TypeBox `Value.Convert` coerces primitives only — it never turns a JSON string into an object (verified on typebox 1.3.7 host-side and 1.3.11 repo-side) — so when a model sends an OBJECT param as a JSON string, every `anyOf` arm fails ("must be object") and the call is dead on arrival; the tool body never runs and cannot intervene. | New `src/prepare-args.ts` `prepareObjectArgs<T>(keys)` shim: JSON-parses each listed key's value when it is a string, replacing it with the parsed value ONLY if that value is a non-null non-array object (malformed JSON / arrays / scalars pass through for an honest schema error). Wired into the three object-param tools via `prepareArguments`: `mulligan_shrink` (`target`), `mulligan_cancel` (`target` — structurally identical union), `mulligan_rewind` (`note`). checkpoint/audit take scalars only → immune → no shim. | `test/prepare-args.test.ts` (23 tests): helper unit tests (coerce/idempotent/malformed/non-object JSON/multi-key/pass-through/identity-return) + per-tool regression tests running the exact host pipeline (`prepareArguments` → `Value.Convert` → `Compile.Check`) on the literal field-report args, all three union arms, malformed/non-object JSON, markerId-only cancel calls, and proper-object passthrough. Additionally verified end-to-end against the REAL host `validateToolArguments` + a verbatim copy of agent-loop `prepareToolCallArguments` (throwaway e2e test, deleted after passing). |
 
 `npm test` → **1067 passed, 0 failed** (post-field-report; prior baselines `671` / `956` / `974` above preserved as accurate history).
+
+## v2.0 current-turn scoping delta — verification summary
+
+v2.0 rescopes Mulligan's destructive transforms to the current turn: shrink is restricted to the
+current-turn tool-result span, the substring-matcher target arm is removed, cancel's target union moves
+in lockstep to the two-arm schema, and the drift nudge becomes awareness-only (no tool prescription).
+The implementing PRPs live under plan/008_1c8ca4d1826d/P1M1*–P1M4*; the table records the four
+verification-relevant changes and their evidence.
+
+| Change | Severity | What changed | Verification evidence |
+|--------|----------|--------------|-----------------------|
+| filterPipeline marker turn-span scope guard | Major | Both shrink paths (transform + persistence) verify the marker's turn span matches the span the marker-issuing turn contributed; out-of-span markers fail safe to a no-op instead of hiding live context | filterPipeline scope-guard tests (P1.M1.T2.S2) |
+| Substring-matcher arm removed | Major | Resolver and schemas drop the substring arm; the write union is two-arm; the legacy read field remains @deprecated and resolves to null | resolver span tests + legacy-content→null tests (P1.M1.T3.S1) |
+| Drift nudge tail awareness-only | Minor | The prescribing sentence is replaced with lean-turn guidance; FORMAT JSDoc updated to match | nudge exact-tail tests + negative no-prescription assertion (P1.M3.T1.S2) |
+| Scope-guard persistence regression | Critical | An out-of-span marker no-ops instead of re-targeting a current-turn message on rehydrate/reload | filterPipeline persistence-regression tests (P1.M1.T3.S2) |
+
+`npm test` → **1096 passed, 2 failed** (v2.0 delta gate, run 2026-02-27; the 2 failures are
+test/edge-cases.test.ts E18 assertions still expecting the pre-v2.0 prescribing nudge text — a reported
+sibling-task gap, not a v2.0 code defect; prior baselines 671 / 956 / 974 / 1067 preserved as accurate
+history). `npm run smoke` → 14/14 scenarios passed.
+
+Addendum (P1.M4.T2.S2 follow-up): the two reported E18 stale assertions in test/edge-cases.test.ts were
+updated to the v2.0 awareness-only nudge expectations (test-only; src unchanged). Final gate:
+`npm run typecheck` clean, `npx vitest run` → **1098 passed, 0 failed**, `npm run smoke` → 14/14.
+
+Current gate (post v2.0 post-validation fixes, refreshed 2025-06-14): `npm run smoke` → **19/19 scenarios
+passed** (14 prior scenarios plus the five v1.1 REQUIRED scenarios F-consent, F-ckptcmd, F-banner,
+F-useraudit, F-drift-userexempt — spec @10 §2.1 surface now fully driven end-to-end, satisfying DoD #2);
+`npm test` → **1122 passed, 0 failed** (25 files); `npx tsc --noEmit` → exit 0. Prior baselines
+(671 / 956 / 974 / 1067 / 1096+2 / 1098) above are preserved as accurate history.
+
+## v2.0 post-validation fixes — BUG-001 through BUG-003
+
+2025-06-14 end-to-end PRD validation of the v2.0 current-turn implementation found three Minor issues
+(0 Critical, 0 Major; no data-loss), plus one deprecation follow-up. All three were fixed with regression
+coverage. NOTE: the bug numbers below are THIS round's numbering and are DISTINCT from the prior rounds'
+"BUG-001–005/006/007" tables above and from README §7's historical rounds — each remediation round
+re-numbers its findings.
+
+| Bug | Severity | Root cause | Fix applied | Regression test added |
+|-----|----------|------------|-------------|-----------------------|
+| BUG-001 | Minor | `REWIND_DESC` (src/tools/rewind.ts) omitted the spec @05 §6 "Description strings" checkpoint-granularity sentence, and the `checkpoint` param description referenced the removed agent tool `mulligan_checkpoint` instead of the `/mulligan_checkpoint` command | Spec-verbatim sentence restored in REWIND_DESC; `checkpoint` param description corrected to reference the `/mulligan_checkpoint` command (P1.M1.T1.S1) | test/tools/rewind.test.ts description-pin tests |
+| BUG-002 | Minor | Spec @08 E22 SHOULD-level identical-note advisory was absent from the rewind success path | `prevRewindNoteAtLatestPrompt` pure helper (cancel-aware, same-prompt slice) + spec-verbatim warning appended after the k-clause/MUTATION_WARNING in `rewindExecute` success text (P1.M1.T2.S1/S2) | New unit tests covering the identical-note advisory + cancel-aware helper (18 new BUG-002/fixture tests total in the suite) |
+| BUG-003 | Minor | The five v1.1 REQUIRED integration scenarios (spec @10 §2.1) existed only as unit tests — never driven against a real `pi -p` run | Smoke harness extended with banner/checkpoint/user-visibility/high-water observables; five scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt) registered and asserted in run-smoke.mjs + smoke.ts (P1.M2.T1–T5) | The scenarios themselves — smoke gate now 19/19, fully satisfying DoD #2 |
+| — | — | checkpoint.ts dead agent-tool surface (PRD recommendation #4) | `@deprecated` JSDoc on the four exports (`makeCheckpointTool`, `CKPT_DESC`, `CheckpointParams`, `CheckpointDetails`) — zero behavior change (P1.M3.T1.S1); the module survives for `validCheckpointName` (live, used by src/commands.ts) and the smoke harness | n/a |
+
+`npm test` → **1122 passed, 0 failed** (25 test files; baseline 1104/25 + 18 new BUG-002/fixture tests);
+`npm run smoke` → **19/19 scenarios passed** (F-consent, F-ckptcmd, F-banner, F-useraudit,
+F-drift-userexempt added); `npx tsc --noEmit` → exit 0. Prior baselines (671 / 956 / 974 / 1067 /
+1096+2 / 1098 / 1104) preserved above as accurate history.

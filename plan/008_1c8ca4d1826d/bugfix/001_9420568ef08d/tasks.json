@@ -1,0 +1,422 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "v2.0 post-validation bug-fix changeset (BUG-001..003 + close-out)",
+      "status": "Complete",
+      "description": "Fix the three minor defects found by the v2.0 end-to-end validation of the current-turn-scoped implementation at /home/dustin/projects/pi-mulligan-current-turn-only: (BUG-001) restore the spec-verbatim REWIND_DESC checkpoint sentence and fix the checkpoint param description to reference the human /mulligan_checkpoint command; (BUG-002) implement the spec/08 E22 SHOULD-level identical-note advisory on the rewind success path (the two MUST-level hard backstops already exist); (BUG-003) add the five v1.1 integration scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt) to the real-pi smoke suite so spec/11 DoD #2 is fully satisfied. Close out with the PRD's recommendation #4 (deprecate, do not delete, the dead agent-tool surface in src/tools/checkpoint.ts) and a changeset-level documentation sweep (README.md, VERIFICATION.md, scenarios.md). All three bugs were research-verified against source + spec (see plan/008_1c8ca4d1826d/bugfix/001_9420568ef08d/architecture/). Gates: npm test green, npx tsc --noEmit clean, npm run smoke 14 -> 19 scenarios.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Rewind tool surface: LLM-facing docs drift + E22 identical-note advisory (BUG-001, BUG-002)",
+          "status": "Complete",
+          "description": "Two independent fixes localized to src/tools/rewind.ts and its unit tests: restore the spec/05 §6 verbatim description strings (BUG-001) and add the spec/08 E22 SHOULD-level advisory that steers an agent out of a note-identical same-prompt rewind loop before the existing hard budget refuses (BUG-002). No behavior change from BUG-001 (strings only); BUG-002 never refuses and must not touch the existing maxDepth/maxRetriesPerPrompt/abortContextFraction backstops.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Fix mulligan_rewind LLM-facing docs drift (BUG-001)",
+              "status": "Complete",
+              "description": "REWIND_DESC (src/tools/rewind.ts:127-129) omits the spec-mandated final sentence about checkpoint granularity/consent, and the checkpoint parameter description (rewind.ts:112-114) references the removed v1 agent tool 'mulligan_checkpoint' instead of the human '/mulligan_checkpoint command'. Restore both strings byte-verbatim per spec/05-tools.md and update the hard-coded test assertion that pins the old string.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Restore spec-verbatim REWIND_DESC checkpoint sentence + checkpoint param description (rewind.ts + rewind.test.ts)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/008_1c8ca4d1826d/bugfix/001_9420568ef08d/architecture/bug_validation.md §BUG-001 — spec/05-tools.md:325 (§6 'Description strings') requires REWIND_DESC to END with (single leading space, em-dash): \" granularity 'checkpoint' rewinds back to a checkpoint a user set — and may hide the user's prompts after it (they consented by setting it).\" spec/05-tools.md:46-47 requires the checkpoint param description to be exactly: \"Required when granularity=checkpoint. The name of a checkpoint set via the /mulligan_checkpoint command.\" Current code: REWIND_DESC at src/tools/rewind.ts:127-129 stops at \"...to redo the whole turn from the user's last message.\"; param description at rewind.ts:112-114 says \"set via mulligan_checkpoint\" (the removed v1 agent tool — spec/05 §3 lines 167-175: \"There is no agent-callable way to create a checkpoint.\").\n2. INPUT: The existing exported REWIND_DESC constant (src/tools/rewind.ts:127-129) and the typebox RewindParams.checkpoint field (rewind.ts:110-114). Do NOT touch the granularity param description (rewind.ts:101-108) — it already matches spec.\n3. LOGIC: Append the spec sentence to REWIND_DESC byte-verbatim; replace the checkpoint param description with the spec string. COUPLING: test/tools/rewind.test.ts:304-312 hard-codes the OLD REWIND_DESC ('description is the spec/05 §5 verbatim string' it) and WILL FAIL unless updated in this same change — update it, and add a sibling assertion that the checkpoint param description (RewindParams.properties.checkpoint.description) equals the spec string (mirror the registration-metadata describe at rewind.test.ts:295-315). Strings only: no logic, schema-shape, or registration change. Gates: npm test green, npx tsc --noEmit clean.\n4. OUTPUT: Corrected REWIND_DESC + RewindParams schema consumed by makeRewindTool (rewind.ts:721-742) and presented to the model via pi.registerTool (src/index.ts:53-56); prerequisite content for the changeset docs sweep (P1.M3.T2.S2).\n5. DOCS: [Mode A] These LLM-facing strings ARE the documentation surface (the code comment at rewind.ts:122 already labels them 'Mode A LLM-facing docs') — no docs/ directory exists and README.md does not quote them verbatim, so no other file updates here; the final sweep (P1.M3.T2.S2) double-checks README §4 consistency. The test update rides with this subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.0",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Implement the E22 identical-note advisory on the rewind success path (BUG-002)",
+              "status": "Complete",
+              "description": "spec/08-edge-cases.md E22 'Advisory repeat-detection hint' (SHOULD) is unimplemented: when two consecutive rewinds re-land at the same prompt with substantively identical notes (same what_happened after trim/lowercase), the second rewind's success text must append the spec-verbatim warning. The two MUST-level hard backstops (maxRetriesPerPrompt at rewind.ts:570-581, abortContextFraction at 583-612) already exist, are unit-tested, and must remain untouched — the advisory only steers.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Add prevRewindNoteAtLatestPrompt pure helper (cancel-aware, same-prompt slice) + fixtures",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-002 — spec/08-edge-cases.md:117 defines 'substantively identical' as same what_happened after trim().toLowerCase() (what_happened already absorbs avoid/lesson, so one field suffices), across TWO CONSECUTIVE rewinds re-landing at the same prompt. No new persistent state is needed: each mulligan:rewind marker's data.note already holds the raw NoteInput {what_happened, avoid, lesson, next?} on disk (src/markers.ts:80). countRetriesAtLatestPrompt (src/tools/rewind.ts:283+) already walks the exact slice needed.\n2. INPUT: The ctx.sessionManager.getEntries() entry stream as used throughout rewind.ts: user message entries ({type:'message', message.role==='user'}), rewind markers ({type:'custom', customType:'mulligan:rewind', data:{id, seq, note?: NoteInput}}), cancel markers ({customType:'mulligan:cancel', data:{targetId}}).\n3. LOGIC: Add an exported pure helper in src/tools/rewind.ts (suggest prevRewindNoteAtLatestPrompt(ctx): string | null): locate the LAST user-message entry; scan only the slice AFTER it (identical to countRetriesAtLatestPrompt's window); collect rewind markers NOT retired by a later mulligan:cancel (reuse the cancelledRewindIds / BUG-005 exclusion pattern already used at rewind.ts:220 and 283+); return the LAST surviving marker's data.note.what_happened normalized via trim().toLowerCase(), or null when there is no user prompt, no surviving rewind, or the marker lacks a note. Fail-open: never throw. Unit tests need a NEW fixture rewindEntryWithNote(seq, whatHappened) — the existing rewindEntry (test/tools/rewind.test.ts:207-209) carries no data.note.\n4. OUTPUT: The exported helper + green unit tests (makeCtx/run/firstText harness conventions, test/tools/rewind.test.ts:181-195) for consumption by P1.M1.T2.S2.\n5. DOCS: none — internal pure helper; no user-facing, config, or public-API surface change.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.1",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Wire the advisory into rewindExecute success text (spec-verbatim warning, appended after k-clause/MUTATION_WARNING)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-002 — the advisory is SHOULD-level and STEERS only ('This steers; the budget/context-fraction stops above are what ultimately refuse', spec/08:117). Spec-verbatim advisory text: \"⚠ You have rewound with an identical note — the re-attempt is reproducing the mistake. Change approach or shrink the offending result rather than rewinding again.\" The MUST backstops at rewind.ts:570-581 (step 4b) and 583-612 (step 4c) must remain byte-identical.\n2. INPUT: prevRewindNoteAtLatestPrompt(ctx) from P1.M1.T2.S1; the current call's params.note.what_happened; successText(granularity, k, hasWarning) at src/tools/rewind.ts:179-187; the rewindExecute step sequence (486-717: step 7 appendRewindMarker at 631, step 9 success at 699-704).\n3. LOGIC: In rewindExecute, compute the comparison BEFORE step 7's appendRewindMarker (so 'previous' means the prior marker — the current marker is persisted at step 7, before success returns at step 9): identical = helper(ctx) !== null && helper(ctx) === params.note.what_happened.trim().toLowerCase(). Extend successText's signature with the flag and append \" \" + the verbatim advisory AFTER the k-clause and MUTATION_WARNING so all three clauses can coexist. The advisory NEVER refuses and never changes the k-clause or warning behavior. Tests (mirror the retry-budget describe style at test/tools/rewind.test.ts ~1001-1016, using P1.M1.T2.S1's fixture): (a) second consecutive same-prompt rewind with byte-identical what_happened → advisory appended; (b) substantively different note → no advisory; (c) case/whitespace-only differences → advisory fires (normalization); (d) a NEW user prompt between the two rewinds → no advisory (not consecutive at the same prompt); (e) previous rewind cancelled via mulligan:cancel → no advisory; (f) advisory coexists with MUTATION_WARNING on the same success text; (g) zero-hide rewind (k=0, 'nothing matched to hide') still carries the advisory (E22 acceptance (c): it consumes budget and is the canonical loop vector). Gates: npm test, npx tsc --noEmit.\n4. OUTPUT: rewindExecute success text conditionally carrying the advisory; observable end-to-end by P1.M2.T6.S1's smoke run and summarized by P1.M3.T2.S1/S2.\n5. DOCS: none — agent-facing runtime output; no config knob is added (E22 advisory rides existing config) and no exported-type surface changes beyond successText's internal signature.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.1",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "v1.1 integration smoke scenarios F-consent / F-ckptcmd / F-banner / F-useraudit / F-drift-userexempt (BUG-003)",
+          "status": "Complete",
+          "description": "Close the spec/10-testing.md §2.1 v1.1 gap so spec/11-build-order.md §3 DoD #2 ('All F-* integration scenarios green against a real pi -p run') is fully satisfied and the suite grows 14 → 19. The v1.1 logic is already unit-covered (test/commands.test.ts, test/banner.test.ts, D10 drift tests); what is missing is the end-to-end path (command dispatch → label entry → banner state → next context fire) driven through the existing two-extension harness (run-smoke.mjs + smoke.ts). Key researched constraints: headless pi -p has ctx.hasUI=false (banner/audit must be observed via pure recomputation and smoke-log observables, not setWidget/notify output); slash commands dispatch deterministically as -p '/cmd arg' prompts; checkpoints are Pi LabelEntries assertable via the existing labelActive() helper; the D10 user-paste exemption is structural (estimateAgentTokens excludes role==='user'), not a 50k constant.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Extend the smoke harness with v1.1 observables (banner/checkpoint state, user-message visibility, high-water signal)",
+              "status": "Complete",
+              "description": "The current context.fire smoke-log line exposes count/msgCanaryPresent/resultCanaryPresent/notePresent/hasRewindMarker/shrunkInContext/hasNudge — insufficient for the v1.1 pass criteria (banner persistence/clear/restore, user-prompt hiding verdicts, high-water firing). Add pure, headless-safe observables to the observer extension's context.fire log line. Prerequisite for the F-banner, F-consent, and F-drift-userexempt asserters.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Add banner-state + user-message-visibility observables to the context.fire log line (smoke.ts)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §Integration — smoke.ts is the SECOND-loaded observer extension (post-filter: src/index.ts's handlers run first, so state it logs is post-update). Headless pi -p has ctx.hasUI=false, so reconcileBanner no-ops (src/banner.ts branch (a)) and setWidget cannot be observed — banner state must be RECOMPUTED via listCheckpoints (src/tools/audit.ts), the same pure latest-wins scanner reconcileBanner itself uses (src/banner.ts imports it). This keeps the observable honest without touching product code.\n2. INPUT: The existing context.fire smokeLog call in test/integration/smoke.ts (fields count/msgCanaryPresent/resultCanaryPresent/notePresent/hasRewindMarker/shrunkInContext/hasNudge); event.messages (the post-filter ContextMessage[]); listCheckpoints importable from ../../src/tools/audit.js (smoke.ts already imports real factories from src/).\n3. LOGIC: Extend the context.fire observable object with: banner: {activeCount: number, names: string[]} recomputed each fire via listCheckpoints (document in a comment that this mirrors what reconcileBanner WOULD render, since it no-ops headless); userMsgCount: number and firstUserPresent: boolean derived from event.messages (count of role==='user' messages; presence of the FIRST user message). smoke.ts remains a pure observer: the context handler keeps returning void and never mutates event.messages. No unit tests needed (observer glue) but npx tsc --noEmit must stay clean.\n4. OUTPUT: Extended JSONL fields in the smoke log consumed by the asserters of P1.M2.T2.S2 (F-banner) and P1.M2.T3.S1 (F-consent).\n5. DOCS: [Mode A] Append the new fields to the 'A context.fire line' field reference in test/integration/scenarios.md (~line 56) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Add high-water observables (edge latch + filtered-total/window fraction) to the context.fire log line (smoke.ts)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: external_deps.md — both extensions share ONE pi process and module instance, so getRuntime(sessionId) imported from ../../src/runtime.js in smoke.ts reads the SAME SessionRuntime the filter/nudges mutated; rt.aboveHighWater is the high-water edge latch maintained by shouldHighWater (src/nudges.ts:497; default nudges.highWaterFraction 0.7; awareness-only per spec/07 §5.2). Only hasNudge is logged today, which cannot prove 'the high-water signal DOES fire'.\n2. INPUT: getRuntime from ../../src/runtime.js; estimateTokens from ../../src/tokens.js; event.messages; ctx.getContextUsage()?.contextWindow (may be 0/undefined pre-first-inference — cf. existing E12 tolerance in the harness).\n3. LOGIC: Extend the context.fire observable with highWater: {latch: boolean, fraction: number | null} — latch read from getRuntime(sessionId).aboveHighWater AFTER src's handlers ran (observer loads second, so this is post-update state); fraction = estimateTokens(event.messages) / contextWindow when contextWindow > 0, else null (never divide by zero; E12-style tolerance). Pure observer: no mutation of event.messages or runtime state.\n4. OUTPUT: Extended JSONL fields consumed by the asserter of P1.M2.T5.S1 (F-drift-userexempt).\n5. DOCS: [Mode A] Append the highWater fields to the context.fire field reference in test/integration/scenarios.md in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "F-ckptcmd and F-banner scenarios (slash-command label lifecycle; banner persistence/clear//resume restore)",
+              "status": "Complete",
+              "description": "The two checkpoint-command scenarios. F-ckptcmd asserts the label lifecycle end-to-end (set on leaf, no extra control entry, revoke clears, agent tool absent) purely from session JSONL. F-banner asserts the aboveEditor banner widget state across turns, its clear within one fire of revoke, /resume restore, and zero banner bytes in the filtered view — via the headless-safe banner observable since setWidget is unobservable in pi -p mode.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Register + drive + assert F-ckptcmd (/mulligan_checkpoint set/revoke label lifecycle; no agent checkpoint tool)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-003 — spec/10-testing.md:102 pass criteria. Checkpoints are Pi LabelEntries (setCheckpoint, src/markers.ts:456-490: pi.setLabel(stableId, 'mulligan:checkpoint:<name>')), NOT custom entries — so 'no extra control entry' is asserted by countCustom === 0. labelActive(entries, label) (test/integration/run-smoke.mjs:177) already mirrors Pi's latest-wins label resolution — NO new observables are needed for this scenario. Slash commands dispatch deterministically as -p '/mulligan_checkpoint x' (Pi intercepts the leading '/'; no model call).\n2. INPUT: run-smoke.mjs harness surfaces: SCENARIOS array (lines 30-44), runPi() spawn shape (78-101: 'pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-<scenario>-<RUN_ID> -p ...', MULLIGAN_SMOKE_LOG env, 120s timeout), ASSERTERS map (~line 560), and helpers assert()/parseSmokeLog()/readSessionEntries()/countCustom()/countLabel()/labelActive()/assertGlobalInvariants(). The real command handlers: makeCheckpointCommand (src/commands.ts:160-210) and makeCheckpointRevokeCommand (217-255, clearCheckpointByName two-phase latest-wins confirm).\n3. LOGIC: Register 'F-ckptcmd' with prompt flow ['/mulligan_checkpoint x', '/mulligan_checkpoint_revoke x', 'Reply with exactly: OK'] (custom flow branch in runScenario() ~545). smoke.ts driveScenario gets a 'F-ckptcmd' case that only smokeLogs (the commands execute via src/index.ts's registration — they are NOT routed through /mulligan_smoke). Asserter asserts on the session JSONL: (a) a label entry 'mulligan:checkpoint:x' exists and labelActive(entries, 'mulligan:checkpoint:x') is true at the post-set point; (b) after revoke, labelActive is false (a setLabel(id, undefined) entry exists — latest-wins clear); (c) countCustom('mulligan:checkpoint') === 0 (checkpoints are labels — no extra control entry, user-owned by construction); (d) ZERO mulligan_checkpoint TOOL invocations in the JSONL (the agent tool must not exist; unit-pinned at test/index.test.ts:74 = exactly 4 registered tools); (e) assertGlobalInvariants. Keep -ne in the spawn (globally-installed older mulligan collision guard — see PRD Overview confounder).\n4. OUTPUT: A green F-ckptcmd in npm run smoke; the slash-command-driven scenario template reused by P1.M2.T2.S2 and P1.M2.T4.S1; counted by P1.M2.T6.S1.\n5. DOCS: [Mode A] Add the '### F-ckptcmd' section to test/integration/scenarios.md (how to run / expect / pass criteria, mirroring the existing per-scenario entries) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S2",
+                  "title": "Register + drive + assert F-banner (aboveEditor banner persists, clears within one fire, restored on /resume, 0 banner bytes in view)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-003 nuances — spec/10-testing.md:103 pass criteria. Headless hasUI=false means ctx.ui.setWidget is unobservable, so assert via the banner {activeCount, names} context.fire observable from P1.M2.T1.S1 (pure recompute of what reconcileBanner WOULD render) plus labelActive and a 0-banner-bytes grep of the filtered view. /resume restore is proven with a SECOND spawnSync reusing the SAME --session-id — the established F-reload/E11 two-run special-case pattern in run-smoke.mjs main(); src/index.ts:87 calls reconcileBanner on session_start precisely so '/resume never silently drops the reminder'.\n2. INPUT: The banner observable from P1.M2.T1.S1; the slash-command prompt-flow and asserter template from P1.M2.T2.S1; the verbatim banner line text from src/banner.ts (spec/13 §5 line: '⚠ Mulligan checkpoint active: \"<name>\" (you set it). ... Revoke: /mulligan_checkpoint_revoke <name>') for the 0-banner-bytes assertion; run-smoke.mjs main() two-run special-cases (F-reload/E11) as the pattern to extend.\n3. LOGIC: Register 'F-banner' as a two-run scenario: run 1 prompts ['/mulligan_checkpoint beta', 'Reply with exactly: OK', 'Reply with exactly: OK again', '/mulligan_checkpoint_revoke beta', 'Reply with exactly: OK3']. Assert: banner.activeCount >= 1 AND names includes 'beta' on EVERY fire while the checkpoint is active (persistence across turns); within ONE fire after revoke, activeCount === 0 (cleared); ZERO banner bytes in the filtered view (no context.fire message contains the banner line text; assertGlobalInvariants already enforces zero mulligan:nudge). Run 2 (same --session-id, the /resume arm): dispatch '/mulligan_checkpoint gamma' then assert the banner observable is SET again on the resumed session's subsequent fires (restored on /resume). Implement the second run as a main() special-case mirroring F-reload/E11 (shared --session-id within one RUN_ID).\n4. OUTPUT: A green F-banner; the reusable two-run /resume assertion pattern; counted by P1.M2.T6.S1.\n5. DOCS: [Mode A] Add the '### F-banner' section to test/integration/scenarios.md, explicitly documenting the headless observable strategy (setWidget unobservable in -p mode; pure recompute + JSONL labels) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "F-consent scenario (checkpoint rewind hides subsequent user prompts; first:user and last_turn guardrails)",
+              "status": "Complete",
+              "description": "The consent scenario: a user-set checkpoint opts the session into hiding the user's OWN subsequent prompts on a checkpoint rewind. Asserts the rewind succeeds and hides both post-checkpoint user prompts, first:user is never hidden on any fire, and the last_turn/last_tool_call_group granularities never hide a user message.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Register + drive + assert F-consent (split-phase seed flow; user-prompt hiding verdicts; guardrail arm)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-003 — spec/10-testing.md:101 pass criteria. Reuse the split-phase seed pattern proven by F-checkpoint-set/F-checkpoint-rewind (test/integration/smoke.ts:283-303): a SEED_ANCHOR model turn must commit BEFORE /mulligan_checkpoint so setCheckpoint's anchor walk (src/markers.ts:456-490, last message entry with non-empty role) finds a stable entry; a seeded turn must exist AFTER the checkpoint so the rewind hides something (K>0).\n2. INPUT: The userMsgCount/firstUserPresent context.fire observables from P1.M2.T1.S1; smoke.ts's rewindNow() helper and makeRewindTool import; the split-phase orchestration branches (run-smoke.mjs runScenario() ~545 and the F-checkpoint special-casing in main()) as the pattern; protectedRoles config default ['first:user','latest:user'] (src/config.ts).\n3. LOGIC: Register 'F-consent' as split phases (e.g. F-consent-set / F-consent-rewind): prompt flow [seed-anchor prompt (a committed model turn), '/mulligan_checkpoint delta', user prompt U1 containing a canary string, user prompt U2 containing a second canary, '/mulligan_smoke F-consent-rewind', 'Reply with exactly: OK']. The F-consent-rewind case in smoke.ts calls the REAL makeRewindTool with {note: <valid note>, granularity: 'checkpoint', checkpoint: 'delta'} (deterministic — no model dependency for the tool call itself). Asserter: (a) a mulligan:rewind marker exists with checkpoint 'delta' and the success text reports K>0; (b) on the observing fire, BOTH post-checkpoint user prompts U1/U2 are hidden (canary strings absent from the filtered view / userMsgCount excludes them) while the pre-checkpoint user prompt remains visible; (c) firstUserPresent === true on EVERY fire (first:user is never hidden); (d) guardrail arm — seed one more turn, then a last_turn rewind asserting the re-landed user prompt REMAINS visible after the rewind (last_turn never hides a user message); (e) assertGlobalInvariants.\n4. OUTPUT: A green F-consent — the scenario spec/11-build-order.md Step 6b explicitly names in its verify criteria; counted by P1.M2.T6.S1.\n5. DOCS: [Mode A] Add the '### F-consent' section to test/integration/scenarios.md (documenting the seed/canary flow and the guardrail arm) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "F-useraudit scenario (human /mulligan_audit vs agent mulligan_audit: same report, separated sinks)",
+              "status": "Complete",
+              "description": "Proves end-to-end that the human command and the agent tool render the IDENTICAL report via renderAuditReport, that the command's output goes to the human (ui.notify) and is never injected into event.messages or appended to the session, while the tool result still reaches the model.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "Register + drive + assert F-useraudit (wrapper-ctx notify capture vs real agent tool; zero writes from the command)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §commands — makeAuditCommand (src/commands.ts:262-360) early-returns when !ctx.hasUI (headless pi -p), renders via the SAME renderAuditReport as the agent auditTool (src/tools/audit.ts), and its output goes ONLY to notify(ctx, report, 'info') — never event.messages, never pi.sendMessage/appendEntry. Therefore the headless harness must exercise the command's real handler with a wrapper ctx that captures notify (hasUI:true fake), driven from the smoke.ts case, and compare against the real agent tool's execute result.\n2. INPUT: makeAuditCommand from ../../src/commands.js (factory signature: (pi) => {description, handler(args, ctx)}); auditTool from ../../src/tools/audit.js; smokeLog; run-smoke.mjs asserter helpers (assert/parseSmokeLog/readSessionEntries/countCustom/assertGlobalInvariants); the real ctx passed to driveScenario (its sessionManager backs the wrapper).\n3. LOGIC: Register 'F-useraudit' with prompt flow ['/mulligan_smoke F-useraudit', 'Reply with exactly: OK'] PLUS one direct '-p /mulligan_audit' prompt (exercises the real headless dispatch path — early return, must not throw). smoke.ts 'F-useraudit' case: (a) await auditTool.execute(...) (the REAL agent tool) and smokeLog its result text; (b) invoke makeAuditCommand(pi).handler with a wrapper ctx {hasUI: true, ui: {notify: capture}, sessionManager: <the real ctx.sessionManager>} and smokeLog the captured report string. Asserter: (a) the two smoke-logged report strings are IDENTICAL (same renderAuditReport output — compare normalized); (b) the command performed ZERO session writes (no new mulligan:* custom entries attributable to the command; no sendMessage artifacts) while the TOOL result DID reach the model (its tool-result entry exists in the JSONL); (c) assertGlobalInvariants.\n4. OUTPUT: A green F-useraudit proving report parity + sink separation end-to-end; counted by P1.M2.T6.S1.\n5. DOCS: [Mode A] Add the '### F-useraudit' section to test/integration/scenarios.md (documenting the wrapper-ctx notify-capture strategy for headless mode) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T5",
+              "title": "F-drift-userexempt scenario (50k user paste does not fire drift; high-water does fire)",
+              "status": "Complete",
+              "description": "Proves the D10 user-paste exemption end-to-end: a very large USER paste with ~0 agent work does NOT fire the drift nudge (user content is excluded from the agent-attributable delta), while the high-water total-context signal DOES fire. The contrast criterion (agent reads DO fire drift) is cross-referenced from the existing green F-nudge-drift scenario rather than duplicated.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T5.S1",
+                  "title": "Register + drive + assert F-drift-userexempt (big user paste via -p; hasNudge false; high-water observable true, soft on huge windows)",
+                  "status": "Complete",
+                  "story_points": 2,
+                  "dependencies": [
+                    "P1.M2.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-003 nuances — the D10 exemption is STRUCTURAL: estimateAgentTokens (src/tokens.ts:126-143) excludes role==='user' messages from the drift delta ('50k' is illustrative, spec/07:174); there is no 50000 constant. A ~60k-token paste ≈ 240KB of argv is comfortably under Linux ARG_MAX (~2MB) — generate deterministic filler in run-smoke.mjs at runtime, do not check a huge fixture into the repo. The highWater {latch, fraction} observable from P1.M2.T1.S2 proves the total-context crossing. The contrast arm ('3 turns of agent reads ~4k each DO fire the drift nudge') is already proven by the existing green F-nudge-drift scenario — cross-reference it in the asserter notes instead of duplicating model-driven turns.\n2. INPUT: The highWater and hasNudge context.fire observables (P1.M2.T1.S2 + existing); runPi()'s -p argument handling; the F-nudge-drift asserter as the documented contrast reference; drift gating internals for reference only (shouldNudge, src/nudges.ts:325-332; defaults driftThresholdTokens 4000, driftWindowTurns 3, highWaterFraction 0.7).\n3. LOGIC: Register 'F-drift-userexempt' with prompt flow [<one -p containing a generated ~60k-token document paste>, 'Reply with exactly: OK']. Asserter: (a) hasNudge === false on every fire AND zero mulligan:nudge entries in the JSONL (the drift nudge must NOT fire — the paste is user-attributable and excluded from the delta); (b) the high-water total-context signal DOES fire: highWater.latch === true OR highWater.fraction >= 0.7 on a post-paste fire — mark this result SOFT when the provider's context window is large enough that the paste cannot cross 0.7 (follow the harness's documented soft-spot convention, cf. F-nudge-drift's model-dependent arm); (c) note in the asserter output that the contrast criterion is covered by F-nudge-drift (green). assertGlobalInvariants.\n4. OUTPUT: A green F-drift-userexempt — completes the five v1.1 scenarios for spec/11 DoD #2; counted by P1.M2.T6.S1.\n5. DOCS: [Mode A] Add the '### F-drift-userexempt' section to test/integration/scenarios.md (documenting the generated paste, the soft high-water arm, and the F-nudge-drift cross-reference) in this same subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T6",
+              "title": "Full-suite acceptance gate: 19/19 smoke scenarios green + changeset gates",
+              "status": "Complete",
+              "description": "The milestone's acceptance gate, mirroring spec/11 §3 DoD #2: run the complete real-pi smoke suite end-to-end with all five new scenarios registered and require 19/19 (was 14/14), plus the unit and typecheck gates. Produces the evidence the close-out docs sweep records.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T6.S1",
+                  "title": "Run npm run smoke to 19/19 + npm test + tsc --noEmit; record gate evidence",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T4.S1",
+                    "P1.M2.T5.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §BUG-003 — spec/11-build-order.md §3 DoD #2 requires ALL F-* scenarios green against a real pi -p run (log + JSONL assertions); the suite grows 14 → 19 with F-consent/F-ckptcmd/F-banner/F-useraudit/F-drift-userexempt. ENVIRONMENT HAZARD: a globally-installed older mulligan build can collide with the extension under test — runPi()'s -ne flag exists precisely to prevent this (PRD Overview confounder; verified: the v1.x prescribing-nudge string exists only in /home/dustin/projects/pi-mulligan/src/notes.ts:337, zero matches in this worktree). Never drop -ne; if a foreign nudge string appears in output, treat it as an environment artifact and investigate the spawn flags first.\n2. INPUT: The five green v1.1 scenarios from P1.M2.T2.S1, P1.M2.T2.S2, P1.M2.T3.S1, P1.M2.T4.S1, P1.M2.T5.S1 (plus their observables from P1.M2.T1.S1/S2) and the unchanged 14 v1.0/edge scenarios.\n3. LOGIC: Run npm run smoke end-to-end and require 19/19 pass with exit 0. Fix harness-level flakes ONLY within the new asserters/flows (assertion logic, prompt flows, timeouts); if a PRODUCT defect surfaces, loop back to the owning subtask rather than patching product code here. Re-run npm test (expect the prior 1104 plus the new BUG-002/fixture tests, all green) and npx tsc --noEmit (clean). Record the observed counts (smoke 19/19, unit-test total, tsc result) as the evidence consumed by the docs sweep.\n4. OUTPUT: Gate evidence (19/19 + unit count + clean tsc) consumed by P1.M3.T2.S1, P1.M3.T2.S2, and P1.M3.T2.S3.\n5. DOCS: none — evidence gathering only; the counts are written up by P1.M3.T2.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Close-out: deprecate the dead checkpoint agent-tool surface + changeset-level documentation sync",
+          "status": "Complete",
+          "description": "PRD Recommendation #4 (deprecate src/tools/checkpoint.ts's dead agent-tool exports — research verified deletion is unsafe because validCheckpointName is live shared logic and makeCheckpointTool is the integration harness's deterministic label-setter) followed by the mandatory Mode B changeset-level docs sweep (VERIFICATION.md gate record, README.md feature/bug-history sync, scenarios.md count reconciliation), running last with dependencies on every implementing subtask.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Deprecate the dead agent-tool surface in src/tools/checkpoint.ts (recommendation #4)",
+              "status": "Complete",
+              "description": "Mark the unregistered v1 agent-tool exports as @deprecated with clear rationale, without deleting anything: validCheckpointName (line 74) is live shared logic imported by src/commands.ts:34, and makeCheckpointTool remains the integration harness's deterministic checkpoint-label setter (test/integration/smoke.ts:40,273,289).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Add @deprecated JSDoc to makeCheckpointTool / CKPT_DESC / CheckpointParams / CheckpointDetails (zero behavior change)",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: bug_validation.md §PRD Recommendation #4 — src/tools/checkpoint.ts must NOT be deleted: validCheckpointName (line 74) is LIVE shared logic imported by src/commands.ts:34 (used by the /mulligan_checkpoint slash command), and makeCheckpointTool is used by test/integration/smoke.ts:40,273,289 (the legacy F-checkpoint deterministic driver) plus unit tests. v1.1 context: spec/05 §3 (E23) removed the agent tool ('There is no agent-callable way to create a checkpoint'); src/index.ts:53-56 registers only 4 tools.\n2. INPUT: The module's current exports: CheckpointParams (53), CheckpointArgs (61), validCheckpointName (74), CKPT_DESC (84), CheckpointDetails (91), makeCheckpointTool (182).\n3. LOGIC: Add @deprecated JSDoc blocks to makeCheckpointTool, CKPT_DESC, CheckpointParams, and CheckpointDetails stating: removed as an agent tool in v1.1 (spec/05 §3 / E23); not registered by src/index.ts; only validCheckpointName remains live (consumed by src/commands.ts:34); makeCheckpointTool survives solely as the integration harness's deterministic label-setter. Do NOT annotate validCheckpointName (it is live). ZERO behavior change: delete nothing, rename nothing, change no signatures; npm test and npx tsc --noEmit stay green with no test edits.\n4. OUTPUT: The annotated module consumed unchanged by src/commands.ts and the test harness; no downstream edits required; referenced by P1.M3.T2.S1's changeset record.\n5. DOCS: [Mode A] The @deprecated JSDoc IS the documentation surface for this change — it rides with the work.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.5"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T2",
+              "title": "Sync changeset-level documentation (Mode B final sweep: VERIFICATION.md, README.md, scenarios.md)",
+              "status": "Complete",
+              "description": "Cross-cutting documentation that only makes sense once the whole changeset is in place: re-record the gate evidence in VERIFICATION.md (14 → 19 smoke scenarios, refreshed unit count, tsc clean, the three fixes), sweep README.md's tool/bug-history sections for consistency with the new rewind description and advisory, and reconcile scenarios.md's overview counts. Runs last, per its dependencies on every implementing subtask.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S1",
+                  "title": "VERIFICATION.md — re-record gates (smoke 19/19, unit count, tsc) + a dated 'v2.0 post-validation fixes' entry",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T4.S1",
+                    "P1.M2.T5.S1",
+                    "P1.M2.T6.S1",
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §Docs landscape — VERIFICATION.md is the canonical DoD gate-evidence file (currently records 14/14 smoke scenarios — 9 F-* + 5 E-* — and the 1104-test unit suite, plus a reproducible gate-command cheat sheet). spec/11 §3 DoD #2 becomes fully satisfied at 19/19.\n2. INPUT: Gate evidence from P1.M2.T6.S1 (19/19 smoke, observed unit-test total, clean tsc) and the shipped fixes from P1.M1.T1.S1 (REWIND_DESC + param docs), P1.M1.T2.S1/S2 (E22 advisory), P1.M2.T2.S1..P1.M2.T5.S1 (five v1.1 scenarios), P1.M3.T1.S1 (deprecation).\n3. LOGIC: Update VERIFICATION.md: re-record the smoke gate as 19/19 naming the five v1.1 scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt); refresh the unit-test count and tsc result from the actual run; add a dated 'v2.0 post-validation fixes' entry covering BUG-001 (REWIND_DESC/checkpoint-param docs drift), BUG-002 (E22 identical-note advisory), BUG-003 (five v1.1 smoke scenarios), and the checkpoint.ts deprecation. NAMING HAZARD: this repo's README §7 already lists historical 'BUG-001–005' from the EARLIER v1.0 bug hunt — this PRD's BUG-001..003 are DIFFERENT, newer defects; never renumber or overwrite the historical entries, present the new ones as a distinct dated changeset.\n4. OUTPUT: An accurate VERIFICATION.md gate record for human reviewers and CI-followers.\n5. DOCS: [Mode B] This subtask IS documentation — the changeset-level sweep; it runs last per its dependencies.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.0",
+                    "h3.1",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S2",
+                  "title": "README.md — sweep §4 Tools/human-commands and §7 bug history for consistency with the shipped changes",
+                  "status": "Complete",
+                  "story_points": 1,
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T4.S1",
+                    "P1.M2.T5.S1",
+                    "P1.M2.T6.S1",
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §Docs landscape — README.md §4 Tools documents the four tools + 'Human commands (v1.1)' (README:194-205, including the verbatim banner line); §7 Known Limitations records resolved bugs. README does NOT quote REWIND_DESC verbatim and does NOT state a scenario count (that lives in VERIFICATION.md; the 'Zero-config smoke (the acceptance check)' section at README:52 names npm run smoke). NAMING HAZARD (same as P1.M3.T2.S1): README §7's 'BUG-001–005' are the v1.0 hunt's IDs — the PRD's BUG-001..003 are different, newer defects; never renumber history.\n2. INPUT: The shipped changes from P1.M1.T1.S1 (checkpoint targeting + consent semantics now in the tool description), P1.M1.T2.S2 (E22 advisory on rewind success), P1.M2.T6.S1 (19/19 suite), P1.M3.T1.S1 (deprecated checkpoint tool surface).\n3. LOGIC: Sweep README.md for consistency with shipped behavior and nothing more: ensure §4's mulligan_rewind blurb mentions the checkpoint targeting mode and its consent/hides-user-prompts semantics consistent with the new description string; ensure §7 (or a new dated subsection) records the three v2.0 validation fixes WITHOUT touching the historical BUG-001–005 entries; keep the smoke acceptance-check section accurate (add the scenario count only if consistent with VERIFICATION.md's 19/19). No marketing drift — only sync what this changeset actually changed.\n4. OUTPUT: A README.md that matches shipped behavior.\n5. DOCS: [Mode B] This subtask IS documentation — the changeset-level sweep.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.0",
+                    "h3.1",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S3",
+                  "title": "scenarios.md — reconcile overview counts and harness docs with the five new scenarios",
+                  "status": "Complete",
+                  "story_points": 0.5,
+                  "dependencies": [
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T4.S1",
+                    "P1.M2.T5.S1",
+                    "P1.M2.T6.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §Integration — test/integration/scenarios.md (473 lines) is the harness playbook + per-scenario criteria; its heading '## The F-* scenarios (9)' (~line 92) and overview lists are stale once the five v1.1 sections land. The per-scenario SECTIONS themselves are added Mode-A alongside each implementing subtask; this subtask only reconciles the cross-cutting overview. It already documents spec-only F-cancel/F-retrycap/F-abortfraction as not-driven — keep that caveat honest (this changeset adds only the five v1.1 scenarios; PRD scope).\n2. INPUT: The five new scenario sections from P1.M2.T2.S1, P1.M2.T2.S2, P1.M2.T3.S1, P1.M2.T4.S1, P1.M2.T5.S1; the new context.fire field docs from P1.M2.T1.S1/S2; the 19/19 green run from P1.M2.T6.S1.\n3. LOGIC: Update the scenarios.md heading/count (9 → 14 F-* scenarios driven, naming the five v1.1 additions), reconcile the harness overview with the two-run /resume pattern introduced by F-banner and the extended context.fire observables, and keep the not-yet-driven F-cancel/F-retrycap/F-abortfraction caveat accurate. Verify every internal cross-reference still resolves.\n4. OUTPUT: An internally consistent scenarios.md matching the shipped suite.\n5. DOCS: [Mode B] This subtask IS documentation — the changeset-level sweep.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4",
+                    "h2.5"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

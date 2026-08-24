@@ -8,7 +8,7 @@
  * validates args BEFORE execute() runs (pi-agent-core agent-loop → pi-ai validateToolArguments):
  * `Value.Convert` + compiled `Check`. Value.Convert coerces primitives only — it NEVER turns a JSON
  * string into an object (verified empirically against typebox 1.3.7 host-side and 1.3.11 repo-side) — so
- * every `anyOf` arm fails ("must be object" ×3) and the tool call is dead on arrival; the tool body never
+ * every `anyOf` arm fails ("must be object" ×2) and the tool call is dead on arrival; the tool body never
  * runs and cannot catch this. The host's OWN edit tool hits the identical failure class ("Some models
  * (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array") and fixes it via the sanctioned
  * `ToolDefinition.prepareArguments` hook — "Optional compatibility shim to prepare raw tool call arguments
@@ -146,12 +146,11 @@ describe("mulligan_shrink — prepareArguments (string-encoded target regression
   });
 
   it.each([
-    ['{"by_tool_name": "bash", "occurrence": "last"}'],
-    ['{"by_tool_name": "read", "occurrence": "first"}'],
-    ['{"by_content_includes": "pclntab"}'],
-  ])("coerces every union arm from a JSON string: %s", (targetJson) => {
+    ['{"by_tool_call_id": "call_x"}', true],
+    ['{"by_tool_name": "bash", "occurrence": "last"}', true],
+  ])("prepareArguments + host schema: %s", (targetJson, shouldPass) => {
     const tool = makeShrinkTool(fakePi);
-    expect(hostPipelinePasses(ShrinkParams, { target: targetJson, replacement: "r" }, tool.prepareArguments)).toBe(true);
+    expect(hostPipelinePasses(ShrinkParams, { target: targetJson, replacement: "r" }, tool.prepareArguments)).toBe(shouldPass);
   });
 
   it("proper-object args still pass through the pipeline unchanged (no regression on the happy path)", () => {

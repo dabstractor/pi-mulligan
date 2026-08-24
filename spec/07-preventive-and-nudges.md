@@ -73,7 +73,9 @@ Auto-shrinking would risk discarding data the model needs right now (e.g. a larg
 ## 2. Nudge B — per-turn drift nudge (`turn_end` → `context` injection)
 
 ### Purpose
-At the start of each turn, if context has grown *sustainedly* over the rolling window, inject a one-line annotation into the message copy so the agent is aware of drift and remembers rewind/shrink exist. Rides the existing next inference — **zero extra requests**.
+At the start of each turn, if context has grown *sustainedly* over the rolling window, inject a one-line annotation into the message copy so the agent is aware of drift. Rides the existing next inference — **zero extra requests**.
+
+> **v2.0 — awareness-only.** The drift nudge fires at the next inference about the PREVIOUS turn's growth — and under current-turn scoping (`@05` §2) the previous turn is out of scope for modification. It therefore **must not prescribe rewind/shrink of past content**; its message is awareness and forward-looking advice only (keep current-turn outputs lean — pipe, slice, summarize at creation time). **Nudge A (§1) is the only prescribing nudge** and is inherently compliant: it rides the bloated result inside the very turn that produced it, when the shrink is still issuable. The high-water annotation (§5.2) was already awareness-only and is unchanged.
 
 This is the non-obvious mechanism the project pivoted on (see `@reference/HANDOFF.md` Q5). The user's insight: a per-turn nudge seems to require an extra request, which would defeat the project — but the `context` event is a free ride, so the nudge can piggyback.
 
@@ -130,9 +132,9 @@ function injectNudge(messages: AgentMessage[], metric: TurnMetric): AgentMessage
   return [...messages, nudge];
 }
 ```
-`renderDriftNudge`:
+`renderDriftNudge` (v2.0 — awareness-only; no rewind/shrink prescription, since the reported turn is out of modification scope):
 ```md
-Previous turn added ~<delta>k tokens to your context. If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.
+Previous turn added ~<delta>k tokens to your context. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.
 ```
 
 ### Why this is zero-extra-requests

@@ -61,9 +61,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { appendCancelMarker } from "../markers.js"; // GOTCHA #8: .js extension (ESM/Bundler resolution)
 import type { CancelMarkerInput } from "../markers.js";
-import { resolveShrinkTarget } from "../transforms.js"; // NEW (S2) — pure resolver (Pi-free; 0 imports → no circular dep)
-import type { ShrinkTarget } from "../transforms.js"; // NEW (S2) — ≡ markers.ts ShrinkTarget ≡ CancelParams.target
-import type { MessageLike } from "../transforms.js"; // NEW (S2) — Pi-free structural message type
+import { resolveShrinkTarget, markerTurnSpan } from "../transforms.js"; // NEW (S2) — pure resolver (Pi-free; 0 imports → no circular dep); markerTurnSpan NEW (P1.M2.T3.S2)
+import type { ShrinkTargetRead } from "../transforms.js"; // NEW (S2) — ≡ markers.ts ShrinkTargetRead; resolveShrinkTarget's read-side param (v2.0: legacy content-substring arm still allowed at READ sites)
+import type { MessageLike, BranchEntry } from "../transforms.js"; // NEW (S2) — Pi-free structural message + branch-entry types
 import { getConfig } from "../config.js"; // GOTCHA: read getConfig() ONCE per execute
 import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
 
@@ -84,9 +84,10 @@ import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `targe
  * least one MUST be present" is enforced in `cancelExecute` (S2 / P1.M1.T1.S2). Side benefit: every existing
  * `{markerId:'…'}` test continues to typecheck and pass unchanged. EXPORTED for tests + index.ts wiring.
  *
- * The `target` union is STRUCTURALLY IDENTICAL to `ShrinkParams.target` (src/tools/shrink.ts) — same 3 arms,
- * same discriminators (`by_tool_call_id` / `by_tool_name`+`occurrence` / `by_content_includes`), same literal
- * set for `occurrence`. ONLY the description strings differ. This parity is a HARD requirement: S2 hands
+ * The `target` union is the v2.0 TWO-arm form — the SAME (two-arm, v2.0) shape `ShrinkParams.target` (src/tools/shrink.ts) uses:
+ *   - by_tool_call_id         — unique; the toolCallId of a message the marker affected.
+ *   - by_tool_name+occurrence — semantic; the last (default) or first affected toolResult with that toolName.
+ * This parity is a HARD requirement: S2 hands
  * `params.target` to `resolveShrinkTarget(messages, target)` (transforms.ts:758, `ShrinkTarget`-typed), so a
  * divergent union would break that handoff's typecheck.
  */
@@ -102,15 +103,11 @@ export const CancelParams = Type.Object(
             by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
             occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]),
           }),
-          Type.Object({
-            by_content_includes: Type.String({
-              description: "Match a marker whose affected message(s) include this substring.",
-            }),
-          }),
+          
         ],
         {
           description:
-            "How to identify the marker to cancel — the SAME hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired.",
+            "How to identify the marker to cancel — the SAME (two-arm, v2.0) hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired.",
         },
       ),
     ),
@@ -141,7 +138,7 @@ export const CANCEL_DESC =
   "Retract (cancel) a mulligan_rewind or mulligan_shrink marker so it no longer applies going forward. Use when " +
   "you issued a rewind or shrink against the wrong target and need to undo it — without it, the mistaken " +
   "transform would apply on every turn for the rest of the session. Identify the marker by `target` " +
-  "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence, or by_content_includes) — " +
+  "(same hint shape as mulligan_shrink: by_tool_call_id, by_tool_name+occurrence) — " +
   "the most recent marker affecting that content is retired; or pass an explicit `markerId` if you have one. " +
   "The transform stops applying from the next turn on (cancelled markers stay on disk for the audit trail). " +
   "Cancelling a non-existent or already-cancelled marker is a safe no-op.";
@@ -236,9 +233,21 @@ function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string |
  * resolveTargetEntryId snapshot build (INLINED here — NOT a shared cross-file helper; D4) + the
  * entryIdAtMessageIndex cursor-walk.
  *
- * COVERING RULES (spec/05 §5 step 3 — the covering ternary IS the entire rule):
- *  - SHRINK covers index i: resolving the shrink's OWN `data.target` against the SAME snapshot yields i (LIVE
- *    resolution — compaction-robust; NOT `pinnedEntryId`, which is the filter's identity-lock — GOTCHA #5, D3).
+ * COVERING RULES (spec/05 §5 step 3 — the covering ternary IS the entire rule; P1.M2.T3.S2 — in lockstep
+ * with the filter's v2.0 identity-or-span resolution model):
+ *  - SHRINK covers index i, two arms (exhaustive, no fall-through gaps):
+ *    - ARM 1 — PINNED IDENTITY (preferred): when the shrink has a non-empty `data.pinnedEntryId` (an ENTRY
+ *      id, NOT a message index), it covers i iff pinnedEntryId === matchedEntryId (identity compare ONLY,
+ *      never live-resolve — matches the filter's identity-lock). matchedEntryId null → no cover. This makes
+ *      a pinned shrink cancellable even when its live selector has drifted elsewhere.
+ *    - ARM 2 — LIVE fallback (unpinned): the shrink's OWN `data.target` is re-resolved against the SAME
+ *      snapshot via the 3-arg resolveShrinkTarget BOUNDED BY THE MARKER'S ISSUING-TURN SPAN
+ *      (markerTurnSpan(messages, getBranch(), shrinkEntryId)) — covers i iff that spanned resolution yields i.
+ *      When the span is indeterminable (null — compacted head, not found, misaligned), the unspanned legacy
+ *      live resolution is used rather than failing the cancel: retraction prefers reachability.
+ *    - Per @05 §5 v2.0: the `target` HINT resolves FULL-HISTORY (cancel acts on the marker, not the old
+ *      content — marker resolution is NOT current-turn-scoped); only the shrink's OWN live fallback is
+ *      bounded to the marker's issuing turn (markerTurnSpan).
  *  - REWIND covers index i: the matched message's entry id (entryIdAtMessageIndex) is a member of the rewind's
  *    `data.hideEntryIds` (GOTCHA #4 — hideEntryIds hold ENTRY ids, NOT message indices; a rewind with no/absent
  *    hideEntryIds covers nothing → skip).
@@ -252,11 +261,13 @@ function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string |
  * C12 is satisfied once per execute). `snapshotEntries` is a SEPARATE fresh buildContextEntries() read — the
  * message snapshot + the index→entry mapping MUST come from the SAME surface, so entryIdAtMessageIndex gets
  * snapshotEntries (NOT entries) for exact alignment (GOTCHA #3).
+ * P1.M2.T3.S2 additions: snapshotBranchEntries = ONE fresh getBranch() read (filter.ts:252 pattern) for
+ * markerTurnSpan; the covering rule for SHRINK is identity-or-span while the HINT stays full-history.
  */
 function resolveTargetUuid(
   ctx: ExtensionContext,
   entries: SessionEntry[],
-  target: ShrinkTarget,
+  target: ShrinkTargetRead,
 ): string | null {
   try {
     // (i) build the message snapshot (mirror shrink.ts:resolveTargetEntryId — INLINED, not a shared helper).
@@ -269,6 +280,10 @@ function resolveTargetUuid(
     if (matchedIndex === null) return null; // target matched nothing → no covering marker
     // (iii) map the matched message index → its entry id (for the rewind hideEntryIds membership check — GOTCHA #4).
     const matchedEntryId = entryIdAtMessageIndex(snapshotEntries, matchedIndex);
+    // (iii-b) ONE fresh branch read (P1.M2.T3.S2) — the SAME surface filter.ts:252 uses. RAW root→leaf branch
+    // entries (compacted-away + compaction + tail); markerTurnSpan handles the compaction alignment itself,
+    // so do NOT pre-filter. A throw → the outer catch → null (E13).
+    const snapshotBranchEntries = ctx.sessionManager.getBranch() as unknown as BranchEntry[];
     // (iv) collect covering markers (active rewind/shrink) + pick the most recent by seq (LIFO).
     let bestUuid: string | null = null;
     let bestSeq = -Infinity;
@@ -280,10 +295,31 @@ function resolveTargetUuid(
       if (typeof uuid !== "string" || uuid.length === 0) continue; // malformed marker → skip
       let covers = false;
       if (ct === "mulligan:shrink") {
-        const shrinkTarget = readOwn(data, "target");
-        // unknown → ShrinkTarget assertion is allowed; resolveShrinkTarget re-validates isRecord(target) → null.
-        const resolved = resolveShrinkTarget(messages, shrinkTarget as ShrinkTarget);
-        covers = resolved === matchedIndex; // SHRINK: own target resolves to the matched index (live, not pinned)
+        // ARM 1 — PINNED IDENTITY (preferred). Matches the filter's identity-lock resolution: a non-empty
+        // data.pinnedEntryId is an ENTRY id (stable), compared against matchedEntryId — NEVER matchedIndex.
+        const pinnedEntryId = readOwn(data, "pinnedEntryId");
+        if (typeof pinnedEntryId === "string" && pinnedEntryId.length > 0) {
+          covers = pinnedEntryId === matchedEntryId; // matchedEntryId may be null → false (no cover)
+        } else {
+          // ARM 2 — LIVE fallback, bounded by the MARKER'S OWN issuing-turn span (P1.M2.T3.S2).
+          // shrinkEntryId = the shrink ENTRY's own session id (readOwn(e,"id")), NOT data.id (uuid).
+          // markerTurnSpan guards itself (non-string/empty id → null). Span null (compacted head / not
+          // found / misaligned) → UNSPANNED fallback (today's behavior) — cancel is retraction, prefer
+          // reachability; documented in the covering-rules doc block above.
+          const shrinkEntryId = readOwn(e, "id");
+          const span = markerTurnSpan(
+            messages,
+            snapshotBranchEntries,
+            typeof shrinkEntryId === "string" ? shrinkEntryId : "",
+          );
+          const shrinkTarget = readOwn(data, "target");
+          // unknown → ShrinkTarget assertion is allowed; resolveShrinkTarget re-validates isRecord(target) → null.
+          const resolved =
+            span !== null
+              ? resolveShrinkTarget(messages, shrinkTarget as ShrinkTargetRead, span)
+              : resolveShrinkTarget(messages, shrinkTarget as ShrinkTargetRead);
+          covers = resolved === matchedIndex;
+        }
       } else {
         const hideEntryIds = readOwn(data, "hideEntryIds");
         // REWIND: matched msg's entry id ∈ hidden span (a rewind with no/absent hideEntryIds covers nothing).

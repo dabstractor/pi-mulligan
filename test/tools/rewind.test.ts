@@ -19,6 +19,7 @@ import {
   makeRewindTool,
   RewindParams,
   REWIND_DESC,
+  prevRewindNoteAtLatestPrompt,
   type RewindArgs,
   type RewindDetails,
 } from "../../src/tools/rewind.js";
@@ -213,6 +214,16 @@ function rewindEntryWithId(seq: number, id: string): { type: "custom"; customTyp
   return { type: "custom", customType: "mulligan:rewind", data: { seq, id, kind: "rewind" } };
 }
 
+/** A rewind marker entry WITH a data.note (for the E22 identical-note advisory tests — the existing
+ *  rewindEntry/rewindEntryWithId fixtures carry no note; production markers always persist NoteInput). */
+function makeCtxWrapped(opts: Parameters<typeof makeCtx>[0] = {}) {
+  return makeCtx(opts).ctx;
+}
+
+function rewindEntryWithNote(seq: number, whatHappened: string, id = `rw-${seq}`): { type: "custom"; customType: "mulligan:rewind"; data: { seq: number; id: string; kind: string; note: { what_happened: string } } } {
+  return { type: "custom", customType: "mulligan:rewind", data: { seq, id, kind: "rewind", note: { what_happened: whatHappened } } };
+}
+
 /** A cancel marker entry (customType "mulligan:cancel"); targetId is the retired marker's data.id (BUG-005). */
 function cancelEntry(targetId: string): { type: "custom"; customType: "mulligan:cancel"; data: { kind: string; targetId: string } } {
   return { type: "custom", customType: "mulligan:cancel", data: { kind: "cancel", targetId } };
@@ -281,6 +292,11 @@ function asstBash(callId: string, command: string): Record<string, unknown> {
 }
 
 /** Build a user message. */
+/** A toolResult message fixture (shrink's current-turn target — P1.M2.T1.S2 alignment). */
+function toolResult(toolCallId: string, toolName: string, text: string): Record<string, unknown> {
+  return { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text }] };
+}
+
 function user(text: string): Record<string, unknown> {
   return { role: "user", content: text };
 }
@@ -296,9 +312,15 @@ describe("mulligan_rewind — registration metadata (spec/05 §5)", () => {
     expect(tool.description).toBe(REWIND_DESC);
   });
 
-  it("description is the spec/05 §5 verbatim string", () => {
+  it("description is the spec/05 §5 verbatim string (incl. v1.1 checkpoint sentence, spec/05 §6)", () => {
     expect(REWIND_DESC).toBe(
-      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message.",
+      "Shed recent context you produced by mistake (a bloated tool result, or a whole wrong-direction turn) and leave yourself a note so you can try again with a clean view. The content is hidden from your context going forward (it stays on disk for the human). Costs only a short note. Use granularity 'last_tool_call_group' to undo just the last tool interaction, or 'last_turn' to redo the whole turn from the user's last message. granularity 'checkpoint' rewinds back to a checkpoint a user set — and may hide the user's prompts after it (they consented by setting it).",
+    );
+  });
+
+  it("RewindParams.checkpoint description is the spec/05 verbatim string", () => {
+    expect((RewindParams.properties.checkpoint as unknown as { description: string }).description).toBe(
+      "Required when granularity=checkpoint. The name of a checkpoint set via the /mulligan_checkpoint command.",
     );
   });
 
@@ -1055,6 +1077,9 @@ describe("mulligan_rewind — retry budget: non-rewind tools unaffected (P4.M1.T
     const { pi } = makePi();
     const { ctx } = makeCtx({
       entries: [msgEntry(user("budget hit")), rewindEntry(1), rewindEntry(2), rewindEntry(3)],
+      // v2.0 (P1.M2.T1.S2): shrink matches ONLY within currentTurnSpan — script the snapshot
+      // (buildContextEntries) with an in-turn toolResult so shrinkCall's target matches THIS turn.
+      contextEntries: [msgEntry(user("budget hit")), msgEntry(toolResult("call-A", "read", "big output"))],
     });
     // 1) rewind IS refused (budget exhausted)
     const rew = await run(pi, ctx, { note: VALID_NOTE, granularity: "last_turn" });
@@ -1076,6 +1101,9 @@ describe("mulligan_rewind — context-fraction stop (P4.M1.T3.S1 / spec/08 E22 e
     const { ctx } = makeCtx({
       contextUsage: { contextWindow: 10000 }, // windowTokens=10000 → (4c) is armed (not skipped)
       entries: [msgEntry(user("bloated loop"))],
+      // v2.0: the shrink SNAPSHOT (buildContextEntries) needs an in-turn toolResult (the fraction check
+      // for REWIND is unaffected — it reads rt.lastFiltered, not these entries).
+      contextEntries: [msgEntry(user("bloated loop")), msgEntry(toolResult("call-A", "read", "big output"))],
     });
     // Drive totalTokens via rt.lastFiltered — the PRIMARY path computeFilteredTotal reads.
     // estimateTokens ≈ chars/4 → 50000 chars ≈ 12500 tokens ≥ 0.9*10000 = 9000. Oversized to be ratio-safe.
@@ -1364,5 +1392,191 @@ describe("mulligan_rewind — checkpoint consumption (spec/05 §3 step 5)", () =
     });
     const res2 = await run(pi, ctx2, { note: VALID_NOTE, granularity: "checkpoint", checkpoint: "x" });
     expect(firstText(res2)).toContain("Mulligan: refused — checkpoint 'x' not found on this branch.");
+  });
+});
+// ── prevRewindNoteAtLatestPrompt (P1.M1.T2.S1 / spec/08 E22) ────────────────────────────────
+
+describe("prevRewindNoteAtLatestPrompt (P1.M1.T2.S1 / spec/08 E22)", () => {
+  it("test Prev — happy path: returns the last same-prompt rewind's normalized what_happened", () => {
+    const ctx = makeCtxWrapped({ entries: [msgEntry(user("hi")), msgEntry(asst("ok")), rewindEntryWithNote(1, "  The Read FAILED  ")] });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBe("the read failed"); // trim + toLowerCase
+  });
+
+  it("test Prev — the LAST surviving marker in the slice wins", () => {
+    const ctx = makeCtxWrapped({
+      entries: [msgEntry(user("hi")), rewindEntryWithNote(1, "first note"), rewindEntryWithNote(2, "second note")],
+    });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBe("second note");
+  });
+
+  it("test Prev — cancel-aware: cancelled rewinds are excluded, the next surviving one wins", () => {
+    const ctx = makeCtxWrapped({
+      entries: [msgEntry(user("hi")), rewindEntryWithNote(1, "A", "id-1"), cancelEntry("id-1"), rewindEntryWithNote(2, "B", "id-2")],
+    });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBe("b");
+  });
+
+  it("test Prev — ALL rewinds in the slice cancelled → null", () => {
+    const ctx = makeCtxWrapped({
+      entries: [msgEntry(user("hi")), rewindEntryWithNote(1, "A", "id-1"), cancelEntry("id-1")],
+    });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBeNull();
+  });
+
+  it("test Prev — no user prompt → null", () => {
+    const ctx = makeCtxWrapped({ entries: [rewindEntryWithNote(1, "A")] });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBeNull();
+  });
+
+  it("test Prev — a rewind BEFORE the latest prompt is invisible (different prompt)", () => {
+    const ctx = makeCtxWrapped({ entries: [msgEntry(user("hi")), rewindEntryWithNote(1, "A"), msgEntry(user("again")), msgEntry(asst("ok"))] });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBeNull(); // slice after the LAST user is empty
+  });
+
+  it("test Prev — surviving marker without a readable note → null", () => {
+    const ctx = makeCtxWrapped({ entries: [msgEntry(user("hi")), rewindEntry(1)] });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBeNull();
+  });
+
+  it("test Prev — throwing getEntries → null (E13 fail-open)", () => {
+    const ctx = makeCtxWrapped({ throwOnGetEntries: true });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBeNull();
+  });
+
+  it("test Prev — empty/whitespace note normalizes to \"\" and IS returned (not over-filtered)", () => {
+    const ctx = makeCtxWrapped({ entries: [msgEntry(user("hi")), rewindEntryWithNote(1, "   ")] });
+    expect(prevRewindNoteAtLatestPrompt(ctx)).toBe("");
+  });
+
+  it("test Prev — non-array entries → null", () => {
+    const ctx = makeCtxWrapped({ entries: undefined, throwOnGetEntries: false });
+    // force a non-array return: entries option defaults to []; simulate via a non-array directly
+    const bad = { sessionManager: { getEntries: () => "not-an-array" } } as unknown as Parameters<typeof prevRewindNoteAtLatestPrompt>[0];
+    void ctx;
+    expect(prevRewindNoteAtLatestPrompt(bad)).toBeNull();
+  });
+});
+
+// ── E22 identical-note advisory (P1.M1.T2.S2 / spec/08:117) ──────────────────
+// The SHOULD-level advisory half of E22: the SECOND consecutive same-prompt rewind with
+// normalized-identical what_happened appends the VERBATIM warning to its SUCCESS text. It never
+// refuses (the 4b/4c backstops do); helper-null (no prior note / new prompt / cancelled) → omitted.
+
+describe("mulligan_rewind — E22 identical-note advisory (P1.M1.T2.S2 / spec/08:117)", () => {
+  const ADVISORY_SNIPPET = "reproducing the mistake";
+
+  it("(a) consecutive same-prompt rewind with identical what_happened → advisory + success text", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("p")), rewindEntryWithNote(1, "the read failed")],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "the read failed" },
+      granularity: "last_turn",
+    });
+    expect(firstText(res)).toContain("rewound last_turn");
+    expect(firstText(res)).toContain(ADVISORY_SNIPPET);
+  });
+
+  it("(b) different what_happened on the same prompt → NO advisory", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("p")), rewindEntryWithNote(1, "the read failed")],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "grep dumped too many tokens instead" },
+      granularity: "last_turn",
+    });
+    expect(firstText(res)).toContain("rewound last_turn");
+    expect(firstText(res)).not.toContain(ADVISORY_SNIPPET);
+  });
+
+  it("(c) case/whitespace-only differences still fire (normalization on both sides)", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("p")), rewindEntryWithNote(1, "  The Read FAILED  ")],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "the read failed" },
+      granularity: "last_turn",
+    });
+    expect(firstText(res)).toContain(ADVISORY_SNIPPET);
+  });
+
+  it("(d) a new user prompt between the rewinds slices the previous one away → NO advisory", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("old")),
+        rewindEntryWithNote(1, "the read failed"),
+        msgEntry(user("new")),
+      ],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "the read failed" },
+      granularity: "last_turn",
+    });
+    expect(firstText(res)).toContain("rewound last_turn");
+    expect(firstText(res)).not.toContain(ADVISORY_SNIPPET);
+  });
+
+  it("(e) previous rewind cancelled → helper returns null → NO advisory", async () => {
+    const { pi } = makePi();
+    const { ctx } = makeCtx({
+      entries: [
+        msgEntry(user("p")),
+        rewindEntryWithNote(1, "the read failed", "id-1"),
+        cancelEntry("id-1"),
+      ],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "the read failed" },
+      granularity: "last_turn",
+    });
+    expect(firstText(res)).toContain("rewound last_turn");
+    expect(firstText(res)).not.toContain(ADVISORY_SNIPPET);
+  });
+
+  it("(f) coexists with the MUTATION_WARNING — advisory strictly AFTER the warning", async () => {
+    const { pi } = makePi();
+    // entries: the prior same-prompt rewind with the identical note; contextEntries: a `write` in the
+    // non-excluded toolGroup → ledger.modifiedFiles non-empty → hasWarning (mirrors the E5 test fixtures).
+    const SAME = "the read failed";
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("u")), rewindEntryWithNote(1, SAME)],
+      contextEntries: [
+        msgEntry(user("u")),
+        msgEntry(asstWrite("WRITE", "src/a.ts")),
+        msgEntry(result("WRITE")),
+        msgEntry(asst("call-1")),
+        msgEntry(result("call-1")),
+      ],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: SAME },
+      granularity: "last_tool_call_group",
+    });
+    const text = firstText(res);
+    const warnIdx = text.indexOf("⚠ The hidden span modified files");
+    const advIdx = text.indexOf("reproducing the mistake");
+    expect(warnIdx).toBeGreaterThanOrEqual(0); // MUTATION_WARNING present
+    expect(advIdx).toBeGreaterThanOrEqual(0); // advisory present
+    expect(advIdx).toBeGreaterThan(warnIdx); // advisory appended AFTER the warning
+  });
+
+  it("(g) zero-hide (k=0) rewind with identical note → k-clause honesty AND advisory together", async () => {
+    const { pi } = makePi();
+    // No contextEntries → nothing to hide → k=0. Zero-hide rewinds are the canonical loop vector
+    // (spec/08 E22 c) — the advisory must still fire alongside the K=0 honesty clause.
+    const { ctx } = makeCtx({
+      entries: [msgEntry(user("p")), rewindEntryWithNote(1, "the read failed")],
+    });
+    const res = await run(pi, ctx, {
+      note: { ...VALID_NOTE, what_happened: "the read failed" },
+      granularity: "last_turn",
+    });
+    const text = firstText(res);
+    expect(text).toContain("(nothing matched to hide)");
+    expect(text).toContain(ADVISORY_SNIPPET);
   });
 });

@@ -129,11 +129,12 @@ Algorithm:
 Shrinks do **not** remove messages; they replace content. Matchers resolve against the current `messages` each fire:
 
 ```ts
-function resolveShrinkTarget(messages: AgentMessage[], target: ShrinkTarget): number | null
+function resolveShrinkTarget(messages: AgentMessage[], target: ShrinkTarget, turnSpan: Span): number | null
 ```
-- `by_tool_call_id`: return index of the `ToolResultMessage` with `toolCallId === id`, else null.
-- `by_tool_name` + `occurrence`: among `ToolResultMessage`s with `toolName === name`, return last (or first) index, else null.
-- `by_content_includes`: return index of the first message whose stringified content includes the substring, else null.
+- `by_tool_call_id`: return index of the `ToolResultMessage` with `toolCallId === id` **inside `turnSpan`**, else null.
+- `by_tool_name` + `occurrence`: among `ToolResultMessage`s with `toolName === name` **inside `turnSpan`**, return last (or first) index, else null.
+
+> **v2.0 — current-turn scope (defense in depth).** `turnSpan` is the CURRENT turn's tool-result span (everything after the most recent `user` message, matching rewind's `last_turn` resolution). The tool already refuses out-of-scope targets at creation; the filter independently enforces the same bound at every fire — a target that resolves only outside `turnSpan` returns null (no-op), and a pinned marker whose entry falls outside `turnSpan` no-ops for that fire. Scope holds under all circumstances: neither selector drift, nor pinning, nor compaction re-entry can apply a shrink to an earlier turn. `by_content_includes` no longer exists.
 
 ```ts
 function applyShrink(messages: AgentMessage[], marker: ShrinkMarker): AgentMessage[] {
@@ -173,7 +174,7 @@ target**. The stamp fixes a *salience* gap, not an information gap: the awarenes
 survives compaction/scroll, unlike a tool-result line or a turn counter.
 
 Properties the stamp delivers for free:
-- **Natural re-shrink dedup.** After a shrink, the original content (e.g. the `by_content_includes` substring the
+- **Natural re-shrink dedup.** After a shrink, the original content (e.g. the tool result the
   model targeted) is gone — replaced by the stamped summary. A redundant same-target call therefore resolves to
   nothing and the tool returns an honest `Matched: no` (`@05-tools.md` §2). No hard per-turn block is required.
 - **Target-scoped, not a blanket block.** A second *distinct* target has no stamp and is still shrinkable, so a

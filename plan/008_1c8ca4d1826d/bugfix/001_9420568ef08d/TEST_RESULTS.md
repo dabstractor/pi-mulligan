@@ -1,0 +1,65 @@
+# Bug Fix Requirements
+
+## Overview
+End-to-end PRD validation of the v2.0 current-turn-scoped implementation at /home/dustin/projects/pi-mulligan-current-turn-only. Verification: full unit suite (1104/1104 pass, 25 files), tsc --noEmit clean, the real-pi integration smoke suite (14/14 scenarios pass), and a deep source review of every v2.0 surface: current-turn shrink scope enforced at BOTH creation (hard refusal in shrinkExecute via currentTurnSpan) and filter resolution (markerTurnSpan issuing-turn guard in filterPipeline, fail-safe no-op on indeterminate spans); by_content_includes removed from both write schemas (shrink + cancel) with the legacy arm tolerated read-only and resolving null; Nudge B renders awareness-only text with no rewind/shrink prescription while Nudge A (bloat reminder) remains the sole prescribing nudge; pinning (hideEntryIds/pinnedEntryId) with identity-or-nothing resolution; E21 cancel resolves its target hint full-history (markers remain retractable across turns, per the v2.0 note) while bounding only the shrink's own live fallback to its issuing turn; E22 hard backstops (maxDepth, maxRetriesPerPrompt with cancelled-rewind exclusion, abortContextFraction) implemented with unit tests; E25 render-only <context-shrunk> stamp; E26 banner with aboveEditor placement and config gate; v1.2 exact orientation-line text with k=1/k>1 unit tests; config defaults match spec/09. Found three minor issues: stale LLM-facing docs on mulligan_rewind's checkpoint mode (description omits the v1.1 checkpoint/consent sentence; checkpoint param references the removed agent tool name), the missing E22 SHOULD-level identical-note advisory, and the absence of the five v1.1 integration scenarios from the smoke suite (unit coverage only). Note on a confounder observed during the hunt: the harness session itself repeatedly received a v1.x prescribing drift nudge ('If wasteful, mulligan_rewind to undo the turn...') fired by a GLOBALLY-INSTALLED older mulligan build (verified: that string exists only in the parent checkout /home/dustin/projects/pi-mulligan/src/notes.ts:337, nowhere in this worktree; run-smoke.mjs's -ne flag exists precisely to defend against this collision) — an environment artifact, not attributed to the code under test.
+
+
+## Critical Issues (Must Fix)
+Issues that prevent core functionality from working.
+
+None.
+
+
+## Major Issues (Should Fix)
+Issues that significantly impact user experience or functionality.
+
+None.
+
+
+## Minor Issues (Nice to Fix)
+Small improvements or polish items.
+
+### Issue 1: REWIND_DESC omits the v1.1 checkpoint clause; checkpoint param docs reference the removed agent tool
+**Severity**: Minor
+**ID**: BUG-001
+**Location**: src/tools/rewind.ts:112 (checkpoint param description); src/tools/rewind.ts:127-129 (REWIND_DESC)
+
+**Description**:
+The LLM-facing description for mulligan_rewind drops the spec-mandated final sentence about checkpoint granularity. Spec @05-tools.md 'Description strings' requires the rewind description to end with: "granularity 'checkpoint' rewinds back to a checkpoint a user set — and may hide the user's prompts after it (they consented by setting it)." The implemented REWIND_DESC (src/tools/rewind.ts:127-129) ends at "...to redo the whole turn from the user's last message." and never mentions checkpoint rewinds or the consent/hides-user-prompts implication — so an LLM reading the tool's own documentation is not told this targeting mode exists at the description level or that it may hide user prompts. Additionally, the `checkpoint` parameter description (src/tools/rewind.ts:112-114) says "The name of a checkpoint set via mulligan_checkpoint." — but per v1.1 (@05 §3, E23) `mulligan_checkpoint` is no longer an agent tool; it is the human slash command `/mulligan_checkpoint` (spec text: "set via the /mulligan_checkpoint command"). An agent following this description would look for a way to set a checkpoint itself and find none. The checkpoint rewind path itself works (granularity union includes 'checkpoint'; the filter resolves it and pins hideEntryIds), so impact is limited to degraded LLM discoverability/usage of the consented checkpoint mode — a docs-drift defect on the surface the spec says 'drives LLM usage'.
+
+**Steps to Reproduce**:
+1. Read src/tools/rewind.ts lines 106-131: REWIND_DESC lacks any 'checkpoint' sentence; compare with the spec @05 §6 'Description strings' Rewind entry which includes it. 2. Read src/tools/rewind.ts lines 109-115: checkpoint param description reads 'set via mulligan_checkpoint' (an agent tool that index.ts no longer registers — see src/index.ts:53-56 which registers only rewind/shrink/audit/cancel). 3. Load the extension in pi and inspect the tool schema presented to the model.
+
+### Issue 2: E22 advisory identical-note repeat-detection hint is not implemented
+**Severity**: Minor
+**ID**: BUG-002
+**Location**: src/tools/rewind.ts:184 (successText — no identical-note clause anywhere on the success path)
+
+**Description**:
+Spec @08-edge-cases.md E22 'Advisory repeat-detection hint' (a SHOULD) is entirely absent: "if two consecutive rewinds re-land at the same prompt with substantively identical notes (same `what_happened` after trim/lowercase — which now includes the avoid/lesson), the success text for the second one SHOULD append: '⚠ You have rewound with an identical note — the re-attempt is reproducing the mistake. Change approach or shrink the offending result rather than rewinding again.'" grep for 'identical note', 'reproducing the mistake', and 'Change approach or shrink' across src/ returns zero matches, and rewindExecute's success path (src/tools/rewind.ts:184 successText; steps 5-9) performs no note-similarity comparison. The two MUST-level hard backstops (maxRetriesPerPrompt budget at step 4b and abortContextFraction stop at step 4c) ARE implemented and unit-tested, so loop runaway is still arrested — only the early, steering advisory before the budget is exhausted is missing, which costs the agent up to (budget-1) wasted re-attempts in a note-identical loop before the hard refusal fires.
+
+**Steps to Reproduce**:
+1. grep -rn 'identical note|reproducing the mistake|Change approach or shrink' src/ → 0 results. 2. Drive two consecutive mulligan_rewind(last_turn) calls at the same prompt with byte-identical note.what_happened (unit-test fixture style, cf. test/tools/rewind.test.ts:1002-1016): the second success text contains no advisory warning — only the standard 'Mulligan: rewound last_turn. N messages will be hidden...'.
+
+### Issue 3: v1.1 integration scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt) are missing from the smoke suite
+**Severity**: Minor
+**ID**: BUG-003
+**Location**: test/integration/run-smoke.mjs:30-44 (SCENARIOS array); test/integration/smoke.ts (no v1.1 case branches)
+
+**Description**:
+Spec @10-testing.md §2.1 lists five v1.1-specific REQUIRED integration scenarios with concrete pass criteria: F-consent (checkpoint rewind hides subsequent user prompts; first:user never hidden; last_turn/last_tool_call_group never hide a user message), F-ckptcmd (/mulligan_checkpoint + /mulligan_checkpoint_revoke label lifecycle; agent mulligan_checkpoint tool absent), F-banner (setWidget aboveEditor persists, clears within one fire, restored on /resume, 0 banner bytes in filtered view), F-useraudit (human /mulligan_audit renders the same report, never injected into event.messages), and F-drift-userexempt (50k user paste does not fire the drift nudge while high-water does). The integration orchestrator (test/integration/run-smoke.mjs:30-44 SCENARIOS) drives only the ten v1.0 scenarios plus E7/E11/E12/E15/E20 — none of the five v1.1 scenarios appear, and test/integration/smoke.ts has no case branches for them. The v1.1 surface is covered at unit level (test/commands.test.ts: 38 its; test/banner.test.ts: 8 its; D10-shaped drift tests in test/drift_nudge.test.ts:147 and test/turn_metric.test.ts:508), but the end-to-end path a real `pi -p` run exercises (command dispatch → label entry → banner widget → next context fire) is unverified, leaving spec @11 §3 Definition-of-Done #2 ('All F-* integration scenarios green against a real pi -p run') only partially satisfied and regressions in the Pi-glue layer of the human surface undetectable by CI.
+
+**Steps to Reproduce**:
+1. Inspect test/integration/run-smoke.mjs lines 30-44: the SCENARIOS array lists F-rewind-core..F-reload and E7/E11/E12/E15/E20 only. 2. grep -n 'F-consent|F-ckptcmd|F-banner|F-useraudit|F-drift-userexempt' test/integration/*.mjs test/integration/smoke.ts → no matches. 3. npm run smoke → prints 14/14; the five v1.1 scenarios are never driven.
+
+## Testing Summary
+- Total bugs found: 3
+- Critical: 0
+- Major: 0
+- Minor: 3
+
+## Recommendations
+- Restore the spec's final REWIND_DESC sentence about checkpoint granularity (consent/hides-user-prompts) and fix the checkpoint param description to '/mulligan_checkpoint command' (src/tools/rewind.ts).
+- Add the E22 identical-note advisory: compare consecutive same-prompt rewinds' note.what_happened after trim/lowercase and append the spec's exact warning text on the second.
+- Extend test/integration/run-smoke.mjs + smoke.ts with the five v1.1 scenarios (F-consent, F-ckptcmd, F-banner, F-useraudit, F-drift-userexempt) so the human-facing surface has end-to-end CI coverage.
+- Consider deleting or clearly deprecating the now-unregistered src/tools/checkpoint.ts agent-tool module to prevent future re-wiring confusion.

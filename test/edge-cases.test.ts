@@ -25,6 +25,7 @@ import {
   resolveLastToolCallGroup,
   resolveLastTurn,
   applyShrink,
+  resolveShrinkTarget,
   stampShrink,
   filterPipeline,
   protectedOk,
@@ -34,6 +35,7 @@ import {
   type MarkerBundle,
   type RewindMarkerLike,
   type ShrinkMarkerLike,
+  type ShrinkTarget,
   type ProtectedConfig,
 } from "../src/transforms.js";
 import { contextHandler } from "../src/filter.js";
@@ -945,14 +947,23 @@ describe("E17 — Two shrinks target the same message (last-wins by seq, not ins
     const cfg: ProtectedConfig = { rewind: { protectedRoles: ["first:user"] } };
     // seq 2 (WINNER) pushed FIRST, seq 1 (loser) pushed SECOND → stableSortBySeq sorts ascending →
     // seq 1 applied FIRST, seq 2 applied LAST → seq 2's replacement wins.
+    // v2.0 issuing-turn scope guard (P1.M1.T2.S2): each shrink marker carries its own markerEntryId, present as a
+    // `custom` entry in the branch — without it the span is indeterminate and the marker no-ops fail-safe.
+    const branch: BranchEntry[] = [
+      { type: "message", id: "e_u", parentId: null },
+      { type: "message", id: "e_a", parentId: "e_u" },
+      { type: "message", id: "e_r", parentId: "e_a" },
+      { type: "custom", id: "e_m2", parentId: "e_r" },
+      { type: "custom", id: "e_m1", parentId: "e_m2" },
+    ];
     const markers: MarkerBundle = {
       rewinds: [],
       shrinks: [
-        { seq: 2, target: { by_tool_call_id: "c1" }, replacement: "WINNER" },
-        { seq: 1, target: { by_tool_call_id: "c1" }, replacement: "loser" },
+        { seq: 2, target: { by_tool_call_id: "c1" }, replacement: "WINNER", markerEntryId: "e_m2" },
+        { seq: 1, target: { by_tool_call_id: "c1" }, replacement: "loser", markerEntryId: "e_m1" },
       ],
     };
-    const out = filterPipeline(msgs, markers, cfg);
+    const out = filterPipeline(msgs, markers, cfg, branch);
     // The c1 toolResult's content text === "WINNER" (the higher-seq replacement applied last).
     const shrunkResult = out.find((m) => m.role === "toolResult") as MessageLike | undefined;
     expect(shrunkResult, "the toolResult survived the shrink (role preserved)").toBeDefined();
@@ -966,101 +977,117 @@ describe("E17 — Two shrinks target the same message (last-wins by seq, not ins
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("E18 — Model ignores the nudges (advisory text — a suggestion, not a force)", () => {
-  it("renderDriftNudge: the text SUGGESTS rewind/shrink (it does not force anything)", () => {
+  it("renderDriftNudge: the text is awareness-only (it does not force anything)", () => {
     const text = renderDriftNudge({ deltaTokens: 4000, bloatHits: [] } as never);
-    // The nudge names the tools (advisory) — D3. S1's re-shortened text dropped the verb "call";
-    // the advisory intent is carried by the tool names + the "to undo/compact" suggestions.
-    expect(text.includes("mulligan_rewind") || text.includes("mulligan_shrink")).toBe(true);
-    expect(text).toMatch(/undo|compact/); // the suggestion verbs survive the re-shortening
+    // v2.0 (P1.M3.T1.S2): the nudge is awareness-only — it never names a tool; the advisory
+    // intent is carried by the lean-turn imperative tail.
+    expect(text).not.toMatch(/mulligan_rewind|mulligan_shrink/); // no tool prescription (v2.0)
+    expect(text).toContain("Keep this turn's outputs lean");
+    expect(text).toMatch(/lean|summarize/); // advisory verbs survive
   });
 
   it("the nudge is TEXT only (no behavioral hook) — it cannot force the model", () => {
     // injectNudge (in nudges.ts) appends an EPHEMERAL mulligan:nudge CustomMessage to a COPY of messages;
-    // it NEVER calls a tool or mutates state. We assert the text shape is advisory (names the tools).
+    // it NEVER calls a tool or mutates state. We assert the text shape is advisory (v2.0 awareness-only:
+    // no tool names, lean-turn imperative instead).
     const text = renderDriftNudge({ deltaTokens: 5000, bloatHits: [{ toolName: "read", approxTokens: 1000 }] } as never);
-    expect(text).toMatch(/mulligan_rewind|mulligan_shrink/);
+    expect(text).not.toMatch(/mulligan_rewind|mulligan_shrink/); // no tool prescription (v2.0)
+    expect(text).toContain("Keep this turn's outputs lean");
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// E19 — Shrink target is a non-toolResult message (role preserved)
+// E19 — Shrink of a non-toolResult message is NO LONGER EXPRESSIBLE (v2.0; legacy markers no-op)
 // ════════════════════════════════════════════════════════════════════════════
 
-describe("E19 — Shrink target is a non-toolResult message (role preserved)", () => {
-  it("applyShrink on a USER message → role 'user' preserved, content replaced", () => {
-    const msgs: MessageLike[] = [user("hello world")];
-    const out = applyShrink(msgs, { target: { by_content_includes: "hello" }, replacement: "X" });
-    expect(out).toHaveLength(1);
-    expect(out[0].role).toBe("user"); // role preserved (E19)
-    const block = out[0].content as Array<Record<string, unknown>>;
-    expect(block[0].text).toBe(stampShrink("X"));
+describe("E19 — Shrink of a non-toolResult message is NO LONGER EXPRESSIBLE (v2.0; legacy markers no-op)", () => {
+  /** Extract the first text block's text (toolResult content is a text-block array; matches transforms.test.ts's textOf). */
+  const textOf = (m: MessageLike): string => (m.content as Array<Record<string, unknown>>)[0].text as string;
+
+  it("a user/assistant message can no longer be addressed by ANY write arm", () => {
+    const msgs: MessageLike[] = [user("hello world"), asstText("note here")];
+    // v2.0 (PRD E19/E27): both write arms match ONLY toolResults → user/assistant text is untouchable.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "hello" })).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "hello", occurrence: "last" })).toBeNull();
+    expect(applyShrink(msgs, { target: { by_tool_call_id: "hello" }, replacement: "X" })).toBe(msgs); // no-op, same ref
+    expect(applyShrink(msgs, { target: { by_tool_name: "hello", occurrence: "last" }, replacement: "X" })).toBe(msgs);
+    expect(msgs[0].role).toBe("user");       // role preserved (E19)
+    expect(msgs[0].content).toBe("hello world"); // original content survives
   });
 
-  it("applyShrink on a text ASSISTANT message → role 'assistant' preserved, content replaced", () => {
-    const msgs: MessageLike[] = [asstText("note here please")];
-    const out = applyShrink(msgs, { target: { by_content_includes: "note" }, replacement: "Y" });
-    expect(out).toHaveLength(1);
-    expect(out[0].role).toBe("assistant"); // role preserved
-    const block = out[0].content as Array<Record<string, unknown>>;
-    expect(block[0].text).toBe(stampShrink("Y"));
-  });
-
-  it("filterPipeline pairing is unaffected (no toolResult involved)", () => {
+  it("a persisted legacy marker passed through filterPipeline applies NOTHING", () => {
+    // A legacy marker is one whose target matches NO write arm; an empty target record approximates it
+    // faithfully — the resolver returns null → the marker no-ops (PRD E8/E19).
     const msgs: MessageLike[] = [user("hello"), asst("c1"), result("c1"), asstText("note here")];
     const cfg: ProtectedConfig = { rewind: { protectedRoles: ["first:user"] } };
     const markers: MarkerBundle = {
       rewinds: [],
-      shrinks: [{ seq: 1, target: { by_content_includes: "note" }, replacement: "SUMMARY" }],
+      shrinks: [{ seq: 1, target: {} as ShrinkTarget, replacement: "SUMMARY" }], // legacy/unmatched arm → resolver null → no-op (PRD E8/E19)
     };
     const out = filterPipeline(msgs, markers, cfg);
-    // The assistant(text) is shrunk; the toolGroup pairing is UNTOUCHED.
+    expect(out).toHaveLength(4); // nothing hidden, nothing stamped
+    const shrunk = out.find((m) => {
+      const c = m.content;
+      return Array.isArray(c) && c.some((b) => (b as Record<string, unknown>)?.text === stampShrink("SUMMARY"));
+    });
+    expect(shrunk).toBeUndefined();
+    expectPairingInvariant(out, partitionIntoUnits(out));
+  });
+
+  it("filterPipeline pairing is unaffected when a shrink no-ops", () => {
+    const msgs: MessageLike[] = [user("hello"), asst("c1"), result("c1"), asstText("note here")];
+    const cfg: ProtectedConfig = { rewind: { protectedRoles: ["first:user"] } };
+    const markers: MarkerBundle = {
+      rewinds: [],
+      shrinks: [{ seq: 1, target: {} as ShrinkTarget, replacement: "SUMMARY" }], // unmatched target → no-op
+    };
+    const out = filterPipeline(msgs, markers, cfg);
     expectPairingInvariant(out, partitionIntoUnits(out));
     const shrunk = out.find((m) => {
       const c = m.content;
       return Array.isArray(c) && c.some((b) => (b as Record<string, unknown>)?.text === stampShrink("SUMMARY"));
     });
-    expect(shrunk?.role).toBe("assistant");
+    expect(shrunk).toBeUndefined();
   });
 
   // (a) THE HARD INVARIANT — the input array survives byte-identical; applyShrink returns a NEW array.
-  //     This is the in-code proof of spec/08 E19 "the original is never lost (view substitution)".
-  it("applyShrink does NOT mutate its input array (original survives — the hard invariant)", () => {
-    const msgs: MessageLike[] = [user("hello world")];
+  //     This is the in-code proof of spec/08 E19 "the original is never lost (view substitution)",
+  //     now on the ONLY expressible target kind in v2.0: the toolResult.
+  it("applyShrink with a MATCHING target does NOT mutate its input array (original survives — the hard invariant)", () => {
+    const bloated: MessageLike = { ...result("c"), content: [{ type: "text", text: "BIG" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c"), bloated];
     const snapshot = JSON.parse(JSON.stringify(msgs)); // deep clone the pre-call state
-    const out = applyShrink(msgs, { target: { by_content_includes: "hello" }, replacement: "X" });
-    expect(out).not.toBe(msgs); // a NEW array (map) — never the input reference
-    // The input is byte-identical to its pre-call snapshot → the original user content SURVIVES untouched.
+    const out = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "X" });
+    expect(out).not.toBe(msgs); // a REAL shrink happened → a new array
+    // The input is byte-identical to its pre-call snapshot → the original content SURVIVES untouched.
     expect(JSON.stringify(msgs)).toBe(JSON.stringify(snapshot));
   });
 
   // (b) The pure-helper analog of "the original stays on disk; only the model's in-context copy is replaced":
-  //     the INPUT element still holds the raw string; only the RETURNED copy carries the stamped replacement.
-  it("applyShrink on a USER message: the input array still holds the original content; only the returned copy is replaced", () => {
-    const msgs: MessageLike[] = [user("hello world")];
-    const out = applyShrink(msgs, { target: { by_content_includes: "hello" }, replacement: "X" });
-    // INPUT: still the raw user string — NOT the stamped replacement.
-    expect(msgs[0].content).toBe("hello world"); // user() content is a bare STRING
-    expect(msgs[0].content).not.toBe(stampShrink("X")); // belt-and-suspenders (a raw string ≠ a stamped envelope)
-    // RETURNED COPY: content is the stamped replacement block array.
-    const outBlock = out[0].content as Array<Record<string, unknown>>;
-    expect(outBlock[0].text).toBe(stampShrink("X"));
+  //     the INPUT element still holds the raw content; only the RETURNED copy carries the stamped replacement.
+  it("the INPUT element still holds the raw content; only the RETURNED copy carries the stamped replacement", () => {
+    const bloated: MessageLike = { ...result("c"), content: [{ type: "text", text: "BIG" }] };
+    const msgs: MessageLike[] = [user("u"), asst("c"), bloated];
+    const out = applyShrink(msgs, { target: { by_tool_call_id: "c" }, replacement: "X" });
+    expect(textOf(out[2])).toBe(stampShrink("X")); // the returned copy is stamped
+    expect(textOf(msgs[2])).toBe("BIG");           // the input original is untouched
   });
 
   // (c) Multi-message: the matched index is replaced in the output, but EVERY index's original survives in
   //     the INPUT (byte-identical), and non-matched indices pass through by ref.
   it("applyShrink at index i leaves every OTHER index's original intact in the input (multi-message)", () => {
-    // "shrink me" is unique to index 1 → unambiguous match (by_content_includes is a substring match).
-    const msgs: MessageLike[] = [user("keep me"), asstText("shrink me please"), user("also keep")];
+    const bloated: MessageLike = { ...result("c2"), content: [{ type: "text", text: "shrink me please" }] };
+    const msgs: MessageLike[] = [user("keep me"), asst("c2"), bloated, user("also keep")];
     const snapshot = JSON.parse(JSON.stringify(msgs));
-    const out = applyShrink(msgs, { target: { by_content_includes: "shrink me" }, replacement: "Z" });
-    expect(out).not.toBe(msgs); // a NEW array
+    const out = applyShrink(msgs, { target: { by_tool_call_id: "c2" }, replacement: "Z" });
+    expect(textOf(out[2])).toBe(stampShrink("Z")); // the matched index is replaced in the output
+    expect(out[0]).toBe(msgs[0]);                  // non-matched indices pass through by reference
+    expect(out[3]).toBe(msgs[3]);
     // The ENTIRE input is byte-identical to its pre-call snapshot (no index mutated).
     expect(JSON.stringify(msgs)).toBe(JSON.stringify(snapshot));
     // Specifically: the non-matched indices in the INPUT still hold their raw originals.
     expect(msgs[0].content).toBe("keep me");
-    expect(msgs[2].content).toBe("also keep");
-    expect((msgs[1].content as Array<Record<string, unknown>>)[0].text).toBe("shrink me please"); // the matched index's INPUT is also untouched (asstText content is an array)
-    // And in the OUTPUT, only index 1 was replaced; the others are the original object refs.
-    expect((out[1].content as Array<Record<string, unknown>>)[0].text).toBe(stampShrink("Z"));
+    expect(msgs[3].content).toBe("also keep");
+    expect(textOf(msgs[2])).toBe("shrink me please"); // the matched index's INPUT is also untouched
   });
 });

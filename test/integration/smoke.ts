@@ -38,8 +38,11 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { makeRewindTool } from "../../src/tools/rewind.js";
 import { makeShrinkTool } from "../../src/tools/shrink.js";
 import { makeCheckpointTool } from "../../src/tools/checkpoint.js";
-import { auditTool } from "../../src/tools/audit.js";
+import { auditTool, listCheckpoints } from "../../src/tools/audit.js";
+import { makeAuditCommand } from "../../src/commands.js"; // F-useraudit — the REAL /mulligan_audit handler
 import { appendRewindMarker, type RewindMarkerInput } from "../../src/markers.js";
+import { getRuntime } from "../../src/runtime.js"; // SHARED module instance — same SessionRuntime src mutated
+import { estimateTokens } from "../../src/tokens.js"; // same estimator src uses (chars/4)
 
 // ── Log destination (per-scenario isolation via env; orchestrator sets MULLIGAN_SMOKE_LOG) ───────────
 const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";
@@ -48,12 +51,6 @@ const SMOKE_LOG = process.env.MULLIGAN_SMOKE_LOG ?? "/tmp/mulligan-smoke.log";
 const MSG_CANARY = "MULLIGAN-SMOKE-MSG-CANARY"; // injected at session_start; target of last_turn rewind
 const RESULT_CANARY = "MULLIGAN-SMOKE-RESULT-CANARY"; // in mulligan_smoke_big; target of shrink
 const SHRUNK_MARKER = "MULLIGAN-SMOKE-SHRUNK"; // the shrink replacement string
-// E19 (spec/08 §E19): a REAL user-message shrink target. USER_CANARY is delivered by the orchestrator's
-// FIRST -p prompt (a genuine role:"user" message — pi.sendMessage can only make custom_messages).
-// USER_SHRUNK_MARKER is a DISTINCT replacement so the user-message substitution is independently
-// observable from the custom_message canary shrink (GOTCHA #3).
-const USER_CANARY = "MULLIGAN-SMOKE-USER-CANARY";
-const USER_SHRUNK_MARKER = "MULLIGAN-SMOKE-USER-SHRUNK";
 
 // SEED canaries for the deterministic HIDING assertions (P1.M3.T2.S1). The session-start MSG_CANARY precedes the first
 // user message, so a last_turn rewind (which hides content AFTER the last user message) can NEVER hide it. Instead, a
@@ -62,6 +59,16 @@ const USER_SHRUNK_MARKER = "MULLIGAN-SMOKE-USER-SHRUNK";
 // SEED_ANCHOR is the F-checkpoint anchor asserted PRESENT (the checkpoint must keep its anchor, not over-hide).
 const SEED_ANCHOR = "MULLIGAN-SMOKE-SEED-ANCHOR";
 const SEED_HIDDEN = "MULLIGAN-SMOKE-SEED-HIDDEN";
+
+// F-consent canaries (P1.M2.T3.S1): U1/U2 live in POST-checkpoint USER prompts (consented hiding
+// targets); GUARD lives in the user prompt a last_turn rewind re-lands on (must stay VISIBLE).
+const CONSENT_U1 = "MULLIGAN-SMOKE-CONSENT-U1";
+const CONSENT_U2 = "MULLIGAN-SMOKE-CONSENT-U2";
+const CONSENT_GUARD = "MULLIGAN-SMOKE-CONSENT-GUARD";
+
+// F-drift-userexempt canary (P1.M2.T5.S1): embedded in run-smoke.mjs's generated ~60k-token user paste.
+// GOTCHA #8 — must be byte-identical to the literal in test/integration/run-smoke.mjs (no shared module).
+const PASTE_CANARY = "MULLIGAN-SMOKE-PASTE-CANARY";
 
 // Which logical scenario is running (set+normalized in driveScenario; read by the context handler so its scenario-scoped
 // hiding assertions fire on the right post-rewind fire). Module-local mutable — never exported.
@@ -184,41 +191,45 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         break;
       }
       case "F-shrink-persist": {
-        // Deterministic path: shrink by_content_includes against the session_start MSG-canary (a custom_message
-        // in context). The shrink marker PERSISTS (JSONL invariant); the substitution appears in the filtered
-        // view (shrunkInContext) on the observing inference. Asserts the original stays on disk (shrink is a
-        // view-substitution, NOT a JSONL rewrite). The model-driven path (mulligan_smoke_big result canary) is
-        // documented in scenarios.md (GOTCHA #3).
+        // v2.0 current-turn semantics (P1.M4.T1.S3). The setup turn (the orchestrator's FIRST -p prompt) is a
+        // real model turn: "Call the mulligan_smoke_big tool once…" commits an assistant + toolResult
+        // (RESULT_CANARY) INSIDE the current turn span (the /mulligan_smoke command prompt is NOT a user
+        // message — pi command dispatch bypasses the agent loop, so currentTurnSpan still starts after the
+        // setup prompt). The shrink below drives the REAL makeShrinkTool with a two-arm in-span selector —
+        // the marker PERSISTS (JSONL) and the substitution stays visible on the observing turn (the filter
+        // bound is the marker's ISSUING turn — scope_guard_design.md §1–§2). The original stays on disk
+        // (shrink is a view-substitution, NOT a JSONL rewrite).
         try {
           const tool = makeShrinkTool(pi);
           const result = await tool.execute(
             "smoke-shrink-1",
-            { target: { by_content_includes: MSG_CANARY }, replacement: SHRUNK_MARKER, reason: "smoke test" },
+            { target: { by_tool_name: "mulligan_smoke_big", occurrence: "last" }, replacement: SHRUNK_MARKER, reason: "smoke test" },
             undefined,
             undefined,
             ctx,
           );
           const text = resultText(result.content as unknown as { type: string; text?: string }[]);
-          smokeLog("tool.shrink", "info", { text: text.slice(0, 120) });
+          smokeLog("tool.shrink", "info", { variant: "current-turn", text: text.slice(0, 120) });
         } catch (e) {
-          smokeLog("tool.shrink", "fail", { error: String(e) });
+          smokeLog("tool.shrink", "fail", { variant: "current-turn", error: String(e) });
         }
-        // E19 (spec/08 §E19): shrink a REAL USER message by_content_includes. USER_CANARY is the orchestrator's
-        // first -p prompt (role:"user"). Proves summarizing user input is acceptable because the original ALWAYS
-        // survives on disk (the hard invariant) — distinct replacement so it is independently observable.
+        // v2.0 REFUSAL variant (replaces the deleted E19 user-message case — spec/08 E19 is MOOT in v2.0: a
+        // non-toolResult shrink is no longer expressible; PRD §E19/h2.101). A by_tool_name:"read" target has
+        // no in-turn match → the SAME hard-refusal string as the earlier-turn case fires end-to-end, and the
+        // refusal appends NOTHING (no second mulligan:shrink marker).
         try {
           const tool2 = makeShrinkTool(pi);
           const result2 = await tool2.execute(
-            "smoke-shrink-user",
-            { target: { by_content_includes: USER_CANARY }, replacement: USER_SHRUNK_MARKER, reason: "E19 user-message shrink (original must survive)" },
+            "smoke-shrink-refusal",
+            { target: { by_tool_name: "read", occurrence: "last" }, replacement: "n/a", reason: "v2.0 refusal path (out-of-turn target)" },
             undefined,
             undefined,
             ctx,
           );
           const text2 = resultText(result2.content as unknown as { type: string; text?: string }[]);
-          smokeLog("tool.shrink", "info", { variant: "user-message", text: text2.slice(0, 120) });
+          smokeLog("tool.shrink", "info", { variant: "refusal", text: text2.slice(0, 120) });
         } catch (e) {
-          smokeLog("tool.shrink", "fail", { variant: "user-message", error: String(e) });
+          smokeLog("tool.shrink", "fail", { variant: "refusal", error: String(e) });
         }
         break;
       }
@@ -302,6 +313,19 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // 'alpha' → hides the post-checkpoint SEED_HIDDEN turn (K>0). The orchestrator's final `-p "Reply OK"` is the
         // observing inference on which F-checkpoint.hiding is asserted.
         await rewindNow(pi, ctx, "smoke-cp-rw-1", "checkpoint", { checkpoint: "alpha" });
+        break;
+      }
+      case "F-consent-rewind": {
+        // Phase 1 of F-consent's rewind arm: the REAL checkpoint rewind. Deterministic — no model
+        // dependency for the tool call itself. The '/mulligan_checkpoint delta' label was set by the
+        // REAL slash command earlier in the prompt flow; this hides both post-checkpoint user prompts.
+        await rewindNow(pi, ctx, "smoke-consent-rw-1", "checkpoint", { checkpoint: "delta" });
+        break;
+      }
+      case "F-consent-guard": {
+        // Guardrail arm: a last_turn rewind re-lands on the GUARD user prompt — the user message must
+        // REMAIN VISIBLE (last_turn never hides a user message; only checkpoint consent does).
+        await rewindNow(pi, ctx, "smoke-consent-guard-1", "last_turn");
         break;
       }
       case "F-failopen": {
@@ -401,6 +425,56 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         await rewindNow(pi, ctx, "smoke-e20-1", "last_turn");
         break;
       }
+      case "F-ckptcmd": {
+        // Slash-command-driven scenario (BUG-003 / spec @10-testing.md §2.1): the orchestrator's -p prompts
+        // ARE the commands (/mulligan_checkpoint x, then /mulligan_checkpoint_revoke x) — they execute via
+        // src/index.ts's registration and are NOT routed through /mulligan_smoke. This case exists so the
+        // switch stays exhaustive; the assertions read the session JSONL label entries directly.
+        break;
+      }
+      case "F-banner": {
+        // Slash-command-driven two-run scenario (BUG-003 / spec @10-testing.md §2.1): the orchestrator drives
+        // real /mulligan_checkpoint(+_revoke) prompts and reads the banner observable on context.fire lines.
+        // Headless -p ⇒ ctx.hasUI === false ⇒ reconcileBanner no-ops (src/banner.ts branch (a)) and setWidget
+        // is unobservable — banner state is RECOMPUTED at the fire point via listCheckpoints (P1.M2.T1.S1
+        // observable, already logged by the context handler). Nothing to do here.
+        break;
+      }
+      case "F-useraudit": {
+        // F-useraudit (BUG-003 / spec @10-testing.md §2.1): report PARITY + sink SEPARATION, both consumers
+        // driven back-to-back on the SAME session state inside this command dispatch (no writes between them
+        // → identical inputs → identical renderAuditReport output).
+        // (a) REAL agent tool: execute with the REAL ctx (its sessionManager backs both consumers). The
+        // result text is the report the MODEL receives. smokeLog the FULL text (parity comparison needs it).
+        try {
+          const res = await auditTool.execute("smoke-useraudit-tool-1", { top: 8 }, undefined, undefined, ctx);
+          const toolText = resultText(res.content as unknown as { type: string; text?: string }[]);
+          smokeLog("useraudit.tool", "info", { text: toolText });
+        } catch (e) {
+          smokeLog("useraudit.tool", "fail", { error: String(e) });
+        }
+        // (b) REAL human command handler via a WRAPPER ctx: headless pi -p has ctx.hasUI === false, and
+        // makeAuditCommand early-returns then. Wrap: hasUI:true + a capturing ui.notify; sessionManager is
+        // the REAL ctx's (same session → same filtered view/markers → same renderAuditReport output).
+        // Each consumer is independently try/caught — a fail in one must not skip the other's evidence.
+        try {
+          const captured: { msg: string; type: string }[] = [];
+          const wrapperCtx = {
+            ...ctx,
+            hasUI: true,
+            ui: { notify: (msg: string, type: string) => captured.push({ msg, type }) },
+          } as unknown as typeof ctx;
+          await makeAuditCommand(pi).handler("", wrapperCtx);
+          smokeLog("useraudit.command", "info", {
+            notifyCount: captured.length,
+            types: captured.map((c) => c.type),
+            text: captured.map((c) => c.msg).join("\n---\n"),
+          });
+        } catch (e) {
+          smokeLog("useraudit.command", "fail", { error: String(e) });
+        }
+        break;
+      }
       default: {
         smokeLog("scenario.unknown", "fail", { scenario, reason: "unknown scenario name" });
       }
@@ -479,6 +553,35 @@ export default function (pi: ExtensionAPI): void {
       const seedHiddenInAssistant = msgs.some(
         (m) => m?.role === "assistant" && JSON.stringify(m).includes(SEED_HIDDEN),
       );
+      // ── Banner + user-visibility observables (P1.M2.T1.S1). Headless `pi -p` has ctx.hasUI === false, so
+      //    reconcileBanner no-ops (src/banner.ts branch (a)) and setWidget can never be observed — banner state
+      //    is RECOMPUTED here via listCheckpoints, the same pure latest-wins label scanner reconcileBanner
+      //    itself imports. This mirrors what the banner WOULD render; the post-filter msgs give user visibility.
+      const checkpointNames = listCheckpoints(entries);
+      const userMsgCount = msgs.filter((m) => m?.role === "user").length;
+      const firstUserPresent = msgs.some((m) => m?.role === "user"); // first user prompt still visible in filtered view
+      // ── F-consent canaries (P1.M2.T3.S1). Role-AGNOSTIC content scans — the canaries are unique and only
+      //    appear in USER prompts, so a raw content scan cannot false-positive off another message.
+      const consentU1Present = msgs.some((m) => JSON.stringify(m).includes(CONSENT_U1));
+      const consentU2Present = msgs.some((m) => JSON.stringify(m).includes(CONSENT_U2));
+      const consentGuardPresent = msgs.some((m) => JSON.stringify(m).includes(CONSENT_GUARD));
+      // ── High-water observables (§5.2 edge latch + filtered-total/window fraction; P1.M2.T1.S2). PURE READ:
+      //    we never call shouldHighWater (it mutates rt.aboveHighWater). Both extensions share ONE pi process
+      //    and module instance, so getRuntime(...) returns the SAME SessionRuntime src's nudges handler just
+      //    updated (observer loads second → post-update state). fraction is the FILTERED total over the window
+      //    (event.messages is the post-filter set); null when the window is unknown (E12 — pre-first-inference
+      //    getContextUsage may be undefined / contextWindow 0 — never divide by zero).
+      let hwLatch = false;
+      let hwFraction: number | null = null;
+      try {
+        hwLatch = getRuntime(ctx.sessionManager.getSessionId()).aboveHighWater === true;
+        const windowTokens = ctx.getContextUsage()?.contextWindow ?? 0;
+        if (typeof windowTokens === "number" && windowTokens > 0) {
+          hwFraction = estimateTokens(msgs as never).tokens / windowTokens;
+        }
+      } catch {
+        // E13-style tolerance: an observable computation must never break the observer.
+      }
       smokeLog("context.fire", "info", {
         count: msgs.length,
         msgCanaryPresent: has(MSG_CANARY),
@@ -486,11 +589,15 @@ export default function (pi: ExtensionAPI): void {
         notePresent: msgs.some((m) => m?.customType === "mulligan:note"),
         hasRewindMarker,
         shrunkInContext: has(SHRUNK_MARKER),
-        userCanaryPresent: has(USER_CANARY), // false on observing inference = original user text substituted in-context (E19)
-        userShrunkInContext: has(USER_SHRUNK_MARKER), // true on observing inference = user-message substitution took effect (E19)
         hasNudge: msgs.some((m) => m?.customType === "mulligan:nudge"),
         seedAnchorInAssistant,
         seedHiddenInAssistant,
+        banner: { activeCount: checkpointNames.length, names: checkpointNames }, // P1.M2.T1.S1 (headless recompute)
+        userMsgCount, // P1.M2.T1.S1
+        firstUserPresent, // P1.M2.T1.S1
+        consent: { u1: consentU1Present, u2: consentU2Present, guard: consentGuardPresent }, // P1.M2.T3.S1
+        pasteCanaryPresent: has(PASTE_CANARY), // P1.M2.T5.S1 — the paste is really in the filtered context
+        highWater: { latch: hwLatch, fraction: hwFraction }, // P1.M2.T1.S2 (§5.2 edge latch + filtered/window fraction)
       });
       // ── Scenario-scoped HARD hiding assertions (emitted on the post-rewind fire only). These are READ BACK by
       //    run-smoke.mjs assertRewindCore/assertCheckpoint and converted to assert() — logging alone does not fail a

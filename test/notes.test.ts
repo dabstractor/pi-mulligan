@@ -393,7 +393,7 @@ describe("renderNote — types", () => {
 
 /** The FIXED tail of the drift nudge (spec/07 §2) — appended after "<lead>." in every drift case. */
 const DRIFT_TAIL =
-  ". If wasteful, `mulligan_rewind` to undo the turn or `mulligan_shrink` to compact a result.";
+  ". Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them.";
 
 describe("renderBloatReminder — spec/07 §1 pinned format", () => {
   it("8 KB result → '~8 KB added …'; leading \n---\n; no trailing newline", () => {
@@ -529,6 +529,10 @@ describe("renderDriftNudge — spec/07 §2 pinned format (first line varies; tai
     for (const c of cases) {
       const out = renderDriftNudge(c);
       expect(out).toContain(DRIFT_TAIL);
+      // P1.M3.T1.S2 — v2.0 awareness-only lock: the drift nudge NEVER prescribes rewind/shrink
+      // (the reported turn is out of modification scope; only Nudge A prescribes).
+      expect(out).not.toContain("mulligan_rewind");
+      expect(out).not.toContain("mulligan_shrink");
     }
   });
 });
@@ -643,7 +647,7 @@ describe("renderDriftNudge — defensive (NEVER throws — GOTCHA #7)", () => {
 describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
   it("representative drift-only nudge (~4.2k tokens)", () => {
     expect(renderDriftNudge({ deltaTokens: 4200, bloatHits: [] })).toMatchInlineSnapshot(
-      `"Previous turn added ~4.2k tokens to your context. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result."`,
+      `"Previous turn added ~4.2k tokens to your context. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them."`,
     );
   });
 
@@ -657,7 +661,7 @@ describe("renderDriftNudge — snapshot-style (spec/10 §1.8-style)", () => {
         ],
       }),
     ).toMatchInlineSnapshot(
-      `"Previous turn produced 2 bloated results. If wasteful, \`mulligan_rewind\` to undo the turn or \`mulligan_shrink\` to compact a result."`,
+      `"Previous turn produced 2 bloated results. Keep this turn's outputs lean — pipe large command output, read slices, or summarize results as you produce them."`,
     );
   });
 });

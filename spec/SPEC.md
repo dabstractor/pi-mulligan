@@ -1,6 +1,6 @@
 # pi-mulligan — Specification
 
-**Status:** Draft 1.2 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
+**Status:** Draft 2.0 · **Target:** Pi `0.84.x` · **License:** MIT · **Name origin:** a *mulligan* is a courtesy do-over in golf — a second shot after a bad one, without penalty. That is exactly what this extension gives the agent.
 
 > **v1.1 amendment (human-facing surface + consent model).** Live use surfaced two design defects that this amendment corrects (full spec in `@13-human-facing-surface.md`):
 > 1. **Checkpoint is exposed to the wrong actor** (`@08` E23). A checkpoint only pays off when set *before* a mistake — which needs *foresight* the agent lacks. v1.1 moves checkpoint to a **user slash command** and removes the agent tool. The agent *keeps* the rewind-to-checkpoint power, now **legitimized by the user's opt-in**: a user-set checkpoint grants the agent, for the checkpoint's lifetime, the power to rewind across the user's subsequent prompts back to that point.
@@ -13,6 +13,14 @@
 > 2. **Honesty gating.** The line appears iff a marker actually persisted: refusals and failed appends carry no line — "Context updated" must not lie. A persisted-but-currently-unmatched target reports `~0` (the filter live-resolves it later; `@06` §5).
 > 3. **Rewind is untouched.** Its orientation already travels in the structured self-authored note (`@04` §2.1) — no duplication was introduced. No new tools, knobs, or config; no other behavioral change.
 > Net: the smallest change in the series — one appended line on the shrink success path, with exact-text unit tests in both single (`k=1`) and aggregate (`k>1`) forms (`@10-testing.md` §1.12).
+
+> **v2.0 amendment (current-turn scoping).** The owner's design intent is now normative: **the agent may only modify context it produced in the CURRENT turn.** A shrink may substitute only a tool result created in the same turn the shrink is issued; nudges that prescribe a shrink must fire within that same turn. Everything that deviated from this — mid-history shrink targeting, cross-turn drift prescriptions — is removed or re-scoped:
+> 1. **`mulligan_shrink` targets are current-turn-scoped** (`@05` §2, `@06` §5). `by_tool_call_id` resolves only within the current turn's span (a match in an earlier turn is a hard refusal). `by_tool_name`+`occurrence` ("first"/"last") now means first/last **of the current turn**; no match this turn → refusal, never a fallback into older history. `by_content_includes` is **removed** (it could match arbitrary old messages of any role and is redundant within a one-turn scope).
+> 2. **The filter enforces the same bound** (`@06` §5): a shrink marker whose resolved target predates the current turn no-ops rather than applying — scope is guaranteed under all circumstances, at both creation and resolution time.
+> 3. **Nudge B (drift) becomes awareness-only** (`@07` §2): it fires at the next inference about the previous turn's growth, and the previous turn is out of scope for modification — so it must no longer prescribe rewind/shrink. It reports drift and advises leaner current-turn output. **Nudge A (bloat reminder) is the only prescribing nudge** and is already compliant: it rides the offending result inside the turn that produced it. The high-water annotation stays awareness-only, unchanged. (A rewind — `last_tool_call_group`/`last_turn` — and user-consented checkpoint rewinds remain as in v1.1/v1.2; they hide tail-side spans and are unaffected.)
+> 4. **Supersedes the unspec'd "rewrite budget" work** (r1): its queue/moment-cap machinery existed to batch mid-history rewrites across turns; with no mid-history rewrites there is nothing to cap. The v1.2 aggregate orientation line (k>1 shrinks within one turn) is retained.
+> Rationale (bench campaign, 2026-08): every measured cost pathology (billed-input inflation up to +97%, per-moment re-orientation overhead) traced to rewrites of messages mid-history — rewriting a cached prefix re-bills the entire tail behind the edit. A current-turn-only edit is inherently tail-adjacent: it cannot invalidate anything behind itself, so the cache cost that motivated r1/r4 does not arise.
+> Net: shrink target union 3 arms → 2 (both current-turn-scoped); `by_content_includes` removed from shrink and cancel; Nudge B re-worded awareness-only; filter gains a scope guard; no tool added or removed.
 
 ---
 
@@ -59,7 +67,7 @@ Pi already has powerful context machinery: auto-compaction, manual `/compact`, `
 Mulligan gives the agent that missing primitive, and gives the human a narrow surface for the two operations that belong to them. **Agent-owned** (the agent gains the ability to):
 
 - **Rewind** — hide either its *last tool-call group* or its *last full turn*, and leave itself a structured note so the resumed attempt is better-informed. The agent **also** retains `granularity:"checkpoint"` to rewind back to a checkpoint — but checkpoints are now **user-set** (see human-owned below), so this power fires only where the user has opted in.
-- **Shrink** — replace a specific past tool result (or message) with a compact summary, persistently, in the view.
+- **Shrink** — replace a specific tool result **from the current turn** with a compact summary, persistently, in the view. (v2.0: current-turn scope — earlier turns are never modifiable.)
 - **Audit** — see a token breakdown of its own context (computed from the *filtered* view, not Pi's bookkeeping), so its rewind decisions are informed.
 - **Be nudged** — automatically, at near-zero token cost, when a tool result is bloated or **agent-attributable** turn growth is sustained (user messages excluded from the drift delta — v1.1).
 
@@ -154,7 +162,7 @@ The architecture is fully detailed in `@03-architecture.md`.
 - **Rewind** — the "mulligan." The agent hides a recent span and leaves itself a note. Two granularities:
   - **`last_tool_call_group`** — hide the most recent assistant message that issued tool calls, *together with* its tool-result messages. Surgical: keeps the agent's surrounding reasoning, sheds only the bad tool interaction and its output.
   - **`last_turn`** — hide all agent work (assistant + tool-result messages) produced *after* the most recent user message, leaving that user message in place. The model lands back at the current user prompt, ready to re-attempt the turn with the note. (v1's `to_previous_prompt` option — which also discarded that user message — is **removed** in v1.1: it violated the "no rewind wipes user input" guardrail. The checkpoint mechanism is now the consented way to rewind further.)
-- **Shrink** — replace the content of one specific past message (typically a bloated `toolResult`) with a compact replacement, in the view. The replacement persists for as long as the marker exists (permanent soft substitution).
+- **Shrink** — replace the content of one specific message from the **current turn** (typically a bloated `toolResult` just produced) with a compact replacement, in the view. The replacement persists for as long as the marker exists (permanent soft substitution). Only current-turn results are eligible targets (v2.0).
 
 Both are **permanent until... nothing** — there is no undo. They persist across reload and `/resume`.
 
@@ -165,7 +173,7 @@ Both are **permanent until... nothing** — there is no undo. They persist acros
 > Full detail: `@07-preventive-and-nudges.md`.
 
 - **Bloated-result reminder.** A `tool_result` hook measures each result; if it exceeds a configurable threshold, the hook appends a short reminder to that result's content telling the agent a rewind is available. The threshold is resolved **per tool** — each tool may carry its own override, falling back to a global default (e.g. `read` gets 24 KB; `bash` uses the 16 KB global because it is the primary bloat surface). This rides the result itself — no extra request.
-- **Per-turn drift nudge.** At `turn_end`, Mulligan records how much **agent-attributable** context grew that turn (assistant messages + tool results the agent produced — **user messages excluded**, v1.1: a user's prompt is intentional ground-truth, never bloat to shed) and whether it crossed a drift threshold. On the *next* inference, the `context` handler injects a one-line annotation into the message copy (e.g. `[mulligan: last turn +4.2k tokens; rewind available]`). This rides the inference that was already going to happen — **zero extra requests**, ~20 tokens when it fires.
+- **Per-turn drift nudge.** At `turn_end`, Mulligan records how much **agent-attributable** context grew that turn (assistant messages + tool results the agent produced — **user messages excluded**, v1.1: a user's prompt is intentional ground-truth, never bloat to shed) and whether it crossed a drift threshold. On the *next* inference, the `context` handler injects a one-line annotation into the message copy (e.g. `[mulligan: last turn +4.2k tokens; keep current-turn outputs lean]`). This rides the inference that was already going to happen — **zero extra requests**, ~20 tokens when it fires. (v2.0: awareness-only — it may not prescribe rewind/shrink, since the turn it reports on is already out of modification scope.)
 
 ---
 

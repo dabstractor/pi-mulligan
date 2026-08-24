@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, resolvePinnedShrink, applyRewind, applyShrink, stampShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig } from "../src/transforms.js";
+import { partitionIntoUnits, resolveLastToolCallGroup, resolveLastTurn, resolveCheckpoint, resolvePinnedHide, resolvePinnedShrink, applyRewind, applyShrink, stampShrink, resolveShrinkTarget, filterPipeline, stableSortBySeq, protectedOk, markerTurnSpan, type Unit, type MessageLike, type BranchEntry, type ShrinkTarget, type RewindMarkerLike, type ShrinkMarkerLike, type MarkerBundle, type ProtectedConfig, type ShrinkTargetRead, currentTurnSpan } from "../src/transforms.js";
 
 // No beforeEach needed: transforms.ts has NO module-scoped mutable state (pure over its arguments).
 
@@ -27,6 +27,11 @@ function result(toolCallId: string): MessageLike {
     content: [{ type: "text", text: "..." }],
     isError: false,
   };
+}
+
+/** Build a toolResult message with a custom toolName (by_tool_name fixture builder). */
+function toolResult(toolCallId: string, toolName: string): MessageLike {
+  return { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text: "..." }], isError: false };
 }
 
 /** Build a user message. */
@@ -1029,7 +1034,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     // precedent (and the applyRewind T4.S1 convention).
     expect(applyShrink(msgs, { target: { by_tool_call_id: "nope" }, replacement: "x" })).toBe(msgs);
     expect(applyShrink(msgs, { target: { by_tool_name: "absent", occurrence: "last" }, replacement: "x" })).toBe(msgs);
-    expect(applyShrink(msgs, { target: { by_content_includes: "not-present-anywhere" }, replacement: "x" })).toBe(msgs);
+    
   });
 
   it("spec/10 §1.5 bullet 3 — two shrinks same target, seq order → LAST wins (spec/08 E17)", () => {
@@ -1064,20 +1069,7 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     expect(textOf(out[4])).toBe("r2");              // the LAST grep result untouched
   });
 
-  it("by_content_includes → FIRST message (any role) whose stringified content includes the substring", () => {
-    const big: MessageLike = { ...result("c"), content: [{ type: "text", text: "error: ENOSPC at /disk" }] };
-    const msgs: MessageLike[] = [user("hello"), asst("c"), big];
-    const out = applyShrink(msgs, { target: { by_content_includes: "ENOSPC" }, replacement: "[err]" });
-    expect(textOf(out[2])).toBe(stampShrink("[err]"));           // the toolResult at index 2 matched
-    expect(out[2].role).toBe("toolResult");
-  });
-
-  it("spec/08 E19 — by_content_includes matches a NON-toolResult (user) → content replaced, role PRESERVED", () => {
-    const msgs: MessageLike[] = [user("find this token please"), asst("c"), result("c")];
-    const out = applyShrink(msgs, { target: { by_content_includes: "token" }, replacement: "[redacted]" });
-    expect(textOf(out[0])).toBe(stampShrink("[redacted]"));      // the user message at index 0 matched
-    expect(out[0].role).toBe("user");               // role PRESERVED (E19) — not turned into a toolResult
-  });
+  
 
   it("resolveShrinkTarget direct: returns the matched index (number) or null per matcher", () => {
     const msgs: MessageLike[] = [
@@ -1089,8 +1081,6 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
     expect(resolveShrinkTarget(msgs, { by_tool_name: "grep", occurrence: "first" })).toBe(2);
     expect(resolveShrinkTarget(msgs, { by_tool_name: "grep", occurrence: "last" })).toBe(4);
     expect(resolveShrinkTarget(msgs, { by_tool_name: "absent", occurrence: "last" })).toBeNull();
-    expect(resolveShrinkTarget(msgs, { by_content_includes: "u" })).toBe(0); // user("u") stringified includes "u"
-    expect(resolveShrinkTarget(msgs, { by_content_includes: "" })).toBeNull(); // BUG-004: empty needle → no match (null, not 0)
   });
 
   it("defensive: non-array messages → []; non-record marker → unchanged (same ref); malformed target → no-op", () => {
@@ -1113,16 +1103,16 @@ describe("applyShrink — spec/10 §1.5 PINNED contract + three matchers + defen
       new Proxy({}, { get() { throw new Error("trap"); } }),
     );
     // resolveShrinkTarget never throws on it (all reads via readOwn; stringifyContent catches JSON.stringify throws).
-    expect(() => resolveShrinkTarget([trap], { by_content_includes: "" })).not.toThrow();
-    expect(resolveShrinkTarget([trap], { by_content_includes: "" })).toBeNull(); // BUG-004: empty needle → null even on a throwing-Proxy
+    expect(() => resolveShrinkTarget([trap], { by_tool_call_id: "" })).not.toThrow();
+    expect(resolveShrinkTarget([trap], { by_tool_call_id: "" })).toBeNull(); // BUG-004: empty discriminator value → null even on a throwing-Proxy
     // applyShrink where a throwing-Proxy is PRESENT but NOT matched → copied by reference via .map, never read.
     const msgs1: MessageLike[] = [user("keep"), trap];
-    expect(() => applyShrink(msgs1, { target: { by_content_includes: "keep" }, replacement: "r" })).not.toThrow();
-    // BUG-004: an empty by_content_includes needle now resolves to null → applyShrink is a NO-OP (returns the
+    expect(() => applyShrink(msgs1, { target: { by_tool_call_id: "nope" }, replacement: "r" })).not.toThrow();
+    // BUG-004: an empty id now resolves to null → applyShrink is a NO-OP (returns the
     // array unchanged, same reference) and never throws even when a throwing-Proxy is the sole message.
     const trapArr: MessageLike[] = [trap];
-    expect(() => applyShrink(trapArr, { target: { by_content_includes: "" }, replacement: "r" })).not.toThrow();
-    expect(applyShrink(trapArr, { target: { by_content_includes: "" }, replacement: "r" })).toBe(trapArr); // no-op → same ref
+    expect(() => applyShrink(trapArr, { target: { by_tool_call_id: "" }, replacement: "r" })).not.toThrow();
+    expect(applyShrink(trapArr, { target: { by_tool_call_id: "" }, replacement: "r" })).toBe(trapArr); // no-op → same ref
   });
 
   it("purity: never mutates the input array (map returns a new array; no-op returns the same unmuted ref)", () => {
@@ -1372,14 +1362,21 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
         asst("c2"),
         { ...result("c2"), content: [{ type: "text", text: "BIG2" }] },
       ];
+      // v2.0 issuing-turn scope guard (P1.M1.T2.S2): markers carry markerEntryId (custom branch entries at the
+      // tail); both markers issue after the LAST user (u0) → span [1,5) covers both targets.
+      const branchEntries: BranchEntry[] = [
+        entry("e_u", "message"), entry("e_a1", "message"), entry("e_r1", "message"),
+        entry("e_a2", "message"), entry("e_r2", "message"),
+        entry("e_m1", "custom"), entry("e_m2", "custom"),
+      ];
       const markers: MarkerBundle = {
         rewinds: [],
         shrinks: [
-          mkShrink(1, { by_tool_call_id: "c1" }, "[s1]"),
-          mkShrink(2, { by_tool_call_id: "c2" }, "[s2]"),
+          mkShrink(1, { by_tool_call_id: "c1" }, "[s1]", { markerEntryId: "e_m1" }),
+          mkShrink(2, { by_tool_call_id: "c2" }, "[s2]", { markerEntryId: "e_m2" }),
         ],
       };
-      const out = filterPipeline(msgs, markers, cfg);
+      const out = filterPipeline(msgs, markers, cfg, branchEntries);
       expect(out).toHaveLength(5);
       expect(textOf(out[2])).toBe(stampShrink("[s1]"));
       expect(textOf(out[4])).toBe(stampShrink("[s2]"));
@@ -1432,10 +1429,11 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
       const branchEntries: BranchEntry[] = [
         entry("e_u", "message"), entry("e_a1", "message"), entry("e_old", "message"),
         entry("e_a2", "message"), entry("e_new", "message"),
+        entry("e_m1", "custom"), // the shrink marker's own entry — issuing turn spans [1,5) (after user "u")
       ];
       const markers: MarkerBundle = {
         rewinds: [],
-        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[shrunk]", { pinnedEntryId: "e_old" })],
+        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[shrunk]", { pinnedEntryId: "e_old", markerEntryId: "e_m1" })],
       };
       const out = filterPipeline(msgs, markers, cfg, branchEntries);
       expect(textOf(out[2])).toBe(stampShrink("[shrunk]")); // OLD read (pinned) substituted
@@ -1443,18 +1441,189 @@ describe("filterPipeline / stableSortBySeq / protectedOk — spec/10 §1.9 + §3
       expect(textOf(out[4])).toBe("NEW READ"); // NEW read UNTOUCHED — no drift
     });
 
-    it("FINDING 3 — UNPINNED shrink (no pinnedEntryId) still LIVE-resolves (backward compat: old markers)", () => {
-      // An old-style shrink without pinnedEntryId → live by_tool_name:"read":last → matches the LAST read (idx 2).
+    it("UNPINNED shrink (no pinnedEntryId) LIVE-resolves IN-SPAN when a markerEntryId + branch entry is present (v2.0)", () => {
+      // v2.0 (P1.M1.T2.S2): a live by_tool_name:"read":last marker with a markerEntryId resolves within its
+      // issuing-turn span [1,3) (after user "u") → matches the read at idx 2 → applies. Markers WITHOUT a
+      // markerEntryId (old bundles) now no-op fail-safe — that legacy behavior is gone by design (spec/06 §5 v2.0).
       const msgs: MessageLike[] = [
         user("u"), asst("c1"), { ...result("c1"), toolName: "read", content: [{ type: "text", text: "OLD" }] },
       ];
+      const branchEntries: BranchEntry[] = [
+        entry("e_u", "message"), entry("e_a1", "message"), entry("e_r", "message"),
+        entry("e_m1", "custom"),
+      ];
       const markers: MarkerBundle = {
         rewinds: [],
-        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[s]")],
+        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[s]", { markerEntryId: "e_m1" })],
       };
-      const out = filterPipeline(msgs, markers, cfg, []);
+      const out = filterPipeline(msgs, markers, cfg, branchEntries);
       expect(textOf(out[2])).toBe(stampShrink("[s]"));
     });
+
+    // ── filterPipeline — shrink scope guard (P1.M1.T2.S2) ───────────────────────
+  describe("filterPipeline — shrink scope guard (P1.M1.T2.S2; PRD §2 issuing-turn ruling; spec/06 §5 v2.0)", () => {
+    /** Read-style toolResult fixture (mirror FINDING 3). */
+    const readMsg = (callId: string, text: string): MessageLike =>
+      ({ ...result(callId), toolName: "read", content: [{ type: "text", text }] });
+
+    it("CRITICAL — pinned in-turn shrink (turn N) KEEPS applying after the user sends message N+1 (PRD §2 issuing-turn ruling; a fire-time bound would expire it)", () => {
+      // TURN N: [u0, a1(c1), read1] — marker's own custom entry e_m1 sits AFTER the read → issuing turn [1,3).
+      const msgsN: MessageLike[] = [user("u0"), asst("c1"), readMsg("c1", "BIG READ")];
+      const branchN: BranchEntry[] = [
+        entry("e_u0", "message"),   // msg 0
+        entry("e_a1", "message"),   // msg 1
+        entry("e_r1", "message"),   // msg 2 (the pinned read)
+        entry("e_m1", "custom"),    // marker's own entry (yield 0) — AFTER the read
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_call_id: "c1" }, "[shrunk]", { pinnedEntryId: "e_r1", markerEntryId: "e_m1" })],
+      };
+
+      // FIRE 1 — on the turn-N list: the pinned read IS substituted in-turn.
+      const out1 = filterPipeline(msgsN, markers, cfg, branchN);
+      expect(out1).toHaveLength(3);
+      expect(textOf(out1[2])).toBe(stampShrink("[shrunk]"));
+      expect(out1[2].toolCallId).toBe("c1");
+      expect((out1[2] as { toolName?: string }).toolName).toBe("read");
+
+      // TURN N+1: same marker set; messages + branchEntries EXTENDED (root→leaf holds; marker entry retained).
+      const msgsN1: MessageLike[] = [
+        ...msgsN,
+        user("u1"),                                  // msg 3 — NEW user message
+        asst("c2"),                                  // msg 4
+        { ...result("c2"), toolName: "bash", content: [{ type: "text", text: "c2 output" }] }, // msg 5
+      ];
+      const branchN1: BranchEntry[] = [
+        ...branchN,                                    // e_u0, e_a1, e_r1, e_m1
+        entry("e_u1", "message"),   // msg 3
+        entry("e_a2", "message"),   // msg 4
+        entry("e_r2", "message"),   // msg 5
+      ];
+
+      // FIRE 2 — on the GROWN list: the marker STILL applies (issuing-turn bound, not fire-time).
+      // markerTurnSpan: 3 message-yields before e_m1 → markerMsgPos=3 → last user at i<3 is 0 → span [1,3)
+      // (end capped at u1, index 3) — contains msg 2 (pinned read) ✓, excludes msgs 3–5 ✓.
+      const out2 = filterPipeline(msgsN1, markers, cfg, branchN1);
+      expect(out2).toHaveLength(6);
+      expect(textOf(out2[2])).toBe(stampShrink("[shrunk]"));  // STILL substituted after new user message
+      expect(out2[2].toolCallId).toBe("c1");
+      expect((out2[2] as { toolName?: string }).toolName).toBe("read");
+      expect(textOf(out2[5])).toBe("c2 output");               // c2's result untouched
+    });
+
+    it("out-of-scope pinnedEntryId (resolves to an entry BEFORE the marker's issuing turn — malformed/legacy) → no substitution, no throw, same shape", () => {
+      // [u0, a0(c0), readOld | u1, a1(c1), read1 | marker] — issuing turn [4,6); pin points at TURN-0's read.
+      const msgs: MessageLike[] = [
+        user("u0"), asst("c0"), readMsg("c0", "OLD READ"),
+        user("u1"), asst("c1"), readMsg("c1", "TURN READ"),
+      ];
+      const branchEntries: BranchEntry[] = [
+        entry("e_u0", "message"),   // msg 0
+        entry("e_a0", "message"),   // msg 1
+        entry("e_r0", "message"),   // msg 2 (TURN-0 read — the out-of-scope pin)
+        entry("e_u1", "message"),   // msg 3
+        entry("e_a1", "message"),   // msg 4
+        entry("e_r1", "message"),   // msg 5
+        entry("e_m1", "custom"),    // marker entry → issuing turn [4,6)
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_call_id: "c0" }, "[shrunk]", { pinnedEntryId: "e_r0", markerEntryId: "e_m1" })],
+      };
+      let out: MessageLike[];
+      expect(() => { out = filterPipeline(msgs, markers, cfg, branchEntries); }).not.toThrow();
+      expect(out!).toHaveLength(6);                              // same shape — nothing removed/widened
+      expect(textOf(out![2])).toBe("OLD READ");                 // verbatim — NOT stamped (before span.start)
+      expect(textOf(out![5])).toBe("TURN READ");                // verbatim — in-span but not the pinned entry
+      expect(out!.map((m) => m.role)).toEqual(msgs.map((m) => m.role));
+    });
+
+    it("markerTurnSpan indeterminable → fail-safe no-op (absent markerEntryId AND omitted branchEntries variants)", () => {
+      const msgs: MessageLike[] = [
+        user("u0"), asst("c1"), readMsg("c1", "BIG READ"),
+        user("u1"), asst("c2"), readMsg("c2", "TURN READ"),
+      ];
+      const branchEntries: BranchEntry[] = [
+        entry("e_u0", "message"), entry("e_a1", "message"), entry("e_r1", "message"),
+        entry("e_u1", "message"), entry("e_a2", "message"), entry("e_r2", "message"),
+        entry("e_m1", "custom"),
+      ];
+
+      // Variant 1: markerEntryId references an id ABSENT from branchEntries → span null → no-op.
+      const markersMissing: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_call_id: "c1" }, "[shrunk]", { pinnedEntryId: "e_r1", markerEntryId: "e_MISSING" })],
+      };
+      let out1: MessageLike[];
+      expect(() => { out1 = filterPipeline(msgs, markersMissing, cfg, branchEntries); }).not.toThrow();
+      expect(out1!).toHaveLength(6);
+      expect(out1!.every((m, i) => textOf(m) === textOf(msgs[i]))).toBe(true); // verbatim everywhere
+
+      // Variant 2: branchEntries omitted entirely (4-arg call) → no-op (old-bundle path).
+      const markersNoId: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_call_id: "c1" }, "[shrunk]", { pinnedEntryId: "e_r1" })],
+      };
+      let out2: MessageLike[];
+      expect(() => { out2 = filterPipeline(msgs, markersNoId, cfg); }).not.toThrow();
+      expect(out2!).toHaveLength(6);
+      expect(out2!.every((m, i) => textOf(m) === textOf(msgs[i]))).toBe(true);
+    });
+
+    // End cap landed (this item): markerTurnSpan caps span.end at the FIRST user message at-or-after
+    // the marker boundary (scope_guard_design.md §1.4/§3) — the live "last" selector can now only match
+    // within the issuing turn; the later-turn read stays verbatim.
+    it("LIVE (unpinned) selector never re-targets beyond its marker's turn — later-turn read verbatim, in-turn read substituted", () => {
+      // [u0, a1(c1), read1 | MARKER | u1, a2(c2), readLater] — marker issues in turn [1,3).
+      const msgs: MessageLike[] = [
+        user("u0"), asst("c1"), readMsg("c1", "IN-TURN READ"),
+        user("u1"), asst("c2"), readMsg("c2", "LATER READ"),
+      ];
+      const branchEntries: BranchEntry[] = [
+        entry("e_u0", "message"),   // msg 0
+        entry("e_a1", "message"),   // msg 1
+        entry("e_r1", "message"),   // msg 2 (in-turn read)
+        entry("e_m1", "custom"),    // marker entry BEFORE u1 → issuing turn [1,3)
+        entry("e_u1", "message"),   // msg 3
+        entry("e_a2", "message"),   // msg 4
+        entry("e_r2", "message"),   // msg 5 (later-turn read)
+      ];
+      const markers: MarkerBundle = {
+        rewinds: [],
+        shrinks: [mkShrink(1, { by_tool_name: "read", occurrence: "last" }, "[shrunk]", { markerEntryId: "e_m1" })], // UNPINNED
+      };
+      const out = filterPipeline(msgs, markers, cfg, branchEntries);
+      expect(out).toHaveLength(6);
+      expect(textOf(out[2])).toBe(stampShrink("[shrunk]")); // in-span match applies (the in-turn read)
+      expect(out[2].toolCallId).toBe("c1");
+      expect((out[2] as { toolName?: string }).toolName).toBe("read");
+      expect(textOf(out[5])).toBe("LATER READ");             // later-turn read NOT substituted (span bound)
+    });
+
+    it("markerTurnSpan — end caps at the FIRST user at-or-after the marker boundary; final turn → messages.length", () => {
+      // [u0, a1, read1 | MARKER | u1, a2, read2] — marker between two turns.
+      const msgs: MessageLike[] = [
+        user("u0"), asst("c1"), readMsg("c1", "IN"),
+        user("u1"), asst("c2"), readMsg("c2", "LATER"),
+      ];
+      const branch: BranchEntry[] = [
+        entry("e_u0", "message"), entry("e_a1", "message"), entry("e_r1", "message"),
+        entry("e_m1", "custom"),
+        entry("e_u1", "message"), entry("e_a2", "message"), entry("e_r2", "message"),
+      ];
+      // markerMsgPos = 3 → start: last user before 3 is 0 → 1; end: FIRST user at-or-after 3 is index 3 → [1,3).
+      expect(markerTurnSpan(msgs, branch, "e_m1")).toEqual({ start: 1, end: 3 });
+
+      // Marker in the FINAL turn (no later user) → end = messages.length.
+      const branchTail: BranchEntry[] = [
+        entry("e_u0", "message"), entry("e_a1", "message"), entry("e_r1", "message"),
+        entry("e_u1", "message"), entry("e_a2", "message"), entry("e_r2", "message"),
+        entry("e_m2", "custom"), // after EVERYTHING → issuing turn [4,6)
+      ];
+      expect(markerTurnSpan(msgs, branchTail, "e_m2")).toEqual({ start: 4, end: 6 });
+    });
+  });
 
     it("defensive: no markers → SAME reference; non-array messages → []; non-record markers → pass-through", () => {
       const msgs: MessageLike[] = [user("u"), asst("c"), result("c")];
@@ -2190,9 +2359,10 @@ describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink
     const branch: BranchEntry[] = [
       entry("e_u", "message"), entry("e1", "message"), entry("e2", "message"),
       entry("e3", "message"), entry("e4", "message"),
+      entry("e_m", "custom"), // the shrink marker's own entry (v2.0 issuing-turn guard — P1.M1.T2.S2)
     ];
     const rw: RewindMarkerLike = { seq: 1, granularity: "last_tool_call_group", hideEntryIds: ["e1", "e2"] };
-    const sh: ShrinkMarkerLike = { seq: 2, target: { by_tool_call_id: "read" }, replacement: "[SHRUNK]", pinnedEntryId: "e4" };
+    const sh: ShrinkMarkerLike = { seq: 2, target: { by_tool_call_id: "read" }, replacement: "[SHRUNK]", pinnedEntryId: "e4", markerEntryId: "e_m" };
     const out = filterPipeline(msgs, { rewinds: [rw], shrinks: [sh] }, cfg, branch);
     expect(out).not.toContain(msgs[1]); // asst(grep) HIDDEN by the rewind
     expect(out).not.toContain(msgs[2]); // result(grep) HIDDEN by the rewind
@@ -2232,5 +2402,107 @@ describe("checkpoint permanent hiding + multi-rewind composition + pinned/shrink
     expect(out).toContain(msgs[1]);     // asst(cp) KEPT (checkpoint point, not pinned)
     expect(out).toContain(msgs[2]);     // result(cp) KEPT
     expect(out).toHaveLength(3);
+  });
+});
+
+// ── resolveShrinkTarget — v2.0 span semantics (spec/06 §5 v2.0; PRD §2) ─────────
+// Locks the span contract consumed by filterPipeline's LIVE branch (P1.M1.T2.S2) and by both tools:
+// both arms search ONLY [span.start, span.end); out-of-span matches → null; span omitted → full range
+// (back-compat for cancel.ts's full-history hint usage); legacy content-arm targets resolve to null ALWAYS.
+
+describe("resolveShrinkTarget — v2.0 span semantics (spec/06 §5 v2.0; PRD §2)", () => {
+  // Fixture: two turns. Tool results with per-name identities for boundary arithmetic.
+  //   0 user, 1 asst("c1"), 2 result("c1"), 3 user, 4 asst("c2"),
+  //   5 toolResult("r2","read"), 6 toolResult("r3","read"), 7 toolResult("r4","bash")
+  const msgs: MessageLike[] = [
+    user("turn 0"),
+    asst("c1"),
+    result("c1"),
+    user("turn 1"),
+    asst("c2"),
+    toolResult("r2", "read"),
+    toolResult("r3", "read"),
+    toolResult("r4", "bash"),
+  ];
+
+  it("(a) by_tool_call_id: in-span match resolves; matches before span.start or at/after span.end → null", () => {
+    // In-span: "r3" lives at index 6; span [5,8) contains it.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r3" }, { start: 5, end: 8 })).toBe(6);
+    // Match exists only BEFORE span.start ("r3" at 6, span ends at 5) → null.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r3" }, { start: 0, end: 5 })).toBeNull();
+    // "r2" at index 5 === span.start of an exclusive-lower... span starts AT 6 → index 5 is OUT → null.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r2" }, { start: 6, end: 8 })).toBeNull();
+    // Half-open upper bound: a match at index === span.end is OUT ("r4" at 7, span [0,7)) → null.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r4" }, { start: 0, end: 7 })).toBeNull();
+    // Same id, full-span sanity (both arms scoped tight: "r2" at 5 inside [5,6)).
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r2" }, { start: 5, end: 6 })).toBe(5);
+  });
+
+  it("(b) by_tool_name: first/last in-span; a LATER out-of-span same-name result must NOT win occurrence:'last'", () => {
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "first" }, { start: 5, end: 8 })).toBe(5);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "last" }, { start: 5, end: 8 })).toBe(6);
+    // Index 6's later "read" is out of span [0,6) → the in-span match at 5 wins "last".
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "last" }, { start: 0, end: 6 })).toBe(5);
+    // occurrence omitted → same as "last" (GOTCHA #6).
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read" } as ShrinkTargetRead, { start: 5, end: 8 })).toBe(6);
+    // occurrence garbage → still "last" semantics.
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "garbage" as "last" }, { start: 5, end: 8 })).toBe(6);
+    // Name absent within span ("bash" outside [5,7)) → null.
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "bash", occurrence: "last" }, { start: 5, end: 7 })).toBeNull();
+  });
+
+  it("(c) span omitted → full range (back-compat: cancel.ts full-history hint usage)", () => {
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r4" })).toBe(7);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "last" })).toBe(6);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "first" })).toBe(5);
+  });
+
+  
+
+  it("degenerate span (end < start) → EMPTY range → both arms null; malformed span (NaN/non-number) → IGNORED → full range", () => {
+    // end < start clamps to an empty range → no match possible.
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r3" }, { start: 5, end: 3 })).toBeNull();
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "last" }, { start: 5, end: 3 })).toBeNull();
+    // NaN / non-number fields → the span is ignored entirely (full range, NOT empty range).
+    expect(resolveShrinkTarget(msgs, { by_tool_call_id: "r4" }, { start: NaN, end: 8 })).toBe(7);
+    expect(resolveShrinkTarget(msgs, { by_tool_name: "read", occurrence: "last" }, { start: 0, end: "x" as never })).toBe(6);
+    // Never throws on a malformed span.
+    expect(() => resolveShrinkTarget(msgs, { by_tool_call_id: "r4" }, { start: NaN, end: NaN })).not.toThrow();
+  });
+
+  it("type-lock: resolveShrinkTarget returns number | null", () => {
+    expectTypeOf(resolveShrinkTarget(msgs, { by_tool_call_id: "r3" }, { start: 5, end: 8 })).toEqualTypeOf<number | null>();
+  });
+});
+
+// ── currentTurnSpan — v2.0 current-turn span (spec/06 §5 v2.0) ──────────────────
+
+describe("currentTurnSpan — v2.0 current-turn span (spec/06 §5 v2.0)", () => {
+  it("multi-user array → { start: iLastUser + 1, end: len } (span = everything after the LAST user message)", () => {
+    const msgs: MessageLike[] = [user("t0"), asst("c1"), result("c1"), user("t1"), asst("c2"), result("c2")];
+    expect(currentTurnSpan(msgs)).toEqual({ start: 4, end: 6 });
+  });
+
+  it("no user message → { start: 0, end: len } (session-start edge — the whole list is the span)", () => {
+    const msgs: MessageLike[] = [asstText("a"), result("c1"), custom("mulligan:note")];
+    expect(currentTurnSpan(msgs)).toEqual({ start: 0, end: 3 });
+  });
+
+  it("single user at index 0 → { start: 1, end: len }", () => {
+    const msgs: MessageLike[] = [user("only"), asst("c"), result("c")];
+    expect(currentTurnSpan(msgs)).toEqual({ start: 1, end: 3 });
+  });
+
+  it("non-array messages → { start: 0, end: 0 } (defensive; never throws — E13)", () => {
+    expect(currentTurnSpan(null as unknown as MessageLike[])).toEqual({ start: 0, end: 0 });
+    expect(currentTurnSpan([1, 2] as unknown as MessageLike[])).toEqual({ start: 0, end: 2 }); // no user → start 0
+  });
+
+  it("invariant: start === resolveLastTurn's last-user scan + 1 on the same array", () => {
+    const msgs: MessageLike[] = [user("a"), asstText("x"), user("b"), asst("c"), result("c")];
+    const span = currentTurnSpan(msgs);
+    expect(span).toEqual({ start: 3, end: 5 });
+    expect(span.end).toBe(msgs.length);
+    expect(msgs[span.start - 1]?.role).toBe("user"); // the boundary IS the last user message
   });
 });

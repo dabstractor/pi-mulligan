@@ -13,7 +13,10 @@
  *   c) empty-replacement refusal (incl. whitespace-only) — no persistence.
  *   d) structurally-impossible-target refusal (empty/whitespace discriminator, each arm) — no persistence.
  *   e) best-effort match yes (matched:yes on a scripted toolResult by EACH of the 3 matchers) + persistence payload.
- *   f) no-match-is-NOT-a-refusal (matched:no on a non-empty currently-unmatched target) — STILL persists (E8).
+ *   f) v2.0 current-turn scope: no IN-TURN match (no-match-anywhere, or a match only in an earlier turn) →
+ *      HARD REFUSAL at creation, nothing persisted. A snapshot that can't be verified (throwing
+ *      buildContextEntries) still persists matched:no (E13 fail-safe — the filter's scope guard keeps an
+ *      unverifiable marker harmless).
  *   g) best-effort failure (throwing buildContextEntries → matched:no + STILL persists — E13).
  *   h) persistence payload exactness ({target, replacement, reason} + envelope {schema, v, kind, id, seq, ts}).
  *   i) markerId in details (getLeafId return; null when leafId null — still success).
@@ -30,6 +33,8 @@ import {
   type ShrinkArgs,
   type ShrinkDetails,
 } from "../../src/tools/shrink.js";
+import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { estimateTokens } from "../../src/tokens.js"; // the SAME estimator the tool uses (v1.2 ~<t> numbers)
 import { setConfig } from "../../src/config.js";
 import { clearAll } from "../../src/runtime.js";
@@ -126,6 +131,22 @@ async function run(
   return tool.execute(toolCallId, params, undefined, undefined, ctx);
 }
 
+// The exact host validation pipeline (pi-ai validateToolArguments): structuredClone →
+// prepareArguments (when present) → Value.Convert → compiled Check. Returns Check's boolean.
+// (Copied from test/prepare-args.test.ts — C13: host validates BEFORE execute; schema-level arm removal.)
+function hostPipelinePasses(
+  params: Parameters<typeof Value.Convert>[0],
+  args: unknown,
+  prepareArguments?: ((raw: unknown) => unknown) | undefined,
+): boolean {
+  let prepared = structuredClone(args) as Record<string, unknown>;
+  if (typeof prepareArguments === "function") {
+    prepared = prepareArguments(prepared) as Record<string, unknown>;
+  }
+  Value.Convert(params as never, prepared as never);
+  return Compile(params as never).Check(prepared as never);
+}
+
 /**
  * Extract the text from a result's first content block. This tool ONLY ever returns TextContent (never
  * ImageContent), but `content` is typed `(TextContent | ImageContent)[]` so we narrow with a runtime guard
@@ -180,12 +201,14 @@ describe("mulligan_shrink — registration metadata (spec/05 §5)", () => {
     expect(tool.description).toBe(SHRINK_DESC);
   });
 
-  it("description is the spec/05 §5 verbatim string (line 79)", () => {
+  it("description is the v2.0 current-turn string (PRD §2 purpose wording)", () => {
     expect(SHRINK_DESC).toBe(
-      "Replace a specific past tool result with a compact summary you provide, in your view, going forward. " +
-        "Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in " +
-        "context (just with your summary as its result).",
+      "Replace the current turn's tool result with a compact summary you provide, in your view, going forward. " +
+        "Use when the call was fine but its output is too big to keep carrying. Only results from THIS turn can be " +
+        "shrunk — a target from an earlier turn is refused outright. Unlike rewind, the call stays in context " +
+        "(just with your summary as its result).",
     );
+    expect(SHRINK_DESC).toContain("current turn");
   });
 
   it("parameters === ShrinkParams (the typebox schema)", () => {
@@ -250,8 +273,6 @@ describe("mulligan_shrink — structurally-impossible-target refusal (spec/05 §
     ["by_tool_call_id whitespace", { by_tool_call_id: "   " }],
     ["by_tool_name empty", { by_tool_name: "", occurrence: "last" as const }],
     ["by_tool_name whitespace", { by_tool_name: "  ", occurrence: "first" as const }],
-    ["by_content_includes empty", { by_content_includes: "" }],
-    ["by_content_includes whitespace", { by_content_includes: " \t " }],
   ])("refuses on %s with 'target discriminator must be non-empty'; no persistence", async (_label, target) => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx();
@@ -261,13 +282,14 @@ describe("mulligan_shrink — structurally-impossible-target refusal (spec/05 §
     expect(res.details).toEqual({});
   });
 
-  it("a NON-empty currently-unmatched target is NOT structurally-invalid (it is advisory — tested in the match block)", async () => {
-    // Sanity: a non-empty discriminator passes the structural check even with an empty snapshot (no match, but no refusal).
+  it("a NON-empty discriminator passes the structural check — but v2.0: no IN-TURN match (empty snapshot) → hard refusal, no persistence", async () => {
     const { appended, pi } = makePi();
-    const { ctx } = makeCtx({ contextEntries: [] });
+    const { ctx } = makeCtx({ contextEntries: [] }); // empty span → no in-turn match
     const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "x" });
-    expect(appended).toHaveLength(1); // persisted (no-match is NOT a refusal — E8)
-    expect(firstText(res)).toContain("Matched: no");
+    expect(appended).toHaveLength(0); // v2.0 §2 step 3: dead markers are refused at creation
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
   });
 });
 
@@ -341,20 +363,6 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
     }
   });
 
-  it("by_content_includes: matched:yes on a message whose content includes the substring", async () => {
-    const { appended, pi } = makePi();
-    const { ctx } = makeCtx({
-      contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", 'df -h ... "ENOSPC at /disk"'))],
-    });
-    const res = await run(pi, ctx, { target: { by_content_includes: "ENOSPC" }, replacement: "(shrink) disk full" });
-    expect(firstText(res)).toContain("Matched: yes");
-    expect(res.details).toEqual({ matched: true, markerId: "leaf-1" });
-    expect(appended[0].data).toMatchObject({
-      target: { by_content_includes: "ENOSPC" },
-      replacement: "(shrink) disk full",
-    });
-  });
-
   it("FINDING 3: matched → marker.pinnedEntryId === the matched ENTRY id (pinned shrink), per matcher", async () => {
     // by_tool_call_id → the single matched entry
     {
@@ -381,14 +389,6 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
       const { ctx } = makeCtx({ contextEntries: [e1, e2] });
       await run(pi, ctx, { target: { by_tool_name: "read", occurrence: "first" }, replacement: "s" });
       expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e1 as { id: string }).id); // FIRST
-    }
-    // by_content_includes → the first matching entry
-    {
-      const e = msgEntry("toolResult", toolResult("call-A", "bash", "ENOSPC at /disk"));
-      const { appended, pi } = makePi();
-      const { ctx } = makeCtx({ contextEntries: [e] });
-      await run(pi, ctx, { target: { by_content_includes: "ENOSPC" }, replacement: "s" });
-      expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBe((e as { id: string }).id);
     }
   });
 
@@ -435,36 +435,41 @@ describe("mulligan_shrink — best-effort match YES (matched:yes per matcher) + 
   });
 });
 
-// ── no-match-is-NOT-a-refusal + best-effort failure (spec/05 §2 step3; spec/08 E8/E13) ──────────
+// ── v2.0 no-in-turn-match hard refusal + best-effort failure (spec/05 §2 step3; spec/08 E8/E13) ────────
 
-describe("mulligan_shrink — no-match-is-NOT-a-refusal + best-effort failure (E8/E13)", () => {
+describe("mulligan_shrink — v2.0 no-in-turn-match hard refusal + best-effort failure (E8/E13)", () => {
   beforeEach(() => setConfig({ shrink: { enabled: true } }));
 
-  it("by_tool_call_id no-match: non-empty but currently-unmatched → SUCCESS (matched:no) + marker STILL persists (E8)", async () => {
+  it("v2.0: by_tool_call_id with no IN-TURN match → HARD REFUSAL (exact text), nothing persisted", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
       contextEntries: [msgEntry("toolResult", toolResult("call-A", "read", "x"))],
     });
     const res = await run(pi, ctx, {
-      target: { by_tool_call_id: "does-not-exist" }, // non-empty → structurally valid; currently unmatched
+      target: { by_tool_call_id: "does-not-exist" }, // non-empty → structurally valid; no in-turn match
       replacement: "summary",
     });
-    expect(firstText(res)).toContain("Matched: no");
-    expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
-    expect(appended).toHaveLength(1); // the marker STILL persists (E8 — retried next inference by the filter)
-    // FINDING 3: no match at creation → NO pinnedEntryId (the filter will fall back to live resolution)
-    expect((appended[0].data as Record<string, unknown>).pinnedEntryId).toBeUndefined();
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
+    expect(firstText(res)).not.toContain("Context updated:"); // refusals never carry the orientation line
+    expect(res.details).toEqual({});
+    expect(appended).toHaveLength(0); // v2.0: a dead marker is refused at creation — nothing persisted
   });
 
-  it("by_content_includes no-match: target substring not present → matched:no + STILL persists", async () => {
+  it("v2.0: target matching only an EARLIER turn (toolResult BEFORE the last user message) → the SAME hard refusal", async () => {
     const { appended, pi } = makePi();
     const { ctx } = makeCtx({
-      contextEntries: [msgEntry("toolResult", toolResult("call-A", "bash", "unrelated output"))],
+      contextEntries: [
+        msgEntry("toolResult", toolResult("call-A", "read", "x")),
+        msgEntry("user", { content: "next turn" }),
+      ],
     });
-    const res = await run(pi, ctx, { target: { by_content_includes: "ZZZ-NOT-PRESENT" }, replacement: "summary" });
-    expect(firstText(res)).toContain("Matched: no");
-    expect(res.details).toEqual({ matched: false, markerId: "leaf-1" });
-    expect(appended).toHaveLength(1);
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "summary" });
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
+    expect(appended).toHaveLength(0);
   });
 
   it("best-effort failure (throwing buildContextEntries) → matched:false + STILL success + STILL persists (E13)", async () => {
@@ -615,12 +620,12 @@ describe("mulligan_shrink — types (ToolDefinition + ShrinkParams inference)", 
   it("ShrinkArgs (Static<typeof ShrinkParams>) is the { target; replacement; reason? } shape", () => {
     const args = {} as ShrinkArgs;
     expectTypeOf(args.target).toEqualTypeOf<
-      | { by_tool_call_id: string }
-      | { by_tool_name: string; occurrence: "last" | "first" }
-      | { by_content_includes: string }
+      { by_tool_call_id: string } | { by_tool_name: string; occurrence: "last" | "first" }
     >();
     expectTypeOf(args.replacement).toEqualTypeOf<string>();
     expectTypeOf(args.reason).toEqualTypeOf<string | undefined>();
+    // (f) the removed v2.0 content-substring arm is not assignable to the target union —
+    //     compile-time lock lives in test/markers.test.ts (not.toMatchTypeOf idiom).
   });
 
   it("execute returns AgentToolResult<ShrinkDetails>", async () => {
@@ -635,6 +640,122 @@ describe("mulligan_shrink — types (ToolDefinition + ShrinkParams inference)", 
 // P1.M2.T1.S3: locks the S2 contract — terse result never echoes the replacement, and the
 // replacement reaches the HUMAN via ctx.ui.notify (zero-context-cost) iff ctx.hasUI, capped at
 // config.shrink.notifyMaxChars (default 2048).
+// ── v2.0 current-turn scoping lock (R2 — P1.M2.T2.S1 cases a–d) ─────────────
+
+describe("mulligan_shrink — v2.0 current-turn scoping (R2 lock)", () => {
+  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+
+  // (a) a toolResult that lives ONLY before the last user message → HARD refusal, exact text, zero persistence
+  it("(a) by_tool_call_id matching only an EARLIER turn → exact hard refusal; nothing persisted", async () => {
+    const { appended, pi } = makePi();
+    const e = msgEntry("toolResult", toolResult("call-A", "read", "big output"));
+    const u0 = msgEntry("user", { content: "u0" });
+    const u1 = msgEntry("user", { content: "u1" });
+    const { ctx } = makeCtx({ contextEntries: [u0, e, u1] });
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "s" });
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
+    expect(appended).toHaveLength(0);
+    expect(res.details).toEqual({});
+  });
+
+  // (b) by_tool_name: earlier-turn-only match AND a no-match-anywhere variant — same refusal
+  it.each([
+    ["earlier-turn-only match", { by_tool_name: "read", occurrence: "last" as const }, "call-A"],
+    ["no match anywhere", { by_tool_name: "read", occurrence: "last" as const }, "call-ZZZ"],
+  ])("(b) %s → exact hard refusal; nothing persisted", async (_label, target, toolCallId) => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" });
+    const e = msgEntry("toolResult", toolResult(toolCallId, "read", "big output"));
+    const u1 = msgEntry("user", { content: "u1" });
+    const { ctx } = makeCtx({ contextEntries: [u0, e, u1] });
+    const res = await run(pi, ctx, { target, replacement: "s" });
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
+    expect(appended).toHaveLength(0);
+    expect(res.details).toEqual({});
+  });
+
+  it("(b') no-match-anywhere by_tool_call_id → the same hard refusal", async () => {
+    const { appended, pi } = makePi();
+    const u0 = msgEntry("user", { content: "u0" });
+    const { ctx } = makeCtx({ contextEntries: [u0] }); // no toolResult anywhere
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-ZZZ" }, replacement: "s" });
+    expect(firstText(res)).toBe(
+      "Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk.",
+    );
+    expect(appended).toHaveLength(0);
+  });
+
+  // (c) in-span success + pin + payload snapshot
+  it("(c) by_tool_call_id matching a toolResult AFTER the last user message → matched:yes + orientation line + pinnedEntryId + exact payload envelope", async () => {
+    const { appended, pi } = makePi();
+    const origText = "big output";
+    const replacement = "(shrink) summarized";
+    const u0 = msgEntry("user", { content: "u0" });
+    const e = msgEntry("toolResult", toolResult("call-A", "read", origText));
+    const { ctx } = makeCtx({ leafId: "leaf-9", contextEntries: [u0, e] }); // e AFTER the user → in-span
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement });
+    expect(firstText(res)).toBe(
+      `Mulligan: shrink recorded. Matched: yes.\n${shrinkOrientationLine(1, expectedShed(origText, replacement))}`,
+    );
+    expect(appended).toHaveLength(1);
+    const entry = appended[0].data as Record<string, unknown>;
+    expect(appended[0].customType).toBe("mulligan:shrink");
+    expect(entry.schema).toBe("pi-mulligan");
+    expect(entry.v).toBe(1);
+    expect(entry.kind).toBe("shrink");
+    expect(entry.target).toEqual({ by_tool_call_id: "call-A" });
+    expect(entry.replacement).toBe(replacement);
+    expect(entry.reason).toBeUndefined();
+    expect(entry.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    expect(entry.seq).toBe(1);
+    expect(typeof entry.ts).toBe("number");
+    expect(entry.pinnedEntryId).toBe((e as { id: string }).id); // pinned to the matched ENTRY
+  });
+
+  // (d) advisory throw → persists with the ~0 orientation line (v1.2 behavior, unchanged)
+  it("(d) throwing buildContextEntries → matched:no persisted with shrinkOrientationLine(1, 0)", async () => {
+    const { appended, pi } = makePi();
+    const { ctx } = makeCtx({ throwOnBuildContextEntries: true });
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "s" });
+    expect(appended).toHaveLength(1);
+    expect(firstText(res)).toContain("Matched: no");
+    expect(firstText(res)).toBe(`Mulligan: shrink recorded. Matched: no.\n${shrinkOrientationLine(1, 0)}`);
+  });
+});
+
+// ── schema (typebox) rejects the removed content arm (C13) — case (e) ────────
+
+describe("mulligan_shrink — schema (typebox) rejects the removed content arm (C13)", () => {
+  beforeEach(() => setConfig({ shrink: { enabled: true } }));
+
+  const REMOVED_ARM = ["by_content", "_includes"].join("_"); // the arm v2.0 deleted from the union
+
+  it("a target using the REMOVED content-substring arm fails host validation — execute never runs", () => {
+    const { pi } = makePi();
+    const tool = makeShrinkTool(pi);
+    expect(
+      hostPipelinePasses(
+        ShrinkParams,
+        { target: { [REMOVED_ARM]: "x" }, replacement: "r" },
+        tool.prepareArguments,
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    { by_tool_call_id: "call-A" },
+    { by_tool_name: "read", occurrence: "last" as const },
+  ])("proper 2-arm target %o passes host validation", (target) => {
+    const { pi } = makePi();
+    const tool = makeShrinkTool(pi);
+    expect(hostPipelinePasses(ShrinkParams, { target, replacement: "r" }, tool.prepareArguments)).toBe(true);
+  });
+});
+
 describe("operator echo (ctx.ui.notify) + terse result (spec/05 §2 step 5)", () => {
   // shared matched:yes setup — clone of the by_tool_call_id matched case (see L279-289).
   // hasUI defaults to true (matches ctx.hasUI in TUI/RPC modes).
@@ -744,11 +865,11 @@ describe("mulligan_shrink — v1.2 orientation line (fixed final line on ACTIVE 
     expect(firstText(res).endsWith(shrinkOrientationLine(1, 998))).toBe(true);
   });
 
-  it("matched:no STILL persists (E8) → the marker IS ACTIVE → line present with ~0 (nothing shed YET; the filter live-resolves)", async () => {
+  it("v2.0: the throwing-snapshot path (E13) persists matched:false → line present with ~0 (the filter's scope guard makes an unverifiable marker safe)", async () => {
     const { appended, pi } = makePi();
-    const { ctx } = makeCtx({ contextEntries: [msgEntry("user", { content: "hi" })] });
-    const res = await run(pi, ctx, { target: { by_content_includes: "not-present-anywhere" }, replacement: "compact" });
-    expect(appended).toHaveLength(1); // persisted → ACTIVE (live resolution at filter time)
+    const { ctx } = makeCtx({ throwOnBuildContextEntries: true }); // snapshot throws → E13 carve-out
+    const res = await run(pi, ctx, { target: { by_tool_call_id: "call-A" }, replacement: "compact" });
+    expect(appended).toHaveLength(1); // persisted → ACTIVE
     expect(firstText(res)).toBe(
       `Mulligan: shrink recorded. Matched: no.\n${shrinkOrientationLine(1, 0)}`,
     );

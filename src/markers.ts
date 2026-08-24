@@ -92,11 +92,31 @@ export type RewindMarkerInput = Omit<RewindMarker, "schema" | "v" | "kind" | "id
  * ShrinkTarget — how a shrink identifies the message to substitute (spec/04 §4). Discriminated union; the filter
  * (resolveShrinkTarget, P1.M3.T4.S2) resolves it live each inference against event.messages. EXPORTED for the shrink
  * tool's typebox-free type + the filter + tests.
+ *
+ * v2.0 (spec/06-context-filter.md §5; PRD §2): `by_content_includes` is REMOVED from the WRITE type — both
+ * remaining arms resolve ONLY within the current turn's tool-result span (current-turn scope, defense in depth:
+ * enforced at both tool creation and filter resolution). Legacy v1.x persisted markers with `by_content_includes`
+ * remain readable via ShrinkTargetRead below. STRUCTURALLY IDENTICAL to transforms.ts's ShrinkTarget.
  */
 export type ShrinkTarget =
   | { by_tool_call_id: string }
+  | { by_tool_name: string; occurrence: "last" | "first" };
+
+/**
+ * ShrinkTargetRead — the READ-side view of ShrinkTarget: the v2.0 two-arm union PLUS the legacy v1.x
+ * `{ by_content_includes }` arm, so OLD persisted `mulligan:shrink` markers still type-check at read sites
+ * (precedent: RewindMarker.options.to_previous_prompt above). STRUCTURALLY IDENTICAL to transforms.ts's
+ * ShrinkTargetRead (both this type AND ShrinkTarget above). v2.0 (spec/06-context-filter.md §5; PRD §2):
+ * the resolver ignores the deprecated arm — legacy content-shrinks resolve null and no-op.
+ */
+export type ShrinkTargetRead =
+  | { by_tool_call_id: string }
   | { by_tool_name: string; occurrence: "last" | "first" }
-  | { by_content_includes: string };
+  | {
+      /** @deprecated legacy v1.x field — ignored by the v2.0 resolver; legacy content-shrinks resolve null
+       *  and no-op. Kept so old persisted markers type-check (precedent: RewindMarker.options.to_previous_prompt). */
+      by_content_includes: string;
+    };
 
 /**
  * ShrinkMarker — persisted via pi.appendEntry("mulligan:shrink", data) (spec/04 §4, spec/05 §2 step 4). `replacement`
@@ -107,7 +127,8 @@ export type ShrinkTarget =
 export interface ShrinkMarker extends MulliganEnvelope {
   kind: "shrink";
   id: string;
-  target: ShrinkTarget;
+  /** READ site — persisted markers may be v1.x legacy ({ by_content_includes }); read via ShrinkTargetRead. */
+  target: ShrinkTargetRead;
   /** The compact text that replaces the matched message's content, going forward. */
   replacement: string;
   /** Optional reason, surfaced in audit. */

@@ -355,6 +355,37 @@ export function resolveLastTurn(
 }
 
 /**
+ * turnSpanAfter — the shared core span computation: `{ start: iLastUser + 1, end: len }`, clamped to
+ * `[0, len]` (an iLastUser of `-1` — no user message, session-start edge — yields start 0, i.e. the whole
+ * list is the span). Plain primitive pair object — NO Span class (repo convention; matches resolveLastTurn's
+ * `{ remove: number[] }` style). Pure, never throws (E13).
+ */
+export function turnSpanAfter(iLastUser: number, len: number): { start: number; end: number } {
+  const n = Math.max(0, Math.trunc(len));
+  const start = Math.min(Math.max(Math.trunc(iLastUser) + 1, 0), n);
+  return { start, end: n };
+}
+
+/**
+ * currentTurnSpan — the span of the CURRENT turn: `{ start: iLastUser + 1, end: messages.length }`, where
+ * iLastUser is the index of the LAST `role:"user"` message (the SAME scan as resolveLastTurn: last index with
+ * isRecord(m) && readOwn(m, "role") === "user"). v2.0 current-turn scoping (spec/06-context-filter.md §5 v2.0;
+ * PRD §2 ruling): the TOOL is bound to the CURRENT turn's span; the FILTER is bound to the marker's ISSUING
+ * turn's span (threaded from branchEntries in P1.M1.T2 — separate wiring).
+ *
+ * Edges: no user message → start = 0 (session-start edge — the whole list is the span); non-array messages →
+ * `{ start: 0, end: 0 }` (defensive; never throws — E13 hot path).
+ */
+export function currentTurnSpan(messages: MessageLike[]): { start: number; end: number } {
+  if (!Array.isArray(messages)) return { start: 0, end: 0 };
+  let iLastUser = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") iLastUser = i;
+  }
+  return turnSpanAfter(iLastUser, messages.length);
+}
+
+/**
  * Module-private: is this message a `mulligan:*` custom message (the note / nudge that MUST survive a rewind)?
  * Detected by a `customType` string with the `mulligan:` prefix (a real Pi CustomMessage carries role "custom" +
  * customType — spec/01 line156; the looper-smoke proto detects custom messages by m.customType). Defensive
@@ -736,11 +767,31 @@ export function applyRewind(messages: MessageLike[], remove: number[]): MessageL
  * assigns in with NO cast) — declared LOCALLY here so transforms.ts stays Pi-FREE (0 imports; it must NOT import from
  * markers.ts, which pulls in Pi). This mirrors the MessageLike convention (a local structural type, not AgentMessage).
  * EXPORTED so the shrink tool (P1.M5.T2), filterPipeline (T5.S1), and tests share one shape at the pure tier.
+ *
+ * v2.0 (spec/06-context-filter.md §5; PRD §2): `by_content_includes` is REMOVED from the WRITE type — both
+ * remaining arms resolve ONLY within the current turn's tool-result span (current-turn scope, defense in depth:
+ * enforced at both tool creation and filter resolution). Legacy v1.x persisted markers with `by_content_includes`
+ * remain readable via ShrinkTargetRead below.
  */
 export type ShrinkTarget =
   | { by_tool_call_id: string }
+  | { by_tool_name: string; occurrence: "last" | "first" };
+
+/**
+ * ShrinkTargetRead — the READ-side view of ShrinkTarget: the v2.0 two-arm union PLUS the legacy v1.x
+ * `{ by_content_includes }` arm, so OLD persisted `mulligan:shrink` markers still type-check at read sites
+ * (precedent: RewindMarker.options.to_previous_prompt, markers.ts). STRUCTURALLY IDENTICAL to markers.ts's
+ * ShrinkTargetRead (both this type AND ShrinkTarget above). v2.0 (spec/06-context-filter.md §5; PRD §2):
+ * the resolver ignores the deprecated arm — legacy content-shrinks resolve null and no-op.
+ */
+export type ShrinkTargetRead =
+  | { by_tool_call_id: string }
   | { by_tool_name: string; occurrence: "last" | "first" }
-  | { by_content_includes: string };
+  | {
+      /** @deprecated legacy v1.x field — ignored by the v2.0 resolver; legacy content-shrinks resolve null
+       *  and no-op. Kept so old persisted markers type-check (precedent: RewindMarker.options.to_previous_prompt). */
+      by_content_includes: string;
+    };
 
 /**
  * resolveShrinkTarget — resolve a ShrinkTarget to a single message index, LIVE against the current messages
@@ -753,29 +804,51 @@ export type ShrinkTarget =
  *   - by_tool_name + occurrence: among toolResult messages whose `toolName === name`, return the LAST index
  *     (occurrence:"last", the default for any non-"first" value — GOTCHA #6) or the FIRST index (occurrence:"first"),
  *     else null.
- *   - by_content_includes: return the index of the FIRST message (ANY role — spec/08 E19) whose stringified `content`
- *     includes the NON-EMPTY substring (an empty needle resolves to null — defense-in-depth, BUG-004;
- *     stringifyContent: string→verbatim, array→JSON.stringify), else null.
+ *   - v2.0: `by_content_includes` is REMOVED — a legacy content-only target falls through to null (a legacy
+ *     content-shrink no-ops forever; spec/06 §5 v2.0, PRD §2).
  *
- * The FIRST present non-empty-string discriminator key decides the variant (by_tool_call_id → by_tool_name →
- * by_content_includes); a target with no recognizable discriminator, or a non-string/empty id/name/needle, resolves to null.
+ * SPAN (v2.0, spec/06-context-filter.md §5; PRD §2 ruling): when the optional `span` is provided, BOTH surviving
+ * arms search ONLY indices `[span.start, span.end)` — a match outside the span returns null. The span is clamped
+ * defensively (start ≥ 0, end ≤ messages.length, degenerate/NaN/non-number → full range) — NEVER throws. span
+ * undefined → full range (today's behavior — cancel.ts's full-history usage).
+ *
+ * The FIRST present non-empty-string discriminator key decides the variant (by_tool_call_id → by_tool_name);
+ * a target with no recognizable discriminator, or a non-string/empty id/name, resolves to null.
  *
  * Pure + defensive: a non-array `messages` → null; a non-record `target` → null; malformed messages, throwing-Proxy
  * messages, and non-string/empty discriminator values are all handled gracefully — NEVER throws (E13; context-handler
  * hot path via filterPipeline T5.S1). Every field read goes through the module-private isRecord/readOwn.
  *
  * @param messages the message list (a real Pi AgentMessage[] assigns in with no cast); non-array → null
- * @param target the ShrinkTarget (discriminated union); non-record → null
- * @returns the matched message index, or null when nothing matches
+ * @param target the ShrinkTargetRead (discriminated union incl. the legacy content arm); non-record → null
+ * @param span optional `{ start, end }` search bound — in-span-only match; undefined → full range (cancel usage)
+ * @returns the matched message index, or null when nothing matches (incl. legacy content targets — v2.0)
  */
-export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarget): number | null {
+export function resolveShrinkTarget(
+  messages: MessageLike[],
+  target: ShrinkTargetRead,
+  span?: { start: number; end: number },
+): number | null {
   if (!Array.isArray(messages)) return null;
   if (!isRecord(target)) return null;
+
+  // Effective range: full range when span is absent/malformed; else clamped [start, end) (never throws).
+  let lo = 0;
+  let hi = messages.length;
+  if (
+    span !== undefined && span !== null && isRecord(span)
+    && typeof readOwn(span, "start") === "number" && typeof readOwn(span, "end") === "number"
+    && Number.isFinite(span.start) && Number.isFinite(span.end)
+  ) {
+    lo = Math.max(0, Math.trunc(span.start));
+    hi = Math.min(messages.length, Math.trunc(span.end));
+    if (hi < lo) hi = lo; // degenerate → empty range → both arms return null
+  }
 
   // by_tool_call_id: first toolResult whose toolCallId === id (unique → at most one).
   const callId = readOwn(target, "by_tool_call_id");
   if (typeof callId === "string" && callId.length > 0) {
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = lo; i < hi; i++) {
       const m = messages[i];
       if (!isRecord(m) || readOwn(m, "role") !== "toolResult") continue;
       if (readOwn(m, "toolCallId") === callId) return i;
@@ -788,7 +861,7 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
   if (typeof name === "string" && name.length > 0) {
     const wantFirst = readOwn(target, "occurrence") === "first"; // anything else (incl. missing) → last (GOTCHA #6)
     let found = -1;
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = lo; i < hi; i++) {
       const m = messages[i];
       if (!isRecord(m) || readOwn(m, "role") !== "toolResult") continue;
       if (readOwn(m, "toolName") === name) {
@@ -799,14 +872,8 @@ export function resolveShrinkTarget(messages: MessageLike[], target: ShrinkTarge
     return found === -1 ? null : found;
   }
 
-  // by_content_includes: first message (ANY role — E19) whose stringified content includes a NON-EMPTY substring.
-  const needle = readOwn(target, "by_content_includes");
-  if (typeof needle === "string" && needle.length > 0) {
-    for (let i = 0; i < messages.length; i++) {
-      if (stringifyContent(readOwn(messages[i], "content")).includes(needle)) return i;
-    }
-    return null;
-  }
+  // v2.0: by_content_includes is REMOVED (spec/06 §5 v2.0; PRD §2) — legacy content-only targets
+  // fall through and resolve null (legacy content-shrinks no-op forever).
 
   return null; // no recognizable discriminator key
 }
@@ -937,6 +1004,12 @@ export function resolvePinnedShrink(
  * @param marker         { target, replacement, pinnedEntryId? } (a real ShrinkMarker assigns in with no cast)
  * @param branchEntries  OPTIONAL root→leaf branch entries (getBranch() DATA); PINNED shrinks resolve by identity
  *                       via resolvePinnedShrink — absent → a pinned shrink no-ops this fire (live shrinks ignore it)
+ * @param span           OPTIONAL issuing-turn bound `{ start, end }` (PRD §2 ruling; spec/06 §5 v2.0): when provided,
+ *                       the LIVE selector arm may only match indices in [span.start, span.end) — the marker's
+ *                       ISSUING turn, NOT the fire-time current turn (that would expire in-span markers at the next
+ *                       prompt and resurrect the shed bloat — persistence is retained). The bound is clamped
+ *                       defensively by resolveShrinkTarget (start ≥ 0, end ≤ messages.length, malformed → full
+ *                       range). undefined → full range (backward compat — every existing 3-arg caller/test unchanged).
  * @returns a NEW array with the matched message's content substituted; the SAME array reference on a no-op
  */
 
@@ -962,8 +1035,9 @@ export function stampShrink(rep: string): string {
 
 export function applyShrink(
   messages: MessageLike[],
-  marker: { target: ShrinkTarget; replacement: string; pinnedEntryId?: string },
+  marker: { target: ShrinkTargetRead; replacement: string; pinnedEntryId?: string },
   branchEntries?: BranchEntry[],
+  span?: { start: number; end: number }, // issuing-turn bound (PRD §2 ruling; spec/06 §5 v2.0)
 ): MessageLike[] {
   // Defensive: non-array messages → [] (mirrors applyRewind/partitionIntoUnits); non-record marker → no-op (same ref).
   if (!Array.isArray(messages)) return [];
@@ -983,7 +1057,7 @@ export function applyShrink(
     if (i === null) return messages; // SAME reference (no-op — identity-or-nothing, like rewind)
   } else {
     // LIVE: read marker.target via readOwn (throwing-Proxy safe); cast — resolveShrinkTarget re-validates isRecord.
-    i = resolveShrinkTarget(messages, readOwn(marker, "target") as ShrinkTarget);
+    i = resolveShrinkTarget(messages, readOwn(marker, "target") as ShrinkTargetRead, span);
   }
   if (i === null || i < 0 || i >= messages.length) return messages;
 
@@ -1055,24 +1129,7 @@ function applyShrinkAt(
   return messages.map((m, j) => (j === i ? replacement : m));
 }
 
-/**
- * Module-private: stringify a message's `content` for by_content_includes substring search (spec/06 §5 L128
- * "stringified content"). A string content → verbatim; an array content (content blocks) → JSON.stringify (so `text`
- * fields are searchable, e.g. `[{"type":"text","text":"ENOSPC at /disk"}]` includes "ENOSPC"); anything else
- * (undefined / throwing-Proxy / circular) → "". Wrapped in try/catch → never throws (JSON.stringify of a
- * throwing-Proxy/circular value returns "" via the catch). NOT exported.
- */
-function stringifyContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    try {
-      return JSON.stringify(content);
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
+
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // COMPOSITION CORE — filterPipeline + stableSortBySeq + protectedOk (P1.M3.T5.S1)
@@ -1129,7 +1186,7 @@ export interface RewindMarkerLike {
  */
 export interface ShrinkMarkerLike {
   seq: number;
-  target: ShrinkTarget;
+  target: ShrinkTargetRead;
   replacement: string;
   /**
    * Stable ENTRY id the target matched at marker-creation time (FINDING 3 — pinned shrink). When present, applyShrink
@@ -1138,6 +1195,119 @@ export interface ShrinkMarkerLike {
    * Absent → live re-resolution (backward compat / compaction-robust). OPTIONAL. Read via readOwn(sh,"pinnedEntryId").
    */
   pinnedEntryId?: string;
+  /**
+   * The marker's own session-ENTRY id (readOwn(entry,"id") of the mulligan:shrink custom entry) — NOT the
+   * marker UUID in data.id. Threaded by readMarkers (filter.ts) so the filter can compute the marker's
+   * issuing-turn span (markerTurnSpan) from branchEntries. Absent on old bundles / when unreadable →
+   * markerTurnSpan returns null → callers no-op fail-safe. OPTIONAL. Read via readOwn(sh,"markerEntryId").
+   */
+  markerEntryId?: string;
+}
+
+/**
+ * markerTurnSpan — compute the marker's ISSUING-TURN span in ORIGINAL message space (PRD §2 binding ruling,
+ * architecture/scope_guard_design.md §1; spec/06 §5 v2.0 defense-in-depth). The bound is the turn the shrink
+ * marker was ISSUED in — NOT the fire-time current turn: a fire-time bound would expire markers at the next
+ * prompt and resurrect the shed bloat (persistence is retained). The FILTER-side counterpart of
+ * currentTurnSpan (P1.M1.T1.S2, fire-time current turn) — both stay exported and DISTINCT.
+ *
+ * ALGORITHM (retained-tail walk — generalizes resolvePinnedShrink above; mirrors entryIdAtMessageIndex
+ * tools/shrink.ts:228-243):
+ *   1. Guards (mirror resolvePinnedShrink): non-array messages/branchEntries → null; non-string/empty
+ *      markerEntryId → null.
+ *   2. lastCompactionIdx: scan branchEntries END→start for the LAST type==="compaction" entry (-1 if none).
+ *   3. tail = branchEntries.slice(lastCompactionIdx + 1). Locate the entry whose readOwn(e,"id") ===
+ *      markerEntryId (FIRST match). Not found → null: the marker is in the compacted head (a compaction
+ *      after the marker) or absent → indeterminate → fail-safe no-op (E24-adjacent; scope_guard_design.md
+ *      explicitly rules compaction-ambiguous spans no-op). Correct, never a "best guess" (E8/E13).
+ *   4. Alignment: post-compaction message-yielding entries map 1:1 (yield=1 each) to the LAST tailCount
+ *      messages; tailStartIdx = messages.length - tailCount. tailStartIdx < 0 → null (misalignment beyond
+ *      recovery — same defensive refusal as resolvePinnedShrink).
+ *   5. Message cursor: walk the slice root→leaf accumulating entryMessageYield(e) > 0 ? yield : 0 up to
+ *      (strictly before) the marker entry → markerMsgPos = tailStartIdx + yielded. The marker is a `custom`
+ *      entry (yield 0) so it occupies a MESSAGE-BOUNDARY position, not a message index.
+ *   6. Turn bound: scan messages for the LAST i < markerMsgPos with role === "user" (same scan as
+ *      resolveLastTurn). None → start = 0 (session-start edge, mirrors currentTurnSpan). Else start = i + 1.
+ *      end = index of the FIRST user message at-or-after markerMsgPos (the issuing turn TERMINATES at the
+ *      next user message — scope_guard_design.md §1.4/§3: never earlier, never LATER), falling back to
+ *      messages.length when no later user exists (final turn). All in ORIGINAL message indices.
+ *   No-compaction case degenerates to the forward walk (tailStartIdx === 0) — the common case.
+ *
+ * NULL CONTRACT: null = fail-safe no-op for ALL indeterminate inputs (non-array, bad id, marker in the
+ * compacted head, misalignment). Consumers (P1.M1.T2.S2 enforcement, P1.M2.T3.S2 cancel live fallback)
+ * treat null as no-op. Pure + Pi-free + NEVER throws (E13); every field read behind isRecord/readOwn
+ * (readOwn is throw-safe). ZERO new imports. NOT yet consumed by filterPipeline/tools (enforcement is
+ * P1.M1.T2.S2).
+ *
+ * @param messages      the ORIGINAL message list; non-array → null
+ * @param branchEntries root→leaf branch entries (getBranch() DATA — carries stable ENTRY ids); non-array → null
+ * @param markerEntryId the marker's OWN session-ENTRY id (NOT the marker UUID in data.id); non-string/empty → null
+ * @returns { start, end } in ORIGINAL message indices, or null when the issuing turn is indeterminate (no-op)
+ */
+export function markerTurnSpan(
+  messages: MessageLike[],
+  branchEntries: BranchEntry[],
+  markerEntryId: string,
+): { start: number; end: number } | null {
+  if (!Array.isArray(messages) || !Array.isArray(branchEntries)) return null;
+  if (typeof markerEntryId !== "string" || markerEntryId.length === 0) return null;
+
+  // 1) lastCompactionIdx: END→start scan for the LAST compaction entry (-1 if none) — same loop as
+  //    resolvePinnedShrink. readOwn is throw-safe, so this never throws on a throwing-Proxy entry (E13).
+  let lastCompactionIdx = -1;
+  for (let i = branchEntries.length - 1; i >= 0; i--) {
+    const t = isRecord(branchEntries[i]) ? readOwn(branchEntries[i], "type") : undefined;
+    if (t === "compaction") {
+      lastCompactionIdx = i;
+      break;
+    }
+  }
+
+  // 2) The post-compaction slice (FULL slice — the marker is a `custom` entry with yield 0, so it is NOT in
+  //    the yield-filtered tail; we must scan the full slice to locate it).
+  const tail = branchEntries.slice(lastCompactionIdx + 1);
+
+  // 3) Locate the marker entry + count message-yielding entries strictly before it (yields are all 1 in the
+  //    tail, so this counts message positions). Marker not found → compacted head / absent / wrong branch →
+  //    null (fail-safe no-op; never a "best guess" — E8/E13).
+  let yielded = 0;
+  let markerFound = false;
+  for (const e of tail) {
+    if (isRecord(e) && readOwn(e, "id") === markerEntryId) {
+      markerFound = true;
+      break;
+    }
+    const y = entryMessageYield(e);
+    yielded += y > 0 ? y : 0;
+  }
+  if (!markerFound) return null;
+
+  // 4) Alignment: retained message-yielding entries ↔ the LAST tailCount messages. Tail longer than
+  //    messages → refuse safely (same defensive refusal as resolvePinnedShrink).
+  let tailCount = 0;
+  for (const e of tail) {
+    const y = entryMessageYield(e);
+    tailCount += y > 0 ? y : 0;
+  }
+  const tailStartIdx = messages.length - tailCount;
+  if (tailStartIdx < 0) return null; // defensive: raw branch vs compaction-aware messages misalign beyond recovery
+
+  // 5) markerMsgPos = the message-index boundary the marker sits at (the marker itself yields 0).
+  const markerMsgPos = tailStartIdx + yielded;
+
+  // 6) Issuing-turn bound: LAST user message strictly before the marker boundary (same scan as
+  //    resolveLastTurn). None → start 0 (session-start edge, mirrors currentTurnSpan).
+  let iLastUser = -1;
+  for (let i = 0; i < markerMsgPos && i < messages.length; i++) {
+    if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") iLastUser = i;
+  }
+  // end: the FIRST user message at-or-after the marker boundary terminates the issuing turn
+  // (feedback resolution; scope_guard_design.md §1.4/§3 beat §2.2's literal fire-time reading).
+  let iNextUser = messages.length;
+  for (let i = markerMsgPos; i < messages.length; i++) {
+    if (isRecord(messages[i]) && readOwn(messages[i], "role") === "user") { iNextUser = i; break; }
+  }
+  return { start: iLastUser + 1, end: iNextUser }; // iLastUser === -1 → start 0
 }
 
 /**
@@ -1367,6 +1537,40 @@ function turnHasAdvanced(messages: MessageLike[] | unknown, excludeToolCallId?: 
  * @param branchEntries getBranch() output for checkpoint rewinds (root→leaf — getBranch() order); optional — absent → checkpoint no-ops
  * @returns the filtered message array; the SAME reference as `messages` when no marker transforms anything
  */
+/**
+ * lowerBoundAsc — standard binary lower bound: the FIRST index k with arr[k] >= v (arr.length when none).
+ * Module-private; used only by translateSpanToReduced. Assumes `arr` is ascending (reducedToOrig is, by
+ * construction). Pure + total — never throws.
+ */
+function lowerBoundAsc(arr: number[], v: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < v) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * translateSpanToReduced — CONSERVATIVELY translate an ORIGINAL-space issuing-turn span onto the post-rewind
+ * REDUCED array via the ascending `reducedToOrig` map (reducedToOrig[k] = original index of the message now at
+ * reduced position k). Boundaries clamp to SURVIVORS ONLY — the result NEVER widens past the original span: a
+ * removed boundary index maps to the next survivor, which can only shrink the window. span.end >= origLen means
+ * "to the end of the list" → the full reduced tail. Empty/degenerate reduced window (rStart >= rEnd) → null →
+ * the caller no-ops (E8/E13 fail-safe; never throw, never fall back to an unbounded resolve). Pure + total.
+ */
+function translateSpanToReduced(
+  span: { start: number; end: number },
+  reducedToOrig: number[],
+  origLen: number,
+): { start: number; end: number } | null {
+  const rStart = lowerBoundAsc(reducedToOrig, span.start);
+  const rEnd = span.end >= origLen ? reducedToOrig.length : lowerBoundAsc(reducedToOrig, span.end);
+  return rStart < rEnd ? { start: rStart, end: rEnd } : null;
+}
+
 export function filterPipeline(
   messages: MessageLike[],
   markers: MarkerBundle | undefined,
@@ -1521,29 +1725,47 @@ export function filterPipeline(
   //    rewind this fire, the shrink no-ops (target gone — spec/06 §5:143). Otherwise we substitute at the TRANSLATED
   //    reduced-array index (binary search of reducedToOrig — it is ascending). Live shrinks resolve against `m` as
   //    before (no identity, no branchEntries alignment requirement).
+  //
+  //    ISSUING-TURN SCOPE GUARD (P1.M1.T2.S2; spec/06-context-filter.md §5 v2.0 — defense in depth; PRD §2 binding
+  //    ruling per architecture/scope_guard_design.md §§1-2): every shrink may only substitute within its marker's
+  //    ISSUING TURN's span — never earlier, never later. The bound is the marker's issuing turn (via markerTurnSpan
+  //    on the marker's markerEntryId), NOT the fire-time current turn: a fire-time bound would expire in-span
+  //    markers at the next prompt, resurrect the shed bloat, and re-invalidate the tail cache — in-span markers
+  //    KEEP applying across later turns (persistence). Fail-safe no-op (E8/E13-style silence — never throw, never
+  //    widen) when the span is unavailable (old bundle without markerEntryId, compacted-head marker, indeterminate
+  //    alignment) or the target falls outside it. A PERMANENTLY out-of-scope pinned marker no-ops on every fire
+  //    for the rest of the session (it never re-widens) — filter.ts's shrinkMissCounts counts an IDENTITY hit
+  //    (resolvePinnedShrink !== null) even for a present-but-out-of-span entry, which RESETS the miss counter, so
+  //    staleAfterFires auto-retirement does NOT fire for this shape; the marker is instead bounded only by the
+  //    shrink.maxActive cap. No-op-forever is exactly the safe disposition (spec: "no-ops for that fire") — NOT
+  //    special-cased here.
   for (const sh of stableSortBySeq(shrinks)) {
+    const markerEntryIdRaw = readOwn(sh, "markerEntryId");
+    const span = typeof markerEntryIdRaw === "string" && markerEntryIdRaw.length > 0
+      ? markerTurnSpan(messages, branch, markerEntryIdRaw)
+      : null;
+    if (span === null) continue; // fail-safe no-op (E8/E13; old bundles, compacted-head marker — identity no-ops too)
     const pinnedId = readOwn(sh, "pinnedEntryId");
     if (typeof pinnedId === "string" && pinnedId.length > 0) {
       // PINNED: resolve against the ORIGINAL messages (aligned with branchEntries). null/absent → no-op this fire
       // (identity-or-nothing — the rewind precedent; NEVER fall back to live resolution).
       const origIdx = resolvePinnedShrink(messages, branch, pinnedId);
       if (origIdx === null) continue;
+      if (origIdx < span.start || origIdx >= span.end) continue; // issuing-turn guard (defense in depth — malformed/legacy)
       if (removedOrig.has(origIdx)) continue; // target removed by a rewind → no-op (spec/06 §5:143)
-      // Translate original index → reduced index. reducedToOrig is ascending; binary search for origIdx.
-      let lo = 0;
-      let hi = reducedToOrig.length - 1;
-      let reducedIdx = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        const v = reducedToOrig[mid];
-        if (v === origIdx) { reducedIdx = mid; break; }
-        if (v < origIdx) lo = mid + 1; else hi = mid - 1;
-      }
+      // Translate original index → reduced index. reducedToOrig is ascending; binary search for origIdx
+      // (same lower-bound helper as translateSpanToReduced — exact-match via the found boundary).
+      const lb = lowerBoundAsc(reducedToOrig, origIdx);
+      const reducedIdx = lb < reducedToOrig.length && reducedToOrig[lb] === origIdx ? lb : -1;
       if (reducedIdx < 0) continue; // defensively not found (shouldn't happen post removedOrig check) → no-op
       m = applyShrinkAt(m, sh, reducedIdx);
     } else {
-      // LIVE: re-resolve the selector against the current reduced `m` (compaction-robust; spec/06 §5).
-      m = applyShrink(m, sh, branchEntries);
+      // LIVE: re-resolve the selector against the current reduced `m` (compaction-robust; spec/06 §5). The
+      // issuing-turn span is ORIGINAL-space, so translate it onto `m` via reducedToOrig (conservative — never
+      // widens; untranslatable/empty → no-op, E8/E13) before handing it to applyShrink's 4th param.
+      const rSpan = translateSpanToReduced(span, reducedToOrig, messages.length);
+      if (rSpan === null) continue; // conservative no-op — boundary untranslatable / empty reduced span
+      m = applyShrink(m, sh, branchEntries, rSpan);
     }
   }
 

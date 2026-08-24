@@ -35,6 +35,11 @@ const SCENARIOS = [
   "F-protected",
   "F-maxdepth",
   "F-checkpoint",
+  "F-ckptcmd",
+  "F-banner",
+  "F-consent",
+  "F-drift-userexempt",
+  "F-useraudit",
   "F-failopen",
   "F-reload",
   // Edge cases (spec/08 E7/E11/E12/E15/E20 — Pi-dependent; added by P1.M7.T3.S1).
@@ -73,6 +78,9 @@ function runPi(scenario, { prompts, extraArgs = [] } = {}) {
   // Default = the existing 2-prompt deterministic flow (unchanged for the 12 non-seeded scenarios).
   const ps = prompts ?? [`/mulligan_smoke ${scenario}`, "Reply with exactly: OK"];
   const argv = [
+    // -ne: disable extension discovery so globally-installed mulligan variants can't collide with
+    // our explicitly -e-loaded tools (M-1). Explicit -e paths still load.
+    "-ne",
     "-e", "./src/index.ts",
     "-e", "./test/integration/smoke.ts",
     // Run-scoped session id (RUN_ID): unique per `npm run smoke` invocation → no cross-run JSONL accumulation
@@ -260,21 +268,40 @@ function assertShrinkPersist({ smoke, piRes }) {
   const entries = readSessionEntries(sessionFile);
   const shrinkLines = smoke.lines.filter((l) => l.test === "tool.shrink");
   assert(results, "tool.shrink ran", shrinkLines.length >= 1, "");
-  // E19: the command drove a SECOND shrink (the user-message variant) → ≥2 tool.shrink lines total.
-  assert(results, "tool.shrink ran for BOTH variants (custom_message + user message)", shrinkLines.length >= 2, `${shrinkLines.length} shrink lines`);
-  // context.fire shows the substitution took effect in the filtered view.
+  // Setup guard: the setup turn (first -p prompt) must have committed a REAL mulligan_smoke_big toolResult
+  // (RESULT_CANARY). If the model did not call the tool, the in-span shrink target does not exist and every
+  // downstream assertion is meaningless — fail HERE with a message pointing at the setup turn, not the shrink.
+  if (entries.length === 0 || !entryIncludes(entries, "MULLIGAN-SMOKE-RESULT-CANARY")) {
+    assert(results, "setup turn committed mulligan_smoke_big toolResult (RESULT_CANARY)", false,
+      "model did not call mulligan_smoke_big on the setup turn — re-run; see PRP Task 2b");
+    return { results, entries };
+  }
+  // Success shrink: the current-turn variant ran and was NOT refused.
+  const currentTurnLines = shrinkLines.filter((l) => l.detail?.variant === "current-turn");
+  const currentTurn = currentTurnLines[currentTurnLines.length - 1];
+  const currentTurnText = currentTurn?.detail?.text ?? "";
+  assert(results, "current-turn shrink ran", !!currentTurn, "no variant:current-turn shrink line");
+  assert(results, "current-turn shrink succeeded (not refused)", currentTurn && !/refused/i.test(currentTurnText), currentTurnText.slice(0, 80));
+  // Refusal variant (replaces the MOOT E19 user-message case): an out-of-turn/no-match target must
+  // hard-refuse end-to-end AND append nothing (no second mulligan:shrink marker).
+  const refusalLines = shrinkLines.filter((l) => l.detail?.variant === "refusal");
+  const refusal = refusalLines[refusalLines.length - 1];
+  const refusalText = refusal?.detail?.text ?? "";
+  assert(results, "out-of-turn shrink REFUSES (v2.0)", refusal && /refused/i.test(refusalText), refusalText.slice(0, 80) || "no variant:refusal shrink line");
+  assert(results, "refusal text mentions 'previous turn'", /previous turn/i.test(refusalText), refusalText.slice(0, 80));
+  // Two-signal persistence assertion on the observing fire (smoke loads SECOND → post-filter view):
+  // the substitution IS present AND the original canary is NOT.
   const cf = smoke.contextFires[smoke.contextFires.length - 1];
   assert(results, "context.fire observed", !!cf, "");
-  assert(results, "context.fire shrunkInContext:true (substitution in filtered view)", cf?.shrunkInContext === true, String(cf?.shrunkInContext));
-  // E19: the USER-message shrink variant. (i) substitution took effect in the filtered view.
-  assert(results, "context.fire userShrunkInContext:true (user-message substitution took effect)", cf?.userShrunkInContext === true, String(cf?.userShrunkInContext));
-  // JSONL: mulligan:shrink (custom) + the ORIGINAL canary still on disk (shrink is a view-substitution, NOT a rewrite).
+  assert(results, "fire: substitution present AND original canary absent", cf?.shrunkInContext === true && cf?.resultCanaryPresent === false, JSON.stringify(cf ?? {}));
+  // JSONL: mulligan:shrink (custom) count === the number of SUCCESSFUL shrink log lines (the refusal
+  // appends NOTHING); the ORIGINAL canary still on disk (shrink is a view-substitution, NOT a rewrite).
   if (entries.length > 0) {
-    assert(results, "JSONL has mulligan:shrink (custom)", countCustom(entries, "mulligan:shrink", "shrink") >= 1, "");
-    const originalOnDisk = entryIncludes(entries, "MULLIGAN-SMOKE-MSG-CANARY");
+    const successCount = shrinkLines.filter((l) => !/refused/i.test(l.detail?.text ?? "")).length;
+    const shrinkCount = countCustom(entries, "mulligan:shrink", "shrink");
+    assert(results, "JSONL mulligan:shrink count === successful shrinks (refusal appended nothing)", shrinkCount >= 1 && shrinkCount === successCount, `markers=${shrinkCount} successful=${successCount}`);
+    const originalOnDisk = entryIncludes(entries, "MULLIGAN-SMOKE-RESULT-CANARY");
     assert(results, "JSONL original canary still on disk (view-substitution, not rewrite)", originalOnDisk, "");
-    // E19: the original USER content survives verbatim on disk (the hard invariant — true for user input specifically).
-    assert(results, "JSONL original USER canary still on disk (E19 — user input survives verbatim, not rewritten)", entryIncludes(entries, "MULLIGAN-SMOKE-USER-CANARY"), "");
     assertGlobalInvariants(results, entries);
   } else {
     console.log(`  ⚠ JSONL unavailable (model may have timed out) — smoke-log assertions are primary`);
@@ -388,6 +415,123 @@ function assertCheckpoint({ smoke, piRes }) {
     assert(results, "JSONL available", false, "session JSONL missing — model may have timed out");
   }
   return { results, entries };
+}
+
+// F-ckptcmd (BUG-003 / spec @10-testing.md §2.1): the HUMAN slash commands drive the label lifecycle.
+// Template for P1.M2.T2.S2 (F-banner) / P1.M2.T4.S1 (F-useraudit) — keep this shape clean and commented.
+// Deliberate deviation from the skip-with-⚠ convention: every assertion here is JSONL-based and the label
+// writes are DETERMINISTIC (no model needed to set/clear) — a missing JSONL means the spawn itself failed,
+// so fail hard instead of silently passing.
+function assertCkptcmd({ smoke, piRes }) {
+  const results = [];
+  const entries = readSessionEntries(smoke.sessionFile);
+  const ckpt = "mulligan:checkpoint:x";
+  if (entries.length > 0) {
+    const labelEntries = entries.filter((e) => e.type === "label");
+    const setEntries = labelEntries.filter((e) => e.label === ckpt);
+    const clearEntries = labelEntries.filter((e) => e.label === undefined);
+    // (a) set happened and was active at the post-set point (the clear comes after the set)
+    assert(results, "(a) label 'mulligan:checkpoint:x' SET (label entry exists)", setEntries.length >= 1, `${setEntries.length} set entries`);
+    assert(
+      results,
+      "(a) labelActive at post-set point (clear comes after set)",
+      setEntries.length >= 1 &&
+        (clearEntries.length === 0 ||
+          labelEntries.findIndex((e) => e.label === ckpt) < labelEntries.findIndex((e) => e.label === undefined)),
+      "",
+    );
+    // (b) revoke cleared it (latest-wins) on the SAME target
+    assert(results, "(b) revoke wrote a clear entry (label:undefined)", clearEntries.length >= 1, `${clearEntries.length} clears`);
+    assert(
+      results,
+      "(b) clear targets the SAME entry the set labeled",
+      setEntries.length >= 1 && clearEntries.some((c) => c.targetId === setEntries[0].targetId),
+      "",
+    );
+    assert(results, "(b) labelActive(entries, ckpt) === false after revoke", labelActive(entries, ckpt) === false, "");
+    // (c) checkpoints are Pi LabelEntries — no custom control entry
+    assert(results, "(c) ZERO custom 'mulligan:checkpoint' entries (labels only)", countCustom(entries, "mulligan:checkpoint") === 0, "");
+    // (d) no agent mulligan_checkpoint tool invocation (label prefix 'mulligan:checkpoint:' never matches
+    //     '"mulligan_checkpoint"' — no false positive)
+    assert(
+      results,
+      "(d) ZERO mulligan_checkpoint TOOL invocations in the JSONL",
+      !entries.some((e) => {
+        const s = JSON.stringify(e);
+        return s.includes("toolCall") && s.includes('"mulligan_checkpoint"');
+      }),
+      "",
+    );
+    // (e) global invariants (incl. "mulligan:checkpoint: labels are type:label")
+    assertGlobalInvariants(results, entries);
+  } else {
+    console.log(`  ⚠ JSONL unavailable — F-ckptcmd core assertions are JSONL-based; treat as FAIL`);
+    assert(results, "session JSONL available", false, "no entries read");
+  }
+  return { results, entries };
+}
+
+// F-banner (BUG-003 / spec @10-testing.md §2.1): banner persists across turns, clears within ONE fire of
+// a revoke, is restored on /resume (second spawn, same --session-id), and contributes ZERO banner bytes to
+// the filtered view. Signature mirrors assertReload/assertE11 (receives the whole `run`). All assertions are
+// smoke-log based (contextFires' banner observable = {activeCount, names} — the P1.M2.T1.S1 recompute) — no
+// session-JSONL dependence, so there is no entries-skip caveat.
+function assertBanner(run) {
+  const results = [];
+  const f1 = run.smoke.contextFires; // run-1 fires only (parsed between spawns; run 2 truncates the log)
+  const f2 = run.smoke2.contextFires; // run-2 fires ONLY (factory truncated the log at run-2 spawn time)
+  const allFires = f1.concat(f2);
+  const total = allFires.length;
+  // Expected: 4 run-1 fires (seed + 2 pre-revoke + 1 post-revoke) + ≥1 run-2 fire. HARD guard against a
+  // vacuous pass: zero fires across both runs means the spawns/model failed — never a vacuous pass.
+  assert(results, "context fires observed across both runs (≥4 expected in run 1, ≥1 in run 2)", total >= 4, `${total} fires (run1=${f1.length}, run2=${f2.length})`);
+  assert(results, "run-1 produced ≥4 fires (seed + 2 pre-revoke + 1 post-revoke)", f1.length >= 4, `run-1 fires=${f1.length} (model may have timed out early)`);
+  if (total === 0 || f1.length < 4) return { results };
+  // (a) PERSISTS across turns: the two run-1 fires between set and revoke (after the seed fire) show the
+  //     banner active with 'beta' on EVERY fire (not just the first).
+  assert(
+    results,
+    "(a) banner PERSISTS across turns (pre-revoke fires: activeCount ≥ 1, names include 'beta')",
+    f1[1]?.banner?.activeCount >= 1 && f1[2]?.banner?.activeCount >= 1 &&
+      (f1[1]?.banner?.names ?? []).includes("beta") && (f1[2]?.banner?.names ?? []).includes("beta"),
+    `fire2=${JSON.stringify(f1[1]?.banner)} fire3=${JSON.stringify(f1[2]?.banner)}`,
+  );
+  // (b) CLEARS within ONE fire: the first fire after the revoke has activeCount === 0 and no later run-1 fire is active.
+  const f3 = f1[3];
+  const postRevokeClear = f3 && f3.banner?.activeCount === 0 && !(f3.banner?.names ?? []).includes("beta");
+  const noLaterActive = f1.slice(3).every((f) => (f.banner?.activeCount ?? 0) === 0);
+  assert(
+    results,
+    "(b) banner CLEARS within one fire of /mulligan_checkpoint_revoke (activeCount === 0, no later run-1 active fire)",
+    !!postRevokeClear && noLaterActive,
+    f3 ? `post-revoke fire banner=${JSON.stringify(f3.banner)}` : "no post-revoke fire (run-1 fires=" + f1.length + ")",
+  );
+  // (c) RESTORED on /resume: a run-2 fire shows the checkpoint set on the REOPENED session as active.
+  assert(
+    results,
+    "(c) banner RESTORED on /resume (run-2 fire: activeCount ≥ 1, names include 'gamma')",
+    f2.some((f) => (f.banner?.activeCount ?? 0) >= 1 && (f.banner?.names ?? []).includes("gamma")),
+    `run-2 fires=${f2.length} banners=${JSON.stringify(f2.map((f) => f.banner))}`,
+  );
+  // (d) ZERO banner bytes in the filtered view: the banner is UI-ONLY (never injected into event.messages —
+  //     E26 acceptance (d)); the observable field holds only {activeCount, names} (never the rendered line),
+  //     so a whole-detail JSON grep for the verbatim banner fragment cannot false-positive off the observable.
+  assert(
+    results,
+    "(d) ZERO banner bytes in filtered view (no fire detail contains 'Mulligan checkpoint active:')",
+    allFires.every((f) => !JSON.stringify(f).includes("Mulligan checkpoint active:")),
+    "banner text leaked into a fire detail",
+  );
+  assert(
+    results,
+    "(d) hasNudge === false on every fire (belt-and-braces)",
+    allFires.every((f) => f.hasNudge === false),
+    "a fire showed hasNudge:true",
+  );
+  // (e) exit sanity — soft-tolerant like F-reload (logs may still be present on a non-zero exit).
+  const exitsOk = run.piRes.status === 0 && run.r2.status === 0;
+  assert(results, "(e) both spawns exited 0", exitsOk, `run1=${run.piRes.status} run2=${run.r2.status}`);
+  return { results, note: exitsOk ? undefined : "⚠ non-zero pi exit(s) with logs present — tolerated like F-reload" };
 }
 
 function assertFailopen({ smoke, piRes }) {
@@ -510,6 +654,175 @@ function assertE20({ smoke, piRes }) {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+// F-consent (BUG-003 / spec @10-testing.md §2.1 :101): the v1.1 CONSENT model end-to-end — a user-set
+// checkpoint consents to having SUBSEQUENT prompts hidden by a checkpoint rewind, while last_turn NEVER
+// hides a user message (the guardrail).
+function assertConsent({ smoke, piRes }) {
+  const results = [];
+  const entries = readSessionEntries(smoke.sessionFile);
+  // Sanity: exit 0 + ≥4 fires (ideal 5; a model timeout on the observing prompt is the flake mode).
+  assert(results, "pi exited 0", piRes.status === 0, `exit=${piRes.status}`);
+  assert(results, "context fires observed (≥4 of the ideal 5)", smoke.contextFires.length >= 4, `${smoke.contextFires.length} fires (model may have timed out)`);
+  if (smoke.contextFires.length < 4) return { results, entries };
+  // (a) checkpoint rewind succeeded: K>0, not refused (same guard as assertCheckpoint).
+  const rwLines = smoke.lines.filter((l) => l.test === "tool.rewind");
+  const cpRw = rwLines.find(
+    (l) => l.detail?.granularity === "checkpoint" && !/refused|0 messages will be hidden/i.test(l.detail?.text ?? ""),
+  );
+  assert(results, "(a) checkpoint rewind ran K>0 (not refused)", !!cpRw, rwLines.map((l) => l.detail?.text?.slice(0, 60)).join(" | "));
+  // (d-side) the guard rewind (last_turn) also ran and was not refused.
+  const guardRw = rwLines.find(
+    (l) => l.detail?.granularity === "last_turn" && !/refused/i.test(l.detail?.text ?? ""),
+  );
+  assert(results, "(d) guard last_turn rewind ran (not refused)", !!guardRw, "");
+  const final = smoke.contextFires[smoke.contextFires.length - 1];
+  // (b) consented user-prompt hiding: BOTH post-checkpoint user prompts (U1/U2) hidden on the final fire,
+  //     while pre-checkpoint user prompts remain visible (SETANCHOR prompt + the GUARD prompt → ≥2 user msgs).
+  assert(results, "(b) U1 hidden on final fire (consented)", final.consent?.u1 === false, JSON.stringify(final.consent));
+  assert(results, "(b) U2 hidden on final fire (consented)", final.consent?.u2 === false, JSON.stringify(final.consent));
+  assert(results, "(b) pre-checkpoint user prompts still visible (userMsgCount ≥ 2 + firstUserPresent)", final.userMsgCount >= 2 && final.firstUserPresent === true, `userMsgCount=${final.userMsgCount} firstUserPresent=${final.firstUserPresent}`);
+  // (b-side) anti-vacuous-pass guard: at least one EARLIER fire showed U1/U2 PRESENT (canaries were
+  //     committed and visible BEFORE the rewind — otherwise the hiding assertions would pass vacuously).
+  const earlier = smoke.contextFires.slice(0, -1);
+  assert(results, "(b) U1 was visible on ≥1 pre-rewind fire (no vacuous pass)", earlier.some((f) => f.consent?.u1 === true), "");
+  assert(results, "(b) U2 was visible on ≥1 pre-rewind fire (no vacuous pass)", earlier.some((f) => f.consent?.u2 === true), "");
+  // (c) first:user is NEVER hidden — on EVERY fire (before and after both rewinds).
+  assert(results, "(c) firstUserPresent === true on EVERY fire (first:user never hidden)", smoke.contextFires.every((f) => f.firstUserPresent === true), "");
+  // (d) guardrail: the GUARD user prompt REMAINS visible after the last_turn rewind (which hid only the
+  //     model turn after it).
+  assert(results, "(d) GUARD user message visible after last_turn rewind (guardrail)", final.consent?.guard === true, JSON.stringify(final.consent));
+  // (e) JSONL: delta label set + consumed by the checkpoint rewind; ≥2 rewind markers; global invariants.
+  if (entries.length > 0) {
+    assert(results, "(e) JSONL has label mulligan:checkpoint:delta", countLabel(entries, "mulligan:checkpoint:delta") >= 1, "");
+    assert(results, "(e) JSONL has ≥2 mulligan:rewind markers (checkpoint + guard)", countCustom(entries, "mulligan:rewind", "rewind") >= 2, `${countCustom(entries, "mulligan:rewind", "rewind")} found`);
+    assert(results, "(e) checkpoint 'delta' CONSUMED by the rewind (auto-expiry)", !labelActive(entries, "mulligan:checkpoint:delta"), "checkpoint still active post-rewind");
+    assertGlobalInvariants(results, entries);
+  } else {
+    assert(results, "JSONL available", false, "session JSONL missing — every write here is deterministic; a missing JSONL means the spawn failed");
+  }
+  return { results, entries };
+}
+
+// F-useraudit (BUG-003 / spec @10-testing.md §2.1): report PARITY + sink SEPARATION on a real pi -p run.
+// (a) the agent tool's report (useraudit.tool smoke line) and the command's captured notify output
+//     (useraudit.command line) are IDENTICAL after normalization — both driven back-to-back inside the
+//     prompt-1 command dispatch, so renderAuditReport sees the exact same session state.
+// (b) the command made ZERO session writes: no mulligan:rewind/shrink/cancel entries, and the report bytes
+//     NEVER persist outside the agent toolResult sink (notify is a one-shot human sink).
+// (c) the agent tool's result DID reach the model: the observing turn calls mulligan_audit for real, so a
+//     toolResult entry mentioning mulligan_audit IS in the session JSONL (the sanctioned agent sink —
+//     excluded from (b)'s report-bytes grep BY DESIGN: a tool call in the agent loop is the one legitimate
+//     path by which report bytes may appear on disk).
+// (d) the real headless /mulligan_audit dispatch (prompt 2) early-returned on !ctx.hasUI without throwing:
+//     covered by pi exit 0 + no crash/fail lines + (b)'s zero writes.
+// (e) assertGlobalInvariants.
+function assertUseraudit({ smoke, piRes }) {
+  const results = [];
+  const entries = readSessionEntries(smoke.sessionFile);
+  // ── Sanity ──
+  assert(results, "pi exited 0", piRes.status === 0, `exit=${piRes.status}`);
+  assert(results, "context fires observed (≥1)", smoke.contextFires.length >= 1, `${smoke.contextFires.length} fires`);
+  const started = smoke.lines.some((l) => l.test === "scenario.start" && l.detail?.scenario === "F-useraudit");
+  const done = smoke.lines.some((l) => l.test === "scenario.done" && l.detail?.scenario === "F-useraudit");
+  const crashed = smoke.lines.filter((l) => l.test === "scenario.crash");
+  assert(results, "scenario start/done pair for F-useraudit", started && done, "");
+  assert(results, "no scenario.crash", crashed.length === 0, JSON.stringify(crashed[0]?.detail ?? {}));
+  // ── Evidence lines ──
+  const toolLines = smoke.lines.filter((l) => l.test === "useraudit.tool");
+  const cmdLines = smoke.lines.filter((l) => l.test === "useraudit.command");
+  const lastTool = toolLines[toolLines.length - 1];
+  const lastCmd = cmdLines[cmdLines.length - 1];
+  assert(results, "useraudit.tool ran (not failed)", toolLines.length >= 1 && lastTool?.status !== "fail", lastTool?.detail?.error ?? "");
+  assert(results, "useraudit.command ran (not failed)", cmdLines.length >= 1 && lastCmd?.status !== "fail", lastCmd?.detail?.error ?? "");
+  const toolText = String(lastTool?.detail?.text ?? "");
+  const cmdText = String(lastCmd?.detail?.text ?? "");
+  assert(results, "command notify fired ≥1 (info)", Number(lastCmd?.detail?.notifyCount ?? 0) >= 1, JSON.stringify({ notifyCount: lastCmd?.detail?.notifyCount, types: lastCmd?.detail?.types }));
+  // ── (a) Report PARITY (normalized FULL texts, non-vacuity first — a real report is long) ──
+  assert(results, "(a) non-vacuous: tool report is a real report (>200 chars)", toolText.length > 200, `len=${toolText.length}`);
+  const norm = (s) =>
+    String(s ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !/^[-=─═]+$/.test(l)) // drop blank + rule lines (rendered layout only)
+      .join("\n");
+  const nt = norm(toolText);
+  const nc = norm(cmdText);
+  let diffDetail = `len ${nt.length} vs ${nc.length}`;
+  if (nt !== nc) {
+    const a = nt.split("\n");
+    const b = nc.split("\n");
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if (a[i] !== b[i]) {
+        diffDetail = `first divergent line ${i}: tool=${String(a[i] ?? "").slice(0, 200)} | cmd=${String(b[i] ?? "").slice(0, 200)}`;
+        break;
+      }
+    }
+  }
+  assert(results, "(a) normalized tool report === normalized command-captured report (report parity)", nt === nc, diffDetail);
+  // ── JSONL-dependent checks (hard-fail on availability — (b)/(c) are meaningless without it) ──
+  assert(results, "session JSONL available", entries.length > 0, "model may have timed out");
+  if (entries.length > 0) {
+    // (b) zero marker writes — this scenario's flow creates NO markers anywhere.
+    const markerWrites =
+      countCustom(entries, "mulligan:rewind") +
+      countCustom(entries, "mulligan:shrink") +
+      countCustom(entries, "mulligan:cancel");
+    assert(results, "(b) ZERO mulligan:rewind/shrink/cancel entries", markerWrites === 0, `${markerWrites} found`);
+    // (b) report bytes NEVER persist outside the agent toolResult sink (the notify sink never wrote).
+    // Needle: renderAuditReport's exact title line (src/tools/audit.ts renderAuditReport — verified stable).
+    const TITLE = "Mulligan audit — context you are currently carrying";
+    const isToolResult = (e) => e.type === "message" && e?.message?.role === "toolResult";
+    const leaked = entries.filter((e) => !isToolResult(e) && JSON.stringify(e).includes(TITLE));
+    assert(results, "(b) report bytes NEVER persisted outside the agent toolResult sink", leaked.length === 0, `${leaked.length} leaked entries`);
+    // (c) the agent tool's result DID reach the model — a real toolResult for mulligan_audit in the JSONL
+    //     (the observing turn calls the tool; the direct executes in the command dispatch CANNOT persist a
+    //     toolResult — pi only persists toolResults issued by the agent loop).
+    const reached = entries.some((e) => JSON.stringify(e).includes("mulligan_audit") && isToolResult(e));
+    assert(results, "(c) mulligan_audit toolResult reached the model (persisted in JSONL)", reached, "the observing turn did not call mulligan_audit (model non-compliance)");
+    // (d) headless /mulligan_audit dispatch survival is covered by exit-0 + no-crash + (b)'s zero writes.
+    assertGlobalInvariants(results, entries);
+  }
+  return { results, entries };
+}
+
+function assertDriftUserexempt({ smoke, piRes }) {
+  const results = [];
+  const entries = readSessionEntries(smoke.sessionFile);
+  const fires = smoke.lines.filter((l) => l.test === "context.fire");
+  // (a) HARD: the drift nudge must NOT fire — the paste is user-attributable and excluded from the
+  // delta (estimateAgentTokens D10, src/tokens.ts:126-143). hasNudge false on EVERY fire + ZERO
+  // mulligan:nudge in the JSONL.
+  assert(results, "pi exited 0 (turn survived)", piRes.status === 0, `exit=${piRes.status}`);
+  assert(results, "context.fire lines exist (paste turn + observing turn)", fires.length >= 1, `${fires.length} fires`);
+  const nudgeFires = fires.filter((l) => l.detail?.hasNudge === true);
+  assert(results, "hasNudge===false on every fire (D10 user-exemption)", nudgeFires.length === 0,
+    nudgeFires.length ? `${nudgeFires.length} fires show hasNudge:true` : "");
+  const pasteFires = fires.filter((l) => l.detail?.pasteCanaryPresent === true);
+  assert(results, "paste is in the filtered context on post-paste fires", pasteFires.length >= 1, `${pasteFires.length} fires`);
+  if (entries.length > 0) {
+    const nudgeCount = entries.filter((e) => e.customType === "mulligan:nudge").length;
+    assert(results, "ZERO mulligan:nudge entries on disk (§2.3 + exemption)", nudgeCount === 0,
+      nudgeCount ? `${nudgeCount} found` : "");
+    assertGlobalInvariants(results, entries);
+  } else {
+    console.log(`  ⚠ JSONL unavailable (model may have timed out) — smoke-log assertions are primary`);
+  }
+  // (b) high-water arm (window-dependent → SOFT when the window is too large for 60k to cross 0.7 —
+  // follow the F-nudge-drift soft convention). Compute; assert only when satisfied; else SOFT.
+  const hwOk = pasteFires.some((l) => l.detail?.highWater?.latch === true || (typeof l.detail?.highWater?.fraction === "number" && l.detail.highWater.fraction >= 0.7));
+  const hwFraction = pasteFires.map((l) => l.detail?.highWater?.fraction).filter((f) => typeof f === "number").sort((a, b) => b - a)[0];
+  let soft;
+  if (hwOk) {
+    assert(results, "high-water observed the paste (latch or fraction>=0.7)", true, `fraction=${hwFraction}`);
+  } else {
+    soft = `highWater did not cross 0.7 (max fraction ${hwFraction ?? "null"} — provider window too large for a 60k-token paste; cf. F-nudge-drift's model-dependent arm)`;
+  }
+  // (c) contrast criterion: agent-attributable growth DOES fire the drift nudge — proven by the
+  // existing green F-nudge-drift scenario (its model-driven arm). Cross-reference only; no duplication.
+  return { results, entries, soft,
+    note: "contrast arm (agent reads fire the drift nudge) is covered by F-nudge-drift — see scenarios.md" };
+}
+
 const ASSERTERS = {
   "F-rewind-core": assertRewindCore,
   "F-shrink-persist": assertShrinkPersist,
@@ -518,6 +831,10 @@ const ASSERTERS = {
   "F-protected": assertProtected,
   "F-maxdepth": assertMaxdepth,
   "F-checkpoint": assertCheckpoint,
+  "F-ckptcmd": assertCkptcmd,
+  "F-consent": assertConsent,
+  "F-drift-userexempt": assertDriftUserexempt,
+  "F-useraudit": assertUseraudit,
   "F-failopen": assertFailopen,
   "E7": assertE7,
   "E12": assertE12,
@@ -526,16 +843,20 @@ const ASSERTERS = {
 };
 
 function runScenario(scenario) {
-  // F-shrink-persist: 3-prompt flow. Prompt 1 carries USER_CANARY (a REAL role:"user" message persisted to the
-  // session JSONL) BEFORE the command runs, so the command-time shrink resolves it. The command drives BOTH shrinks
-  // (the custom_message canary + the E19 user message). Prompt 3 is the observing inference — both substitutions
-  // are observable + the JSONL is persisted for the on-disk invariant.
+  // F-shrink-persist: 3-prompt flow (v2.0 current-turn semantics). Prompt 1 is a real model-driven SETUP turn
+  // that commits an assistant + mulligan_smoke_big toolResult (RESULT_CANARY) inside the current turn span (a
+  // toolResult cannot be synthesized — ReadonlySessionManager has no mutator). Prompt 2 dispatches the
+  // /mulligan_smoke command, which is NOT a user message (pi command dispatch bypasses the agent loop) — so
+  // the toolResult is still "current turn" at command time and the two-arm shrink matches IN-SPAN. Do NOT add
+  // a prompt between setup and command (it would push the toolResult out of the current-turn span). The
+  // command drives the success shrink + the v2.0 refusal variant. Prompt 3 is the observing inference — the
+  // substitution must be visible (the filter bound is the marker's issuing turn; scope_guard_design.md §1–2).
   if (scenario === "F-shrink-persist") {
     const piRes = runPi(scenario, {
       prompts: [
-        `MULLIGAN-SMOKE-USER-CANARY: please note this exact user-supplied string`, // E19 target (real role:"user")
-        `/mulligan_smoke F-shrink-persist`, // drives BOTH shrinks (custom_message canary + user message)
-        "Reply with exactly: OK", // observing inference — both substitutions observable + JSONL persisted
+        "Call the mulligan_smoke_big tool once, then reply with exactly: DONE", // setup: real toolResult in current turn
+        "/mulligan_smoke F-shrink-persist", // drives success shrink + refusal variant
+        "Reply with exactly: OK", // observing inference — substitution must be visible
       ],
     });
     const smoke = parseSmokeLog(piRes.logPath);
@@ -566,6 +887,128 @@ function runScenario(scenario) {
         `Reply with exactly: ${SEED_HIDDEN}`,
         `/mulligan_smoke F-checkpoint-rewind`,
         "Reply with exactly: OK",
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
+  // F-ckptcmd (BUG-003): the REAL slash-command path. Prompt 1 is a SEED model turn — slash-command
+  // prompts do NOT create user message entries (command dispatch bypasses the agent loop), so on a fresh
+  // session setCheckpoint would have NO real message to label (the same baseline breakage F-checkpoint
+  // fixed with SEED_ANCHOR); the seed assistant reply is the anchor. Then /mulligan_checkpoint x (set) and
+  // /mulligan_checkpoint_revoke x (clear: setLabel(id, undefined), latest-wins) — deterministic, no model
+  // call for those two steps. Prompt 4 is the observing inference that commits the session JSONL.
+  if (scenario === "F-ckptcmd") {
+    const piRes = runPi(scenario, {
+      prompts: [
+        "Reply with exactly: SETANCHOR", // seed — the real message the checkpoint labels
+        "/mulligan_checkpoint x", // set
+        "/mulligan_checkpoint_revoke x", // revoke — latest-wins
+        "Reply with exactly: OK", // observing inference — persists the session JSONL for assertions
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
+  // F-banner (BUG-003 / spec @10-testing.md §2.1): two-run scenario proving the active-checkpoint banner
+  // state PERSISTS across turns, CLEARS within one fire of a revoke, is RESTORED on /resume (run 2 reuses the
+  // SAME --session-id — runPi derives it from the scenario name + RUN_ID, stable per invocation), and
+  // contributes ZERO banner bytes to the filtered view. Run 1: SEED model turn (a fresh session has no real
+  // message for the checkpoint to label — the same baseline breakage F-ckptcmd fixed) → set 'beta' →
+  // 2 observing fires (persistence) → revoke → 1 observing fire (cleared). Run 2 (same session): set
+  // 'gamma' → 1 observing fire (restored). NOTE: smoke.ts's factory TRUNCATES the log per spawn, so smoke2
+  // contains ONLY run-2 lines (no slicing); run 1 must be parsed BETWEEN the spawns. Run 2 passes EXPLICIT
+  // prompts (starting with its own command), NOT the extraArgs-append shape of F-reload.
+  if (scenario === "F-banner") {
+    const r1 = runPi(scenario, {
+      prompts: [
+        "Reply with exactly: BANNERSEED", // seed — the real message the checkpoint labels
+        "/mulligan_checkpoint beta",
+        "Reply with exactly: OK", // fire 1 → banner active (beta)
+        "Reply with exactly: OK again", // fire 2 → STILL active (persists across turns)
+        "/mulligan_checkpoint_revoke beta",
+        "Reply with exactly: OK3", // fire 3 → activeCount === 0 (cleared within one fire)
+      ],
+    });
+    const smoke1 = parseSmokeLog(r1.logPath); // parsed BETWEEN spawns → run-1 lines only (run 2 truncates)
+    // Run 2 (same --session-id → pi reopens/resumes it): set a checkpoint, observe it on the resumed session.
+    const r2 = runPi(scenario, {
+      prompts: ["/mulligan_checkpoint gamma", "Reply with exactly: OK4"],
+    });
+    const smoke2 = parseSmokeLog(r2.logPath); // run-2 lines only (factory truncated the log at spawn time)
+    return { piRes: r1, smoke: smoke1, r2, smoke2 };
+  }
+  if (scenario === "F-consent") {
+    // F-consent (BUG-003 / spec @10 §2.1 :101): 8-prompt CONSENT flow.
+    // 1) seed-anchor model turn (setCheckpoint's anchor — slash prompts create no message entries);
+    // 2) /mulligan_checkpoint delta — REAL slash command, deterministic label write;
+    // 3+4) TWO user prompts U1/U2 with distinct canaries (post-checkpoint content the rewind will hide);
+    // 5) /mulligan_smoke F-consent-rewind — drives the REAL makeRewindTool checkpoint rewind;
+    // 6) a user prompt with the GUARD canary + reply (the turn a last_turn rewind will re-land on);
+    // 7) /mulligan_smoke F-consent-guard — drives the REAL last_turn rewind (guardrail arm);
+    // 8) observing inference — ALL hiding/visibility verdicts read off this fire.
+    const piRes = runPi(scenario, {
+      prompts: [
+        "Reply with exactly: SETANCHOR",
+        "/mulligan_checkpoint delta",
+        "User says: MULLIGAN-SMOKE-CONSENT-U1 — reply with exactly: OK",
+        "User says: MULLIGAN-SMOKE-CONSENT-U2 — reply with exactly: OK",
+        "/mulligan_smoke F-consent-rewind",
+        "User says: MULLIGAN-SMOKE-CONSENT-GUARD — reply with exactly: OK",
+        "/mulligan_smoke F-consent-guard",
+        "Reply with exactly: OK",
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
+  // F-drift-userexempt (BUG-003 / spec @10 §2.1): D10 user-exemption, end-to-end. The paste is REAL
+  // user prompt(s) delivered via -p (no /mulligan_smoke dispatch — the exemption is about genuine user
+  // input). Generated at runtime: ~60k tokens ≈ 240KB of argv total; never a repo fixture. NOTE: Linux
+  // MAX_ARG_STRLEN caps a SINGLE argv argument at 128KB, so the paste is split into CHUNKS of ~20k
+  // tokens (~80KB argv each) — every chunk is still a genuine user prompt, all user-attributable, so
+  // the D10 exemption point and the total ~60k-token context growth are preserved.
+  // estimateAgentTokens (src/tokens.ts:126-143) excludes role==='user' from the drift delta
+  // → the nudge must NOT fire even though total context grows ~60k. The highWater observables
+  // (P1.M2.T1.S2) count the FULL filtered context → they SHOULD observe the paste when the window
+  // is small enough for 60k to cross 0.7 of it.
+  if (scenario === "F-drift-userexempt") {
+    const PASTE_TOKENS_TARGET = 60_000;
+    const CHUNKS = 3; // 3 × ~20k tokens ≈ 80KB argv each — under the 128KB per-arg kernel limit
+    const CHARS_PER_TOKEN = 4; // must match src/tokens.ts CHARS_PER_TOKEN (= 4; verified by grep)
+    const line = "MULLIGAN-SMOKE-PASTE-FILLER-0123456789abcdef "; // ~48 chars incl. space
+    const repeat = Math.ceil(PASTE_TOKENS_TARGET * CHARS_PER_TOKEN / line.length / CHUNKS);
+    const pasteChunk = (n) =>
+      `Ignore the filler below; it is part ${n + 1} of a large document paste (D10 user-exemption smoke).\n` +
+      (n === 0 ? `MULLIGAN-SMOKE-PASTE-CANARY\n` : "") +
+      Array.from({ length: repeat }, (_, i) => `${n}-${i} ${line}`).join("\n");
+    const piRes = runPi(scenario, {
+      prompts: [
+        ...Array.from({ length: CHUNKS }, (_, n) => pasteChunk(n)),
+        "Reply with exactly: OK",
+      ],
+    });
+    const smoke = parseSmokeLog(piRes.logPath);
+    return { piRes, smoke };
+  }
+  // F-useraudit (BUG-003 / spec @10-testing.md §2.1): report PARITY + sink SEPARATION.
+  // Prompt 1: /mulligan_smoke F-useraudit — deterministic command; the smoke.ts case drives BOTH the real
+  //   agent auditTool AND the real makeAuditCommand handler via a wrapper ctx that captures ui.notify
+  //   (headless pi -p has no UI — the raw command would early-return on !ctx.hasUI, so we wrap). Both report
+  //   strings smokeLog'd back-to-back on the SAME session state (parity is exact after normalization).
+  // Prompt 2: -p /mulligan_audit — the REAL headless dispatch path: hasUI:false → early return, MUST not
+  //   throw, MUST not write (a genuine pi command dispatch through index.ts registration).
+  // Prompt 3: the observing turn CALLS mulligan_audit for real — pi only persists toolResult entries issued
+  //   by the agent loop (a direct execute inside the command dispatch persists NOTHING — verified empirically),
+  //   so the "tool result reached the model" positive arm (spec @10 §2.1) requires a genuine model tool call
+  //   (the F-shrink-persist "Call the mulligan_smoke_big tool once…" setup pattern). The resulting toolResult
+  //   entry is the SANCTIONED agent sink — the (b) report-bytes grep excludes it by design.
+  if (scenario === "F-useraudit") {
+    const piRes = runPi(scenario, {
+      prompts: [
+        "/mulligan_smoke F-useraudit",
+        "/mulligan_audit",
+        "Use the mulligan_audit tool with top 8 now, then reply with exactly: OK",
       ],
     });
     const smoke = parseSmokeLog(piRes.logPath);
@@ -612,6 +1055,8 @@ function main() {
       outcome = assertReload(run, { smoke: run.smoke2 });
     } else if (scenario === "E11") {
       outcome = assertE11(run, { smoke: run.smoke2 });
+    } else if (scenario === "F-banner") {
+      outcome = assertBanner(run);
     } else {
       outcome = ASSERTERS[scenario]({ smoke, piRes });
     }

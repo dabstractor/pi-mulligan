@@ -12,6 +12,7 @@ import {
   type ShrinkMarker,
   type ShrinkMarkerInput,
   type ShrinkTarget,
+  type ShrinkTargetRead,
   type TurnMetric,
   type TurnMetricInput,
   type CancelMarker,
@@ -20,6 +21,7 @@ import {
   type SetCheckpointResult,
 } from "../src/markers.js";
 import { clearAll } from "../src/runtime.js";
+import { resolveShrinkTarget, type MessageLike } from "../src/transforms.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // GOTCHA #8: nextSeq mutates the SHARED module-scoped runtime map. clearAll() before AND after each test so a
@@ -531,21 +533,50 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(c).not.toHaveProperty("kind");
   });
 
-  it("ShrinkTarget is the 3-arm discriminated union", () => {
+  it("ShrinkTarget is the 2-arm write union; ShrinkTargetRead adds the legacy arm", () => {
     // Each arm is assignable to ShrinkTarget (the `: ShrinkTarget` annotations prove it at compile time) …
     const a: ShrinkTarget = { by_tool_call_id: "x" };
     const b: ShrinkTarget = { by_tool_name: "read", occurrence: "last" };
-    const c: ShrinkTarget = { by_content_includes: "substr" };
-    // … and ShrinkTarget is exactly the 3-arm discriminated union (assert on the type, house pattern). A single
+    // … and ShrinkTarget is exactly the 2-arm v2.0 write union (assert on the type, house pattern). A single
     // arm is assignable to but NOT equal to the full union, so the equality assertion is on `ShrinkTarget` itself.
+    // v2.0 (spec/06 §5; PRD §2): by_content_includes removed from the WRITE type.
     expectTypeOf<ShrinkTarget>().toEqualTypeOf<
+      | { by_tool_call_id: string }
+      | { by_tool_name: string; occurrence: "last" | "first" }
+    >();
+    expectTypeOf(a).toMatchTypeOf<ShrinkTarget>();
+    expectTypeOf(b).toMatchTypeOf<ShrinkTarget>();
+    // READ type: legacy v1.x { by_content_includes } markers still type-check (deprecated, ignored by resolver).
+    const c: ShrinkTargetRead = { by_content_includes: "substr" };
+    expectTypeOf<ShrinkTargetRead>().toEqualTypeOf<
       | { by_tool_call_id: string }
       | { by_tool_name: string; occurrence: "last" | "first" }
       | { by_content_includes: string }
     >();
-    expectTypeOf(a).toMatchTypeOf<ShrinkTarget>();
-    expectTypeOf(b).toMatchTypeOf<ShrinkTarget>();
-    expectTypeOf(c).toMatchTypeOf<ShrinkTarget>();
+    expectTypeOf(a).toMatchTypeOf<ShrinkTargetRead>(); // a fresh write target is assignable to the read type
+    expectTypeOf(c).not.toMatchTypeOf<ShrinkTarget>(); // legacy arm is NOT a write target
+  });
+
+  it("legacy read-arm target resolves to null ALWAYS (resolver ignores the deprecated arm)", () => {
+    // Relocated from transforms.test.ts's deleted block (d): the resolver must treat the deprecated
+    // content arm like any unmatched target → null, with and without a span.
+    const msgs: MessageLike[] = [
+      { role: "user", content: "turn 0" },
+      { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "tool", arguments: {} }] },
+      { role: "toolResult", toolCallId: "c1", toolName: "bash", content: "big read output" },
+    ];
+    const legacyNeedle: ShrinkTargetRead = { by_content_includes: "read" };
+    const legacyUserText: ShrinkTargetRead = { by_content_includes: "u" };
+    const legacyEmpty: ShrinkTargetRead = { by_content_includes: "" };
+    // Span omitted → null.
+    expect(resolveShrinkTarget(msgs, legacyNeedle)).toBeNull();
+    expect(resolveShrinkTarget(msgs, legacyUserText)).toBeNull();
+    expect(resolveShrinkTarget(msgs, legacyEmpty)).toBeNull();
+    // Full span → null.
+    expect(resolveShrinkTarget(msgs, legacyNeedle, { start: 0, end: 3 })).toBeNull();
+    expect(resolveShrinkTarget(msgs, legacyUserText, { start: 0, end: 3 })).toBeNull();
+    // Empty span → null.
+    expect(resolveShrinkTarget(msgs, legacyNeedle, { start: 1, end: 1 })).toBeNull();
   });
 
   it("the *Input types are the marker MINUS the wrapper-stamped fields", () => {
@@ -557,7 +588,7 @@ describe("types (GOTCHA #2 — string | null)", () => {
     expectTypeOf(t.deltaTokens).toEqualTypeOf<number | null>();
     expectTypeOf(t).not.toHaveProperty("seq");
     const s: ShrinkMarkerInput = SHRINK_DATA;
-    expectTypeOf(s.target).toEqualTypeOf<ShrinkTarget>();
+    expectTypeOf(s.target).toEqualTypeOf<ShrinkTargetRead>();
   });
 });
 

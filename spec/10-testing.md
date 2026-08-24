@@ -65,7 +65,6 @@ Target files: `transforms.ts`, `ledger.ts`, `tokens.ts`, `notes.ts`. Framework: 
 ### 1.11 Cancel target resolution (E21, target-based)
 - `by_tool_call_id` hint → retires the uuid of the (single) marker whose matched message / `hideEntryIds` carries that id.
 - `by_tool_name:"read", occurrence:"last"` → retires the most-recent active shrink or rewind whose covered span includes the last `read` result.
-- `by_content_includes:"<substr>"` → retires the most-recent active marker covering a message whose text contains the substring.
 - Several markers cover the match → **most recent by `seq`** is retired (LIFO); the rest stay active.
 - No active marker covers the match → safe no-op (`cancelled:false`); nothing appended.
 - Explicit `markerId` fallback → retires that exact marker; unknown id → safe no-op.

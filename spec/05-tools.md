@@ -100,7 +100,7 @@ mulligan_rewind({
 ## 2. `mulligan_shrink`
 
 ### Purpose
-Replace the content of one specific past tool result (or message) with a compact replacement, persistently, in the model's view — without removing it. Use when a result is too big to carry but too useful to delete entirely, or when only a summary of it is needed going forward.
+Replace the content of one specific tool result **from the current turn** with a compact replacement, persistently, in the model's view — without removing it. Use when a result is too big to carry but too useful to delete entirely, or when only a summary of it is needed going forward. **(v2.0: only current-turn results are eligible — the shrink cannot touch earlier turns.)**
 
 ### When to use it (vs `mulligan_rewind`)
 - Use **shrink** when the tool call itself was *fine* but its *output* is bloated and you want a compact version to remain as context (e.g. "the test run failed; here's the summary, not the 12k-token log").
@@ -111,11 +111,10 @@ Replace the content of one specific past tool result (or message) with a compact
 ```ts
 const ShrinkParams = Type.Object({
   target: Type.Union([
-    Type.Object({ by_tool_call_id: Type.String({ description: "The toolCallId of the result to shrink." }) }),
-    Type.Object({ by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
-                  occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]) }),
-    Type.Object({ by_content_includes: Type.String({ description: "Shrink the (first) message whose text contains this substring." }) }),
-  ], { description: "How to identify the message to shrink. Resolved live each turn (robust to compaction)." }),
+    Type.Object({ by_tool_call_id: Type.String({ description: "The toolCallId of the result to shrink — must be a call from the CURRENT turn." }) }),
+    Type.Object({ by_tool_name: Type.String({ description: "e.g. 'read', 'bash' — matches only results from the CURRENT turn" }),
+                  occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")], { description: "first/last matching result within the current turn" }) }),
+  ], { description: "How to identify the CURRENT-TURN tool result to shrink. Only results produced this turn are eligible; earlier turns are out of scope. Resolved live each turn (robust to compaction)." }),
 
   replacement: Type.String({ description:
     "The compact text that replaces the matched message's content. Make it a faithful summary — the model will treat it as ground truth from now on." }),
@@ -123,6 +122,8 @@ const ShrinkParams = Type.Object({
   reason: Type.Optional(Type.String({ description: "Why (surfaced in audit). Optional." })),
 });
 ```
+
+> **v2.0 — current-turn scope.** The `by_content_includes` arm is **removed**, and both remaining arms resolve **only within the current turn's tool-result span**. A `by_tool_call_id` that resolves in an earlier turn is a **hard refusal**; a `by_tool_name` selector with no match this turn is a **hard refusal** (never a fallback into older history).
 
 ### Return shape
 ```ts
@@ -143,7 +144,7 @@ const ShrinkParams = Type.Object({
 ### Behavior
 1. Validate config (`config.shrink.enabled`).
 2. Validate `replacement` non-empty.
-3. **Match now (best-effort):** resolve `target` against the current snapshot to (a) give immediate feedback ("matched: yes/no") and (b) reject obviously-invalid targets (e.g. `by_tool_call_id` that does not exist anywhere) — though note a "no match now" is not a hard refusal, because the content might appear before a compaction settles; in that case accept and let the filter keep trying. Use judgement: refuse only if the target is structurally impossible (e.g. unknown id format), not merely currently-unmatched.
+3. **Match now (best-effort, current-turn-scoped — v2.0 REQUIRED):** resolve `target` against the current snapshot, **restricted to the current turn's tool-result span**. If the selector matches only a result from an EARLIER turn (or `by_tool_call_id` names a call not issued this turn), return a hard refusal: `"Mulligan: refused — that result is from a previous turn; only this turn's tool calls can be shrunk."` A currently-unmatched-in-turn selector with a well-formed shape is likewise refused now that scope is exact (there is nothing later in THIS turn it could still match — the pre-v2.0 "might appear before compaction settles" reasoning applied to cross-turn fallbacks, which no longer exist). Structural impossibility (unknown id format, empty tool name) is refused identically.
 4. `pi.appendEntry("mulligan:shrink", { schema, v:1, kind:"shrink", id, target, replacement, reason, seq, ts })`.
 5. **Notify the operator at zero context cost (REQUIRED):** after persisting, surface the extracted summary to the *human* via `ctx.ui` — a pure UI side-channel that is **never** added to the model's context:
 ```ts
@@ -241,12 +242,13 @@ const CancelParams = Type.Object({
     Type.Object({ by_tool_call_id: Type.String({ description: "The toolCallId of a message the marker affected." }) }),
     Type.Object({ by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
                   occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]) }),
-    Type.Object({ by_content_includes: Type.String({ description: "Match a marker whose affected message(s) include this substring." }) }),
-  ], { description: "How to identify the marker to cancel — the SAME hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired." }),
+  ], { description: "How to identify the marker to cancel — the SAME (two-arm, v2.0) hint shape mulligan_shrink uses. Resolved live each turn (robust to compaction). The most recent active marker (shrink or rewind) whose target/span covers the matched message is retired." }),
 
   markerId: Type.Optional(Type.String({ description: "Optional explicit fallback: the markerId returned by mulligan_rewind/mulligan_shrink in details.markerId. If both target and markerId are given, markerId wins." })),
 }, { description: "Cancel accepts a `target` (preferred) or an explicit `markerId` (fallback). At least one MUST be present." });
 ```
+
+> **v2.0 note:** cancel keeps the two remaining shrink hint arms (`by_tool_call_id`, `by_tool_name`+`occurrence`); `by_content_includes` is removed in lockstep with the shrink tool. Cancel's *marker* resolution is unaffected by the current-turn scope (a marker issued in a previous turn may still be retracted — the marker, not the old content, is what cancel acts on).
 
 ### Return shape
 ```ts

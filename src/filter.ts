@@ -161,7 +161,14 @@ export function readMarkers(ctx: ExtensionContext): MarkersBundle {
     if (customType === "mulligan:rewind" && kind === "rewind") {
       rewinds.push(data as unknown as RewindMarker);
     } else if (customType === "mulligan:shrink" && kind === "shrink") {
-      shrinks.push(data as unknown as ShrinkMarker);
+      const entryId = readOwn(entry, "id");
+      // Thread the marker's OWN session-entry id (NOT data.id, which is the marker uuid) so the pure tier
+      // can compute the marker's issuing-turn span (markerTurnSpan — P1.M1.T2.S1). No behavior change.
+      shrinks.push(
+        typeof entryId === "string" && entryId.length > 0
+          ? { ...(data as Record<string, unknown>), markerEntryId: entryId } as unknown as ShrinkMarker
+          : (data as unknown as ShrinkMarker),
+      );
     } else if (customType === "mulligan:turn-metric" && kind === "turn-metric") {
       allMetrics.push(data as unknown as TurnMetric); // P3.M3.T3.S1: collect ALL (sorted newest-first below)
     } else if (customType === "mulligan:cancel" && kind === "cancel") {

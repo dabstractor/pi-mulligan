@@ -27,3 +27,6 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      - name: Integration smoke
+        run: npm run smoke

@@ -56,7 +56,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { appendShrinkMarker } from "../markers.js"; // GOTCHA #9: .js extension (ESM/Bundler resolution); GOTCHA #1: NO cast
 import type { ShrinkMarkerInput } from "../markers.js";
-import { resolveShrinkTarget } from "../transforms.js"; // Pi-free (0 imports) — no circular dep
+import { currentTurnSpan, resolveShrinkTarget } from "../transforms.js"; // Pi-free (0 imports) — no circular dep
 import type { ShrinkTarget } from "../transforms.js"; // structurally identical to markers.ts ShrinkTarget
 import type { MessageLike } from "../transforms.js";
 import { getConfig } from "../config.js"; // GOTCHA #10: read ONCE per execute
@@ -64,7 +64,7 @@ import { estimateTokens } from "../tokens.js"; // pure Pi-free estimator (chars/
 import type { MessageLike as EstMessageLike } from "../tokens.js"; // tokens.ts structural flavor (same cast idiom as below)
 import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `target` coercion (host edit.js precedent)
 
-// ── Parameter schema (spec/05 §2 — Typebox, VERBATIM incl. the 3-arm target union + descriptions) ────
+// ── Parameter schema (spec/05 §2 — Typebox, VERBATIM incl. the 2-arm target union + descriptions) ────
 
 /**
  * ShrinkParams — the typebox parameter schema for `mulligan_shrink` (spec/05 §2, verbatim incl. every
@@ -72,26 +72,32 @@ import { prepareObjectArgs } from "../prepare-args.js"; // string-encoded `targe
  * `{ target: ShrinkTarget; replacement: string; reason?: string }` (the shared contract with the
  * filter — spec/04 §4). EXPORTED for tests + the index.ts wiring step.
  *
- * The `target` union is copied VERBATIM from spec/05 §2 (the three matcher arms + their descriptions):
- *   - by_tool_call_id         — unique; resolves to the toolResult with that toolCallId.
- *   - by_tool_name+occurrence — semantic; the last (default) or first toolResult with that toolName.
- *   - by_content_includes     — content-based; the first message (any role) whose text contains the substring.
+ * The `target` union is the v2.0 TWO-arm form (parity with `ShrinkTarget` in src/transforms.ts —
+ * PRD §2; the legacy content-substring arm was removed in P1.M2.T1.S1):
+ *   - by_tool_call_id         — unique; resolves to the current-turn toolResult with that toolCallId.
+ *   - by_tool_name+occurrence — semantic; the last (default) or first current-turn toolResult with that toolName.
  */
 export const ShrinkParams = Type.Object({
   target: Type.Union(
     [
-      Type.Object({ by_tool_call_id: Type.String({ description: "The toolCallId of the result to shrink." }) }),
       Type.Object({
-        by_tool_name: Type.String({ description: "e.g. 'read', 'bash'" }),
-        occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")]),
+        by_tool_call_id: Type.String({
+          description: "The toolCallId of the result to shrink — must be a call from the CURRENT turn.",
+        }),
       }),
       Type.Object({
-        by_content_includes: Type.String({
-          description: "Shrink the (first) message whose text contains this substring.",
+        by_tool_name: Type.String({
+          description: "e.g. 'read', 'bash' — matches only results from the CURRENT turn",
+        }),
+        occurrence: Type.Union([Type.Literal("last"), Type.Literal("first")], {
+          description: "first/last matching result within the current turn",
         }),
       }),
     ],
-    { description: "How to identify the message to shrink. Resolved live each turn (robust to compaction)." },
+    {
+      description:
+        "How to identify the CURRENT-TURN tool result to shrink. Only results produced this turn are eligible; earlier turns are out of scope. Resolved live each turn (robust to compaction).",
+    },
   ),
   replacement: Type.String({
     description:
@@ -106,13 +112,15 @@ export type ShrinkArgs = Static<typeof ShrinkParams>;
 // ── The LLM-facing description string (spec/05 §5 — copy VERBATIM) ────────────
 
 /**
- * SHRINK_DESC — the LLM-facing description (spec/05 §5 "Description strings", Mode A LLM-facing docs).
- * This string IS the tool's documentation. Copy verbatim — it drives LLM usage. (spec/05 §5 line 79.)
+ * SHRINK_DESC — the LLM-facing description (Mode A LLM-facing docs). Normative source: PRD §2 purpose
+ * text (the spec §5 "Description strings" wording is INTERNALLY STALE — do not copy it). This string
+ * IS the tool's documentation: it teaches the current-turn scope + the hard refusal for earlier turns.
  */
 export const SHRINK_DESC =
-  "Replace a specific past tool result with a compact summary you provide, in your view, going forward. " +
-  "Use when the call was fine but its output is too big to keep carrying. Unlike rewind, the call stays in " +
-  "context (just with your summary as its result).";
+  "Replace the current turn's tool result with a compact summary you provide, in your view, going forward. " +
+  "Use when the call was fine but its output is too big to keep carrying. Only results from THIS turn can be " +
+  "shrunk — a target from an earlier turn is refused outright. Unlike rewind, the call stays in context " +
+  "(just with your summary as its result).";
 
 // ── Result builders (always include `details` — CRITICAL GOTCHA #4) ──────────
 
@@ -180,15 +188,14 @@ function cap(s: string, max: number): string {
 
 /**
  * describeTarget — a short human-readable label for the shrink target (P1.M2.T1.S2 operator echo).
- * Defensive: returns "message" for a non-record target. Mirrors the three matcher arms from ShrinkParams.
+ * Defensive: returns "message" for a non-record target. Mirrors the two matcher arms from ShrinkParams
+ * (v2.0, P1.M2.T1.S2: the legacy content-substring arm is fully gone — schema, resolver, and here).
  */
 function describeTarget(target: ShrinkArgs["target"]): string {
   if (!target || typeof target !== "object") return "message";
   if ("by_tool_call_id" in target) return `tool call ${target.by_tool_call_id}`;
   if ("by_tool_name" in target) return `${target.by_tool_name} result`;
-  if ("by_content_includes" in target)
-    return `message containing "${target.by_content_includes.slice(0, 40)}"`;
-  return "message";
+  return "message"; // defensive: unrecognized shape (schema-rejected) — still never throw
 }
 
 /**
@@ -202,22 +209,20 @@ function isNonEmpty(s: unknown): boolean {
 /**
  * targetIsStructurallyValid — the "structurally impossible target" operationalization (GOTCHA #7). The
  * ONE design judgment in this tool: refuse ONLY when the target can NEVER match. A target is structurally
- * invalid when its present discriminator (by_tool_call_id / by_tool_name / by_content_includes — whichever
+ * invalid when its present discriminator (by_tool_call_id / by_tool_name — whichever
  * is a string) is EMPTY or WHITESPACE-ONLY after trim. Verified reasoning against resolveShrinkTarget
  * (transforms.ts) internals:
  *   - by_tool_call_id:"" / by_tool_name:"" → resolveShrinkTarget skips the arm (length>0 check) → null forever.
- *   - by_content_includes:"" → NO length check → degenerate match on the FIRST message (every string includes "").
- * Both are noise → refuse. A NON-EMPTY-but-currently-unmatched target is NOT refused (compaction-robust;
- * content may appear before a compaction settles — E8; the marker persists and the filter re-resolves it
- * each inference). Defensive (non-record target → false; never throws). occurrence is typebox-constrained to
- * "last"|"first"; resolveShrinkTarget defaults non-"first" to "last" → do NOT validate occurrence.
+ * Both are noise → refuse. A NON-empty-but-currently-unmatched target is NOT refused here (the v2.0 §2
+ * step 3 hard refusal — "that result is from a previous turn; only this turn's tool calls can be shrunk"
+ * — owns that case, AFTER this check). Defensive (non-record target → false; never throws). occurrence is
+ * typebox-constrained to "last"|"first"; resolveShrinkTarget defaults non-"first" to "last" → do NOT validate occurrence.
  */
 function targetIsStructurallyValid(target: ShrinkArgs["target"] | undefined): boolean {
   if (!target || typeof target !== "object") return false; // non-record → no recognizable discriminator
   if ("by_tool_call_id" in target) return isNonEmpty(target.by_tool_call_id);
   if ("by_tool_name" in target) return isNonEmpty(target.by_tool_name);
-  if ("by_content_includes" in target) return isNonEmpty(target.by_content_includes);
-  return false; // no recognizable discriminator key
+  return false; // no recognizable discriminator key (v2.0: legacy content arm removed — P1.M2.T1.S2)
 }
 
 /**
@@ -245,33 +250,46 @@ function entryIdAtMessageIndex(entries: SessionEntry[], index: number): string |
  * resolveTargetEntryId — the ADVISORY read-only match that ALSO captures the matched message's STABLE ENTRY id
  * (FINDING 3 fix; supersedes the old boolean bestEffortMatch). It builds a SNAPSHOT via
  * `ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)` (NOT event.messages — the tool
- * is write-only w.r.t. messages), feeds it to the PURE resolver `resolveShrinkTarget` (transforms.ts), and — on a
- * match — maps the resolved MESSAGE index back to its ENTRY id via entryIdAtMessageIndex. Returns null on no-match.
+ * is write-only w.r.t. messages), computes the CURRENT TURN's span (`currentTurnSpan`, transforms.ts), feeds BOTH
+ * to the PURE 3-arg resolver `resolveShrinkTarget(messages, target, span)` — v2.0 §2 step 3: the match resolves
+ * ONLY within the current turn's span — and — on a match — maps the resolved MESSAGE index back to its ENTRY id
+ * via entryIdAtMessageIndex.
+ *
+ * Return contract (v2.0 §2 step 3 + E13):
+ *   - `{ snapshotOk: true, index: <number>, entryId, origTokens }` — IN-SPAN match. `index` is the resolved
+ *     message index; `entryId` is the stable ENTRY id (or null when unmappable).
+ *   - `{ snapshotOk: true, index: undefined, entryId: null, origTokens: 0 }` — NO match within the current
+ *     turn's span (earlier-turn-only match, no match at all, or an empty span). The caller issues the hard
+ *     refusal "that result is from a previous turn; only this turn's tool calls can be shrunk".
+ *   - `{ snapshotOk: false, entryId: null, origTokens: 0 }` — the snapshot itself THREW (E13 carve-out):
+ *     the caller persists with matched:false (never block a legitimate shrink on an advisory computation).
  *
  * The captured ENTRY id becomes the marker's `pinnedEntryId`: at filter time applyShrink resolves it by IDENTITY
- * (resolvePinnedShrink) instead of re-resolving the live selector, so by_tool_name+last / by_content_includes can no
- * longer drift onto later messages as the session grows (the moving-target footgun). ADVISORY ONLY — a null return
- * STILL persists the marker (live-resolution path; E8) and NEVER gates persistence. Wrapped in try/catch → null
- * (a throwing buildContextEntries / sessionEntryToContextMessages must never block a legitimate shrink — E13). The
- * AUTHORITATIVE substitution happens in the filter on the next inference (D7).
+ * (resolvePinnedShrink) instead of re-resolving the live selector, so a selector can no
+ * longer drift onto later messages as the session grows (the moving-target footgun). The AUTHORITATIVE
+ * substitution happens in the filter on the next inference (D7).
  */
 function resolveTargetEntryId(
   ctx: ExtensionContext,
   target: ShrinkArgs["target"],
-): { entryId: string | null; origTokens: number } {
+): { entryId: string | null; origTokens: number; index?: number; snapshotOk: boolean } {
   try {
     const entries = ctx.sessionManager.buildContextEntries(); // GOTCHA #5: snapshot, compaction-aware
     // sessionEntryToContextMessages returns Pi's AgentMessage[]; transforms.ts MessageLike is a Pi-free
     // structural type — a real AgentMessage[] assigns in with NO cast (GOTCHA #5, api_verification.md §6.1/§6.3).
     const messages = entries.flatMap((e) => sessionEntryToContextMessages(e)) as unknown as MessageLike[];
-    const i = resolveShrinkTarget(messages, target as ShrinkTarget); // PURE resolver (transforms.ts)
-    if (i === null) return { entryId: null, origTokens: 0 };
+    // v2.0 §2 step 3: bind the match to the CURRENT TURN's span (last role:"user" index + 1 → end). With no
+    // user message in the snapshot the span starts at 0 (everything is "this turn"); an empty history gives
+    // an empty span → no in-turn match → the caller refuses.
+    const span = currentTurnSpan(messages);
+    const i = resolveShrinkTarget(messages, target as ShrinkTarget, span); // PURE 3-arg resolver (transforms.ts)
+    if (i === null) return { entryId: null, origTokens: 0, snapshotOk: true };
     // v1.2: estimate the matched original's tokens IN THE SAME SNAPSHOT (feeds the orientation line's ~<t>;
     // estimateTokens never throws — tokens.ts GOTCHA #3 — and a missing messages[i] estimates to 0).
     const origTokens = estimateTokens([messages[i]] as unknown as EstMessageLike[]).tokens;
-    return { entryId: entryIdAtMessageIndex(entries, i), origTokens }; // map message index → stable ENTRY id
+    return { entryId: entryIdAtMessageIndex(entries, i), origTokens, index: i, snapshotOk: true }; // message index → stable ENTRY id
   } catch {
-    return { entryId: null, origTokens: 0 }; // GOTCHA #6: never block a legitimate shrink on an advisory computation (E13)
+    return { entryId: null, origTokens: 0, snapshotOk: false }; // E13: the snapshot threw — the caller persists matched:false
   }
 }
 
@@ -282,11 +300,13 @@ function resolveTargetEntryId(
  *   1. config (step 1; E14): getConfig() once; `config.shrink.enabled`? false → refuse "shrink is disabled".
  *   2. replacement (step 2): empty/whitespace-only after trim? → refuse "replacement must be non-empty".
  *   3. structural target (step 3 — the "structurally impossible" refusal; GOTCHA #7): the present
- *      discriminator empty after trim? → refuse "target discriminator must be non-empty". (A non-empty-but-
- *      currently-unmatched target is NOT refused — E8.)
- *   3/4. best-effort match (step 3 — the yes/no feedback; advisory, never blocks; GOTCHA #6): snapshot →
- *        resolveShrinkTarget → matched boolean. try/catch → false (belt-and-suspenders; bestEffortMatch
- *        already catches — E13).
+ *      discriminator empty after trim? → refuse "target discriminator must be non-empty".
+ *   4. v2.0 §2 step 3 hard refusal: resolve the target ONLY within `currentTurnSpan` (3-arg
+ *      resolveShrinkTarget). No in-span match — whether the target matches an EARLIER turn or nothing at
+ *      all — → refuse "that result is from a previous turn; only this turn's tool calls can be shrunk"
+ *      (ONE exact string for both classifications; NOTHING is persisted). The E13 carve-out: when the
+ *      snapshot itself THREW (snapshotOk:false), the tool instead persists with matched:false (never
+ *      block a legitimate shrink on an advisory computation).
  *   5. persist (step 4; GOTCHA #1 — NO cast, NO leaveNote): appendShrinkMarker(pi, ctx, {target,
  *      replacement, reason}) → markerId (the ENTRY id, or null).
  *   6. return (step 5): feedbackText(matched) + details:{ matched, markerId }.
@@ -319,20 +339,35 @@ async function shrinkExecute(
     //     A non-empty-but-currently-unmatched target is NOT refused here (that is advisory feedback, step 3/4).
     if (!targetIsStructurallyValid(params?.target)) return refusal("target discriminator must be non-empty");
 
-    // (3/4) best-effort yes/no match + PIN the matched entry id (spec/05 §2 step 3 — ADVISORY; never blocks
-    //       persistence — GOTCHA #6). resolveTargetEntryId returns the stable ENTRY id of the matched message
-    //       (or null) PLUS its original token estimate (v1.2 — feeds the orientation line). matched = (entryId !==
-    //       null); the ENTRY id becomes the marker's pinnedEntryId so applyShrink resolves by identity at filter
-    //       time (FINDING 3 fix — no moving-target drift). Inner try/catch is belt-and-suspenders
-    //       (resolveTargetEntryId already catches → {entryId:null, origTokens:0} — E13).
+    // (4) v2.0 §2 step 3 — span-bound match + HARD REFUSAL + PIN the matched entry id. resolveTargetEntryId
+    //     resolves the target ONLY within currentTurnSpan (3-arg resolveShrinkTarget) and returns
+    //     { entryId, origTokens, index?, snapshotOk }. Three outcomes:
+    //       - snapshotOk:false  → the SNAPSHOT threw (E13 carve-out): persist with matched:false below — a
+    //                             throwing advisory computation must never block a legitimate shrink.
+    //       - snapshotOk:true && index === undefined → NO match within the current turn (earlier-turn-only
+    //                             OR no match at all — ONE refusal string for both): HARD REFUSAL, nothing
+    //                             persisted, no orientation line. A dead marker that can never fire within
+    //                             its turn span is refused at creation instead ("Matched: yes" must not lie).
+    //       - snapshotOk:true && index is a number → in-span match: entryId (may be null when unmappable)
+    //                             becomes the marker's pinnedEntryId so applyShrink resolves by identity at
+    //                             filter time (FINDING 3 fix — no moving-target drift). Inner try/catch is
+    //                             belt-and-suspenders (resolveTargetEntryId already catches — E13).
     let entryId: string | null;
     let origTokens = 0;
+    let snapshotOk = true;
+    let index: number | undefined;
     try {
-      ({ entryId, origTokens } = resolveTargetEntryId(ctx, params.target));
+      ({ entryId, origTokens, index, snapshotOk } = resolveTargetEntryId(ctx, params.target));
     } catch {
       entryId = null;
+      snapshotOk = false; // E13: treat a throw exactly like resolveTargetEntryId's own catch
     }
-    const matched = entryId !== null;
+    if (snapshotOk && index === undefined) {
+      // v2.0 §2 step 3 hard refusal — exact spec text; earlier-turn and no-match share ONE string.
+      // Nothing is persisted and no orientation line is attached ("Context updated" must not lie).
+      return refusal("that result is from a previous turn; only this turn's tool calls can be shrunk");
+    }
+    const matched = snapshotOk ? entryId !== null : false; // snapshotOk:false → E13 persist path, matched:false
 
     // (5) persist (spec/05 §2 step 4; GOTCHA #1 — NO cast, NO leaveNote; ShrinkMarkerInput matches EXACTLY).
     //     pinnedEntryId is included ONLY when the target matched at creation (absent → the filter falls back to live

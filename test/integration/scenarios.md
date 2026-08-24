@@ -45,6 +45,18 @@ pi … -p "/mulligan_smoke <scenario>" -p "Reply with exactly: OK"
 > `pi.sendUserMessage({deliverAs:"followUp"})` is fire-and-forget. A second `-p` prompt reliably triggers the
 > observing turn + persists the session. (Verified against Pi 0.84.x `agent-session.js` / `print-mode.js`.)
 
+Some scenarios use more than the canonical two `-p` flags: three-prompt flows (F-shrink-persist) and
+split-phase seeding (F-consent) — each subsequent `-p` is an ordinary observing turn that fires `context`
+and flushes the session JSONL.
+
+### The two-run `/resume` pattern
+
+Scenarios that prove state persists across a process restart (F-banner run 2, F-reload, E11) run **twice**:
+a second `pi` invocation with the **same `--session-id`**, which pi reopens/resumes (see `### F-banner`'s
+Run 1 / Run 2 blocks for the reference form). Those runs also pass `-ne` (`pi -ne`, used by F-banner and
+F-ckptcmd) to isolate from a globally-installed older mulligan build's extension collision — environment
+defense, not a suite requirement.
+
 ### The log + the session JSONL
 
 - **Smoke log** (`/tmp/mulligan-smoke.log`, or `$MULLIGAN_SMOKE_LOG`): JSONL, written by the smoke helper.
@@ -63,9 +75,18 @@ pi … -p "/mulligan_smoke <scenario>" -p "Reply with exactly: OK"
   "notePresent": true,           // a mulligan:note custom message is in context
   "hasRewindMarker": true,       // a mulligan:rewind custom entry exists on the branch
   "shrunkInContext": false,      // the shrink replacement (MULLIGAN-SMOKE-SHRUNK) is in context
-  "hasNudge": false              // a mulligan:nudge custom message is in context (ephemeral)
+  "hasNudge": false,             // a mulligan:nudge custom message is in context (ephemeral)
+  "seedAnchorInAssistant": true, // the seed REPLY anchor is visible (role-gated)
+  "seedHiddenInAssistant": false, // the seed-hidden reply is hidden by the filter
+  "banner": {"activeCount": 1, "names": ["cp"]}, // recomputed checkpoint labels (banner would show headless)
+  "userMsgCount": 2,            // role==="user" messages in the filtered view
+  "firstUserPresent": true      // a user prompt is still visible in the filtered view
+  "highWater": {"latch": false, "fraction": 0.42} // §5.2 edge latch (aboveHighWater, post-handler read) and filtered-tokens/contextWindow; fraction null when the window is unknown (E12)
 }}
 ```
+
+The v1.1 observables are consumed by: `banner` → F-banner, `userMsgCount`/`firstUserPresent` → F-consent,
+`highWater` → F-drift-userexempt.
 
 ### The §2.3 entry-shape invariants (asserted for every marker-creating scenario)
 
@@ -89,7 +110,12 @@ assertions are skipped (with a note). So the suite is CI-runnable with any/no wo
 
 ---
 
-## The F-* scenarios (9)
+## The F-* scenarios (14)
+
+Ten v1.0 scenarios plus the five v1.1 additions (F-consent, F-ckptcmd, F-banner, F-useraudit,
+F-drift-userexempt — BUG-003 / spec @10-testing.md §2.1, added in the v2.0 post-validation round).
+F-retrycap and F-abortfraction below are documented manual (Tier-2) paths, not auto-run; spec-only
+F-cancel has no section (unit-covered). Everything else here is driven by `npm run smoke`.
 
 ### F-rewind-core
 
@@ -120,26 +146,34 @@ hidden after the rewind) and the message count drops.
 
 ### F-shrink-persist
 
-**Tests:** a shrink marker persists; the substitution appears in the filtered view; the original stays on disk.
+**Tests:** v2.0 current-turn shrink semantics end-to-end: a shrink marker persists; the substitution appears in the filtered view on the NEXT turn (the filter bound is the marker's issuing turn); the original stays on disk. Also proves the v2.0 hard refusal (out-of-turn target) fires end-to-end and appends nothing.
 
-**Run (deterministic):**
+**Run (deterministic, 3-prompt flow):**
 ```bash
 pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-shrink-persist \
-  -p "/mulligan_smoke F-shrink-persist" -p "Reply with exactly: OK"
+  -p "Call the mulligan_smoke_big tool once, then reply with exactly: DONE" \
+  -p "/mulligan_smoke F-shrink-persist" \
+  -p "Reply with exactly: OK"
 ```
+The first prompt commits a real `mulligan_smoke_big` toolResult (RESULT_CANARY) in the current turn; the
+`/mulligan_smoke` command prompt is NOT a user message (command dispatch bypasses the agent loop), so the
+toolResult is still in the current-turn span at command time.
 
 **Run (model-driven):**
 ```bash
 pi -e ./src/index.ts -e ./test/integration/smoke.ts \
-  -p "Call mulligan_smoke_big, then mulligan_shrink it (by_content_includes CANARY) to a one-line summary."
+  -p "Call mulligan_smoke_big, then mulligan_shrink it (by_tool_call_id of that call, or by_tool_name + occurrence) to a one-line summary."
 ```
 
-**Expect in log:** `tool.shrink` (succeeded); `context.fire` with `shrunkInContext:true`.
+**Expect in log:** `tool.shrink` variant `current-turn` (succeeded) and variant `refusal` (refused — "previous turn"); `context.fire` with `shrunkInContext:true` AND `resultCanaryPresent:false` (two-signal).
 
-**Expect in JSONL:** `mulligan:shrink` (custom) + the **original** canary text still present (shrink is a
-view-substitution, NOT a JSONL rewrite).
+**Expect in JSONL:** `mulligan:shrink` (custom) — exactly the successful shrink count (the refusal variant appends nothing); the **original** RESULT_CANARY still present (shrink is a view-substitution, NOT a JSONL rewrite).
 
-**Pass:** shrink marker persists; substitution in filtered view; original on disk; §2.3 invariants hold.
+**Pass:** shrink marker persists; substitution visible on the observing turn and the original on disk — the
+end-to-end mirror of the unit regression (an in-span shrink keeps applying after the next user message); the
+v2.0 refusal variant hard-refuses out-of-turn targets and appends no second marker (the old E19 user-message
+case is MOOT in v2.0 — a non-toolResult shrink is no longer expressible; spec/08 E19 / PRD §E19/h2.101); §2.3
+invariants hold.
 
 ---
 
@@ -304,6 +338,242 @@ pi -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-checkpo
 
 ---
 
+### F-ckptcmd
+
+**Tests:** the HUMAN slash commands `/mulligan_checkpoint` + `/mulligan_checkpoint_revoke` drive the label
+lifecycle end-to-end through the real Pi command dispatch (`src/index.ts` registration → `src/commands.ts`
+handlers → `pi.setLabel` → LabelEntry in the session JSONL). BUG-003 / spec @10-testing.md §2.1.
+
+**Run (deterministic — the orchestrator drives 4 literal prompts; commands are NOT routed through `/mulligan_smoke`):**
+```bash
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-ckptcmd \
+  -p "Reply with exactly: SETANCHOR" \
+  -p "/mulligan_checkpoint x" -p "/mulligan_checkpoint_revoke x" -p "Reply with exactly: OK"
+```
+
+Prompt 1 is a SEED model turn — slash-command prompts do NOT create user message entries (command dispatch
+bypasses the agent loop), so the seed assistant reply is the real message the checkpoint labels (same
+baseline-breakage fix as F-checkpoint). Prompt 2 sets `mulligan:checkpoint:x`; prompt 3 revokes it
+(`setLabel(id, undefined)`, latest-wins); prompt 4 is an observing inference that commits the session JSONL.
+The set/revoke dispatch is deterministic — no model call is needed for those two steps.
+
+**Expect in JSONL:** a `{type:"label", label:"mulligan:checkpoint:x"}` set entry and a
+`{type:"label", label:undefined}` clear entry with the SAME `targetId`.
+
+**Pass:**
+- (a) `mulligan:checkpoint:x` was SET (label entry exists; the clear comes AFTER the set)
+- (b) after revoke, `labelActive(entries, "mulligan:checkpoint:x") === false` — a clear entry targets the
+  SAME entry the set labeled (latest-wins)
+- (c) ZERO custom `mulligan:checkpoint` entries — checkpoints are Pi LabelEntries (no control entry)
+- (d) ZERO `mulligan_checkpoint` TOOL invocations in the JSONL (no agent checkpoint tool exists;
+  unit-pinned at test/index.test.ts:74 — exactly 4 registered tools)
+- (e) §2.3 global invariants (incl. `mulligan:checkpoint:` labels are `type:label`)
+
+Unlike marker scenarios, a missing session JSONL is a HARD FAIL here — every assertion is JSONL-based and
+the label writes are deterministic, so an absent JSONL means the spawn failed.
+
+---
+
+### F-banner
+
+**Tests:** the active-checkpoint banner state end-to-end on a real `pi -p` run (BUG-003 / spec
+@10-testing.md:103 §2.1): the banner **PERSISTS** across turns while a checkpoint is active, **CLEARS within
+ONE fire** of `/mulligan_checkpoint_revoke`, is **RESTORED on `/resume`**, and contributes **ZERO banner
+bytes** to the filtered view.
+
+**Run (deterministic — two runs sharing `--session-id`; commands are NOT routed through `/mulligan_smoke`):**
+```bash
+# Run 1: seed → set → 2 observing fires (persistence) → revoke → 1 observing fire (cleared).
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-banner \
+  -p 'Reply with exactly: BANNERSEED' \
+  -p '/mulligan_checkpoint beta' \
+  -p 'Reply with exactly: OK' -p 'Reply with exactly: OK again' \
+  -p '/mulligan_checkpoint_revoke beta' \
+  -p 'Reply with exactly: OK3'
+# Run 2 (SAME --session-id → pi reopens/resumes it): set a checkpoint, observe it on the resumed session.
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-banner \
+  -p '/mulligan_checkpoint gamma' -p 'Reply with exactly: OK4'
+```
+
+Prompt 1 is a SEED model turn — slash-command prompts do NOT create user message entries, so on a fresh
+session `/mulligan_checkpoint beta` would have no real message to label (the same baseline breakage
+F-ckptcmd fixed); the seed assistant reply is the label target. The four observing prompts use DISTINCT
+reply texts (`OK` / `OK again` / `OK3` / `OK4`) so a model echo can never confuse fire attribution; the
+reply content itself is not asserted. NOTE: smoke.ts's factory TRUNCATES the log per spawn, so run 2's log
+holds ONLY run-2 lines — the orchestrator parses run-1's log BETWEEN the two spawns and concatenates the
+two fire arrays for the cross-run assertions.
+
+**Headless observable strategy:** `ctx.ui.setWidget` is **unobservable in `-p` mode** (`ctx.hasUI === false`
+→ `reconcileBanner` branch (a) no-ops — src/banner.ts). The scenario instead asserts the pure
+`listCheckpoints` recompute logged on every `context.fire` (the P1.M2.T1.S1 observable: the same
+latest-wins label scanner `reconcileBanner` itself imports — `banner: {activeCount, names}`) **plus** a
+0-banner-bytes grep of the filtered view (the banner is UI-only and never injected into `event.messages` —
+E26 acceptance (d) — and the observable stores only names, so a whole-detail JSON grep for the fragment
+`Mulligan checkpoint active:` is a true filtered-view check). The `/resume` restore is proven with a second
+spawn reusing the same `--session-id` (the F-reload/E11 two-run pattern): the label persisted in the
+reopened session JSONL, and `src/index.ts:87`'s `session_start` `reconcileBanner` path exists for it in UI
+mode — headless, we assert the pure state it would render.
+
+**Pass:**
+- (a) pre-revoke fires (the two between set and revoke): `banner.activeCount ≥ 1` AND `banner.names`
+  includes `"beta"` (persistence across turns)
+- (b) first post-revoke fire: `banner.activeCount === 0`, no later run-1 active fire (clears within ONE fire)
+- (c) some run-2 fire: `banner.activeCount ≥ 1` AND `banner.names` includes `"gamma"` (restored on /resume)
+- (d) ZERO banner bytes: no `context.fire` detail in either run contains `Mulligan checkpoint active:`;
+  `hasNudge === false` on every fire
+- (e) both spawns exited 0 (soft-⚠-tolerated like F-reload when logs are present)
+
+Zero context fires across both runs is a HARD FAIL (spawn/model failure — never a vacuous pass).
+
+---
+
+### F-consent
+
+**Tests:** the v1.1 CONSENT model end-to-end on a real `pi -p` run (BUG-003 / spec @10-testing.md §2.1
+:101): a user-set checkpoint consents to having their **subsequent user prompts hidden** by a checkpoint
+rewind — the ONE place a rewind may hide user messages — while a `last_turn` rewind **NEVER** hides a user
+message (the guardrail).
+
+**Run (8-prompt split-phase flow; the two rewinds are deterministic via `/mulligan_smoke` → `rewindNow`,
+the REAL `makeRewindTool`):**
+```bash
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-consent \
+  -p 'Reply with exactly: SETANCHOR' \
+  -p '/mulligan_checkpoint delta' \
+  -p 'User says: MULLIGAN-SMOKE-CONSENT-U1 — reply with exactly: OK' \
+  -p 'User says: MULLIGAN-SMOKE-CONSENT-U2 — reply with exactly: OK' \
+  -p '/mulligan_smoke F-consent-rewind' \
+  -p 'User says: MULLIGAN-SMOKE-CONSENT-GUARD — reply with exactly: OK' \
+  -p '/mulligan_smoke F-consent-guard' \
+  -p 'Reply with exactly: OK'
+```
+
+- **Seed anchor first** (prompt 1): slash-command prompts create NO user message entries, so a committed
+  model turn must precede `/mulligan_checkpoint delta` for `setCheckpoint`'s backwards anchor walk
+  (src/markers.ts:456-490) to find a stable entry — the same baseline breakage F-ckptcmd/F-banner fixed.
+- **TWO user canaries** (U1/U2, prompts 3+4): the hiding assertion must not pass vacuously if one prompt
+  fails to commit — each is independently verified visible pre-rewind, then hidden post-rewind.
+- **Guard arm** (prompts 6+7): the GUARD canary lives in a user prompt a `last_turn` rewind re-lands on;
+  it must stay VISIBLE (only checkpoint consent hides user messages).
+- **Observing fire** (prompt 8): ALL hiding/visibility verdicts read off the LAST `context.fire` detail.
+  Expected fires: 5 (prompts 1, 3, 4, 6, 8 — the slash prompts dispatch without inference).
+
+**Observables** (smoke.ts, computed on EVERY fire): `consent: {u1, u2, guard}` — role-agnostic content
+scans of the POST-filter view (the canaries are unique and only appear in user prompts); plus the
+P1.M2.T1.S1 `userMsgCount` / `firstUserPresent` fields.
+
+**Pass:**
+- (a) the checkpoint rewind succeeded with K>0 (text not refused / not `0 messages will be hidden`);
+  JSONL has the `mulligan:checkpoint:delta` label SET and CONSUMED (auto-expiry), and ≥2
+  `mulligan:rewind` markers (checkpoint + guard)
+- (b) on the final fire `consent.u1 === false` AND `consent.u2 === false` (both post-checkpoint user
+  prompts hidden — THE consent behavior) while `userMsgCount ≥ 2` and the pre-checkpoint user prompts
+  remain visible; at least one pre-rewind fire showed each of u1/u2 `true` (no vacuous pass)
+- (c) `firstUserPresent === true` on EVERY fire (`first:user` is protected — config.ts `protectedRoles`)
+- (d) on the final fire `consent.guard === true` — the re-landed GUARD user prompt remains visible after
+  the `last_turn` rewind, and that rewind ran without refusal
+- (e) global invariants hold; a missing JSONL is a HARD fail (every write is deterministic)
+
+---
+
+### F-drift-userexempt
+
+**Tests:** the D10 **user-exemption** of the drift nudge end-to-end on a real `pi -p` run (BUG-003 /
+spec @10-testing.md §2.1, fifth v1.1 scenario): a large (~60k-token) USER paste does **NOT** fire the
+drift nudge, while the window-level **high-water** signal (which counts ALL context, user included)
+still observes it. The negative-space counterpart of F-nudge-drift.
+
+**Run (4-prompt flow; NO `/mulligan_smoke` dispatch — the paste must be genuine user prompts via
+`-p`, because a command dispatch bypasses the agent loop and would defeat the D10 point):**
+```bash
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-drift-userexempt \
+  -p '<generated paste part 1 — MULLIGAN-SMOKE-PASTE-CANARY + FILLER lines; runtime-generated>' \
+  -p '<generated paste part 2 — FILLER lines>' \
+  -p '<generated paste part 3 — FILLER lines>' \
+  -p 'Reply with exactly: OK'
+```
+
+- **Generated paste**: ~60k tokens ≈ 240KB of argv total. Linux `MAX_ARG_STRLEN` caps a single argv
+  argument at 128KB, so `run-smoke.mjs` splits the paste into 3 chunks of ~20k tokens (~80KB argv
+  each) — every chunk is still a genuine user prompt, all user-attributable, so the D10 exemption
+  and the ~60k-token total growth are preserved. The filler is generated deterministically at
+  runtime (repeated `MULLIGAN-SMOKE-PASTE-FILLER-…` lines, ~4 chars/token per src/tokens.ts
+  `CHARS_PER_TOKEN`); a checked-in 240KB fixture would bloat the repo and is forbidden.
+- **D10 rationale**: `estimateAgentTokens` (src/tokens.ts:126-143) excludes `role==='user'`
+  messages from the drift delta — the exemption is **structural** (there is no `50000` constant;
+  spec/07:174's "50k" is illustrative).
+
+**Expect in log** (`context.fire` detail on every fire): `hasNudge:false`, and
+`pasteCanaryPresent:true` on post-paste fires (the `MULLIGAN-SMOKE-PASTE-CANARY` line proves the
+paste is actually in the filtered context).
+
+**Expect in JSONL:** ZERO `mulligan:nudge` entries (the §2.3 invariant + the exemption); global
+invariants hold; a missing JSONL degrades to smoke-log assertions (model-timeout tolerance).
+
+**Pass:**
+- (a) HARD — pi exits 0; `hasNudge === false` on EVERY fire; ZERO `mulligan:nudge` entries on disk;
+  `pasteCanaryPresent === true` on ≥1 fire; global invariants hold
+- (b) SOFT (window-dependent) — `highWater.latch`/`fraction` (P1.M2.T1.S2) SHOULD show the 0.7
+  crossing when the provider window is small enough; on huge windows (60k cannot cross 0.7) the
+  result is a `⚠ SOFT` note with the measured max fraction — cf. F-nudge-drift's model-dependent arm
+- (c) contrast — the "agent-attributable growth DOES fire the drift nudge" criterion is covered by
+  the existing green F-nudge-drift scenario (above); cross-reference only, no duplication
+
+---
+
+### F-useraudit
+
+**Tests:** the human `/mulligan_audit` command and the agent `mulligan_audit` tool render the **SAME
+report** through **separated sinks** on a real `pi -p` run (BUG-003 / spec @10-testing.md §2.1
+F-useraudit): the command's report goes ONLY to `ctx.ui.notify` (a one-shot human sink — never
+`event.messages`, never persisted), while the agent tool's result reaches the model as a `toolResult`
+entry; the real headless `/mulligan_audit` dispatch early-returns on `!ctx.hasUI` without throwing and
+writes nothing.
+
+**Run (3-prompt flow):**
+```bash
+pi -ne -e ./src/index.ts -e ./test/integration/smoke.ts --session-id smoke-F-useraudit \
+  -p '/mulligan_smoke F-useraudit' \
+  -p '/mulligan_audit' \
+  -p 'Use the mulligan_audit tool with top 8 now, then reply with exactly: OK'
+```
+
+**Wrapper-ctx notify-capture strategy (THE core trick):** headless `-p` mode has `ctx.hasUI === false`,
+and `makeAuditCommand`'s handler **early-returns** at that gate (src/commands.ts) — the raw command
+would produce NO report and the parity assertion would compare a real report against `""` (a vacuous
+fail). The `F-useraudit` smoke.ts case therefore wraps the **REAL** ctx: spread `...ctx`, override
+`hasUI: true` + a capturing `ui.notify`. The wrapper REUSES the real `ctx.sessionManager` — a fake would
+give a different filtered view/markers and parity would be coincidental, not proven.
+
+**Parity claim:** prompt 1's case drives BOTH consumers back-to-back inside the one command dispatch —
+the REAL `auditTool.execute("smoke-useraudit-tool-1", {top:8}, …, ctx)` and the REAL
+`makeAuditCommand(pi).handler("", wrapperCtx)` — with NO session writes between them, so both hit the
+same `rt.lastFiltered`-or-E16-fallback path and the identical `renderAuditReport` inputs. The asserter
+compares the FULL texts after normalization (trim lines, drop blanks + `─`/`=` rule lines) with a
+non-vacuity guard (the tool report must exceed 200 chars). The renderer emits no timestamps/volatile
+fields (verified against `renderAuditReport` in src/tools/audit.ts), so normalized equality is exact.
+
+**Sink-separation contract:**
+- the command's captured notify output is NEVER persisted — the JSONL must contain ZERO report bytes
+  (grep needle: the report title `Mulligan audit — context you are currently carrying`) outside the
+  **sanctioned agent toolResult sink**
+- the agent tool's result DID reach the model: prompt 3 has the model call `mulligan_audit` FOR REAL —
+  pi only persists `toolResult` entries issued by the agent loop (a direct `execute` inside a command
+  dispatch persists nothing — verified empirically), so the "reached the model" positive arm requires a
+  genuine model tool call (the proven F-shrink-persist "Call the mulligan_smoke_big tool once…" setup
+  pattern)
+- prompt 2 (`-p /mulligan_audit`) is the REAL headless command dispatch through index.ts registration:
+  `hasUI:false` → early return; it must not throw (pi exit 0) and must not write
+
+**Pass:**
+- (a) normalized tool report === normalized command-captured report (non-vacuous, full-text)
+- (b) ZERO `mulligan:rewind`/`shrink`/`cancel` entries + ZERO report bytes outside the toolResult sink
+- (c) a `mulligan_audit` toolResult entry IS in the session JSONL (the tool result reached the model)
+- (d) the headless `/mulligan_audit` dispatch survived: pi exit 0, no crash/fail lines, zero extra writes
+- (e) global invariants hold; a missing JSONL is a HARD fail for (b)/(c)
+
+---
+
 ### F-failopen
 
 **Tests:** the filter is fail-open — a malformed marker does NOT crash the turn (pass-through).
@@ -454,7 +724,7 @@ index.
 npm run smoke
 ```
 
-Runs all 14 deterministic scenarios (9 F-* + 5 E*) via `test/integration/run-smoke.mjs`. Prints a `PASS`/`FAIL`
+Runs all 19 deterministic scenarios (14 F-* + 5 E*) via `test/integration/run-smoke.mjs`. Prints a `PASS`/`FAIL`
 line per scenario (with per-assertion detail on failure), then a summary; exits 0 if all pass, 1 otherwise.
 
 **Notes:**
