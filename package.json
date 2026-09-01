@@ -1,6 +1,6 @@
 {
   "name": "pi-mulligan",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Autonomous, token-cheap context self-rewind for a Pi coding agent — shed context produced by mistake and redo a turn with a self-authored note.",
   "type": "module",
   "license": "MIT",
