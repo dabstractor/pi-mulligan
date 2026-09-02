@@ -49,6 +49,20 @@ Some scenarios use more than the canonical two `-p` flags: three-prompt flows (F
 split-phase seeding (F-consent) — each subsequent `-p` is an ordinary observing turn that fires `context`
 and flushes the session JSONL.
 
+### The v2.1 rewrite-budget flush invariant
+
+Since the v2 rewrite budget (`rewrites.maxMoments=1`, `flushShedTokens=4000`), **every** rewind/shrink op
+**queues INERT first** — no marker, no context change — until a flush trigger fires (shed volume ≥
+`flushShedTokens`, a second op in the same turn, `mulligan_audit`, provider compaction, or the 16k safety
+valve). A single small smoke op trips no trigger, so every scenario that asserts **ACTIVE** markers
+(F-rewind-core, F-shrink-persist, F-checkpoint, F-reload, E7, E11, E20) calls `flushQueued()` after its
+queued op(s): a direct `flushRewrites(pi, ctx, rt, "audit")` with the **REAL** `pi`, which persists the
+markers (`mulligan:rewind` / `mulligan:shrink` / `mulligan:note`) and consumes checkpoint labels — the same
+activation path a real user's `mulligan_audit` call drives. `run-smoke.mjs` asserts the transition via the
+`rewrite.flush` smoke-log line (count ≥ 1, ok) in the marker-asserting F-scenarios; the run-2 assertions of
+F-reload/E11 double as proof the flushed markers persisted across the reload. Two-run scenarios MUST flush
+before exiting run 1 — run 2's fresh process can never flush run 1's in-memory queue.
+
 ### The two-run `/resume` pattern
 
 Scenarios that prove state persists across a process restart (F-banner run 2, F-reload, E11) run **twice**:

@@ -42,10 +42,13 @@ import { listCheckpoints, makeAuditTool } from "../../src/tools/audit.js";
 import { makeAuditCommand } from "../../src/commands.js"; // F-useraudit — the REAL /mulligan_audit handler
 import { appendRewindMarker, type RewindMarkerInput } from "../../src/markers.js";
 import { getRuntime } from "../../src/runtime.js"; // SHARED module instance — same SessionRuntime src mutated
+import { flushRewrites } from "../../src/rewrite-budget.js"; // [v2.1] flush trigger (b) — smoke drives activation after queued ops
 import { estimateTokens } from "../../src/tokens.js"; // same estimator src uses (chars/4)
 
-// [v1.2] mulligan_audit is a makeAuditTool(pi) factory (flush trigger (b)). The smoke scenarios never
-// queue rewrites, so a no-op pi stand-in keeps the `auditTool.execute(...)` call sites unchanged.
+// [v1.2] mulligan_audit is a makeAuditTool(pi) factory. E12/F-useraudit call it with an EMPTY queue (the
+// common case — pi is never touched for reads), so a no-op pi stand-in keeps those call sites unchanged.
+// Marker-ACTIVATING scenarios must NOT flush through this stand-in (marker writes would be swallowed);
+// they call flushRewrites with the REAL pi via flushQueued() instead.
 const auditTool = makeAuditTool(
   {} as unknown as import("@earendil-works/pi-coding-agent").ExtensionAPI,
 );
@@ -150,6 +153,29 @@ async function rewindNow(
   }
 }
 
+/**
+ * flushQueued — [v2.1 rewrite budget] activate the session's queued rewrite ops via the designed "audit"
+ * flush trigger (rewrite-budget.ts trigger (b)). Since v2 EVERY rewind/shrink op queues INERT first, and a
+ * single small smoke op trips no volume/batch trigger (maxMoments=1, flushShedTokens=4000), so scenarios
+ * that assert ACTIVE markers must drive an explicit flush. Uses the REAL pi so the flushed markers
+ * (mulligan:rewind / mulligan:shrink / mulligan:note + checkpoint label consumption) persist to the
+ * session JSONL. smokeLogs the FlushResult (count/ok/applied); NEVER throws.
+ */
+async function flushQueued(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    const rt = getRuntime(ctx.sessionManager.getSessionId());
+    const res = flushRewrites(pi, ctx as unknown as ExtensionContext, rt, "audit");
+    smokeLog("rewrite.flush", res.ok ? "info" : "fail", {
+      count: res.count,
+      ok: res.ok,
+      applied: res.applied,
+      momentsSpent: rt.momentsSpent,
+    });
+  } catch (e) {
+    smokeLog("rewrite.flush", "fail", { error: String(e) });
+  }
+}
+
 // ── driveScenario: the per-scenario deterministic driver (spec/10 §2.1) ───────────────────────
 
 /**
@@ -193,7 +219,9 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // hasRewindMarker:true + notePresent:true (the filter sees the persisted state). The authoritative
         // canary-drop proof is the MODEL-DRIVEN path (documented in scenarios.md): the agent calls
         // mulligan_rewind mid-turn after a bloated tool call, and the next inference's filtered view drops it.
+        // [v2.1] the op QUEUES inert under the rewrite budget — flushQueued() activates it via the audit trigger.
         await rewindNow(pi, ctx, "smoke-rewind-1", "last_turn");
+        await flushQueued(pi, ctx);
         break;
       }
       case "F-shrink-persist": {
@@ -237,6 +265,9 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         } catch (e) {
           smokeLog("tool.shrink", "fail", { variant: "refusal", error: String(e) });
         }
+        // [v2.1] the successful shrink QUEUED inert — flush via the audit trigger so the marker persists
+        // and the substitution is visible on the observing turn (the refusal appended nothing to the queue).
+        await flushQueued(pi, ctx);
         break;
       }
       case "F-shrink-preventive": {
@@ -297,6 +328,7 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
           smokeLog("tool.checkpoint", "fail", { error: String(e) });
         }
         await rewindNow(pi, ctx, "smoke-cp-rw-1", "checkpoint", { checkpoint: "alpha" });
+        await flushQueued(pi, ctx);
         break;
       }
       case "F-checkpoint-set": {
@@ -319,6 +351,8 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // 'alpha' → hides the post-checkpoint SEED_HIDDEN turn (K>0). The orchestrator's final `-p "Reply OK"` is the
         // observing inference on which F-checkpoint.hiding is asserted.
         await rewindNow(pi, ctx, "smoke-cp-rw-1", "checkpoint", { checkpoint: "alpha" });
+        // [v2.1] flush so the rewind marker persists + the 'alpha' label is consumed at activation.
+        await flushQueued(pi, ctx);
         break;
       }
       case "F-consent-rewind": {
@@ -360,6 +394,9 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // orchestrator asserts the marker survived reload (hasRewindMarker:true + canary hidden). The
         // orchestrator runs both; this body only does run 1.
         await rewindNow(pi, ctx, "smoke-reload-1", "last_turn");
+        // [v2.1] flush BEFORE exiting — run 2 (a fresh process) can never flush this in-memory queue, and the
+        // marker must be ON DISK for the reload assertion to mean anything.
+        await flushQueued(pi, ctx);
         break;
       }
       // ── Edge cases (E7/E11/E12/E15/E20) — spec/08 Pi-dependent cases that cannot be unit-tested ──────
@@ -368,6 +405,7 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // v1 accepts that compaction may transiently reference hidden content; no code mitigation exists.
         // This scenario documents + smoke-tests the NO-CRASH property (the turn survives). PASS-with-note.
         await rewindNow(pi, ctx, "smoke-e7-1", "last_turn");
+        await flushQueued(pi, ctx); // [v2.1] activate — the JSONL marker/note assertions need it on disk
         smokeLog("E7", "info", {
           note:
             "known limitation — compaction may transiently reference hidden content (v1 accepted; mitigated by later compaction). Note survives.",
@@ -379,6 +417,7 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // orchestrator) reopens the session → the orchestrator asserts run-2's first context.fire has
         // hasRewindMarker:true (the marker survived the reload into a new process). This body does run 1.
         await rewindNow(pi, ctx, "smoke-e11-1", "last_turn");
+        await flushQueued(pi, ctx); // [v2.1] flush before exit — run 2 cannot flush run 1's in-memory queue
         break;
       }
       case "E12": {
@@ -429,6 +468,7 @@ async function driveScenario(pi: ExtensionAPI, ctx: ExtensionCommandContext, sce
         // mulligan:note (type:custom_message) entry in FILE ORDER. The synchronous append-then-send in the
         // rewind tool guarantees marker-before-note.
         await rewindNow(pi, ctx, "smoke-e20-1", "last_turn");
+        await flushQueued(pi, ctx); // [v2.1] activate — flushRewrites appends marker-then-note, preserving order
         break;
       }
       case "F-ckptcmd": {

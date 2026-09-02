@@ -221,6 +221,23 @@ function assertGlobalInvariants(results, entries) {
   assert(results, "§2.3 ZERO mulligan:nudge entries on disk", nudgeCount === 0, nudgeCount ? `${nudgeCount} found` : "");
 }
 
+/**
+ * assertFlush — [v2.1 rewrite budget] assert the scenario drove an explicit queue→flush transition
+ * (the ops queue INERT first; flushQueued() in smoke.ts activates them via the "audit" trigger).
+ * Guards against the harness silently regressing back to inert-queue mode (all marker/hiding
+ * assertions would then fail confusingly downstream).
+ */
+function assertFlush(results, smoke) {
+  const flushLines = smoke.lines.filter((l) => l.test === "rewrite.flush");
+  const last = flushLines[flushLines.length - 1];
+  assert(
+    results,
+    "rewrite.flush activated the queued op (count≥1, ok)",
+    !!last && last.status !== "fail" && last.detail?.count >= 1 && last.detail?.ok === true,
+    JSON.stringify(last?.detail ?? "no rewrite.flush line"),
+  );
+}
+
 // ── Per-scenario assertion functions ─────────────────────────────────────────
 
 /**
@@ -246,6 +263,7 @@ function assertRewindCore({ smoke, piRes }) {
   assert(results, "context.fire observed", !!cf, cf ? "" : "no context.fire");
   assert(results, "context.fire hasRewindMarker:true", cf?.hasRewindMarker === true, String(cf?.hasRewindMarker));
   assert(results, "context.fire notePresent:true", cf?.notePresent === true, String(cf?.notePresent));
+  assertFlush(results, smoke);
   // NEW: the seed reply MUST be hidden on the observing inference (BUG-001/002 regression guard). Read back the HARD
   // smokeLog verdict emitted by the context handler (GOTCHA #7 — logging alone does not fail a scenario).
   const hidingLines = smoke.lines.filter((l) => l.test === "F-rewind-core.hiding");
@@ -294,6 +312,7 @@ function assertShrinkPersist({ smoke, piRes }) {
   const cf = smoke.contextFires[smoke.contextFires.length - 1];
   assert(results, "context.fire observed", !!cf, "");
   assert(results, "fire: substitution present AND original canary absent", cf?.shrunkInContext === true && cf?.resultCanaryPresent === false, JSON.stringify(cf ?? {}));
+  assertFlush(results, smoke);
   // JSONL: mulligan:shrink (custom) count === the number of SUCCESSFUL shrink log lines (the refusal
   // appends NOTHING); the ORIGINAL canary still on disk (shrink is a view-substitution, NOT a rewrite).
   if (entries.length > 0) {
@@ -402,6 +421,7 @@ function assertCheckpoint({ smoke, piRes }) {
   const hidingLines = smoke.lines.filter((l) => l.test === "F-checkpoint.hiding");
   const lastHiding = hidingLines[hidingLines.length - 1];
   assert(results, "post-checkpoint seed hidden + anchor survives (BUG-003/001 guard)", lastHiding && lastHiding.status === "pass", JSON.stringify(lastHiding?.detail ?? {}));
+  assertFlush(results, smoke);
   if (entries.length > 0) {
     assert(results, "JSONL has label mulligan:checkpoint:alpha", countLabel(entries, "mulligan:checkpoint:alpha") >= 1, "");
     assert(results, "JSONL has mulligan:rewind (custom)", countCustom(entries, "mulligan:rewind", "rewind") >= 1, "");
