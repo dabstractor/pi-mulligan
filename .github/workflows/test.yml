@@ -28,5 +28,21 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Configure pi provider
+        # Fresh runners have no ~/.pi/agent/settings.json — pin the provider/model the suite is
+        # validated against (mirrors the maintainer's local defaultProvider/defaultModel).
+        run: |
+          mkdir -p ~/.pi/agent
+          printf '%s\n' '{' '  "defaultProvider": "zai",' '  "defaultModel": "glm-5.3"' '}' > ~/.pi/agent/settings.json
+
       - name: Integration smoke
+        # The smoke suite drives REAL pi sessions (one model turn per -p prompt). The runner gets
+        # `pi` from devDependencies via npm-run PATH, but needs provider credentials — without them
+        # the harness preflight exits 2 with "ENVIRONMENT FAILURE" (not a scenario regression).
+        # Add a repo secret for your provider (ZAI_API_KEY here; switch defaultProvider above to
+        # anthropic/openai and pass the matching secret if you prefer another provider).
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          # Cold runners can be slower than local; give each spawn more headroom (default 120s).
+          MULLIGAN_SMOKE_PI_TIMEOUT_MS: "180000"
         run: npm run smoke

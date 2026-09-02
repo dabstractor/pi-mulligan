@@ -52,7 +52,8 @@ const SCENARIOS = [
 
 const SMOKE_TMP_DIR = join(tmpdir(), "mulligan-smoke");
 mkdirSync(SMOKE_TMP_DIR, { recursive: true });
-const PI_TIMEOUT_MS = 120_000;
+// Per-spawn timeout (ms). Env-overridable (MULLIGAN_SMOKE_PI_TIMEOUT_MS) — cold CI runners may need more.
+const PI_TIMEOUT_MS = Number(process.env.MULLIGAN_SMOKE_PI_TIMEOUT_MS) || 120_000;
 
 // RUN_ID — a per-invocation suffix appended to every scenario's --session-id (FINDING 1 fix). It is stable FOR
 // THE DURATION of one `npm run smoke` (module load) so the two spawns of F-reload/E11 share a session, but UNIQUE
@@ -1048,10 +1049,49 @@ function runScenario(scenario) {
   return { piRes, smoke };
 }
 
+/**
+ * preflight — verify the ENVIRONMENT can run pi + a real model inference BEFORE burning minutes on 19
+ * scenarios. On GitHub Actions the runner has `pi` (devDependencies + npm-run PATH) but NO provider
+ * credentials: extensions load fine, the first model call fails, pi exits 1, and every subsequent -p
+ * prompt (including the deterministic /mulligan_smoke setup) never dispatches — producing the confusing
+ * "0 context fires / model may have timed out" cascade. Detect that up front and exit 2 (distinct from
+ * the scenario-failure exit 1) with pi's own stderr so the CI log shows the real cause (missing API key).
+ */
+function preflight() {
+  const v = spawnSync("pi", ["--version"], { encoding: "utf8" });
+  const version = ((v.stdout ?? "") + (v.stderr ?? "")).trim().split("\n").pop() ?? "";
+  if (v.status !== 0 || !version) {
+    console.log("ENVIRONMENT FAILURE: `pi` is not runnable on this machine (spawn failed).\n");
+    process.exit(2);
+  }
+  console.log(`pi: ${version}`);
+  const res = spawnSync("pi", ["-ne", "-p", "Reply with exactly: OK"], {
+    encoding: "utf8",
+    timeout: PI_TIMEOUT_MS,
+  });
+  if (res.status !== 0) {
+    console.log("──────────────────────────────────────────────────────────");
+    console.log("ENVIRONMENT FAILURE: pi could not complete a model inference.");
+    console.log("This is NOT a scenario regression — the smoke suite needs working");
+    console.log("provider credentials (e.g. ZAI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY).");
+    console.log(`pi exit=${res.status}; stderr tail:`);
+    console.log(tailLines(res.stderr ?? "", 15).map((l) => `  │ ${l}`).join("\n"));
+    console.log("──────────────────────────────────────────────────────────");
+    process.exit(2);
+  }
+  console.log("preflight OK (pi + model inference work)\n");
+}
+
+/** tailLines — the last n non-empty lines of a string (for surfacing pi stderr on failure). */
+function tailLines(s, n) {
+  return s.split("\n").map((l) => l.trimEnd()).filter((l) => l.length > 0).slice(-n);
+}
+
 function main() {
   console.log("════════════════════════════════════════════════════════════");
   console.log("  Mulligan integration smoke harness (deterministic suite)");
   console.log("════════════════════════════════════════════════════════════\n");
+  preflight();
 
   let totalPass = 0;
   let totalFail = 0;
@@ -1098,6 +1138,14 @@ function main() {
       console.log(`FAIL ${scenario}`);
       totalFail++;
       failed.push(scenario);
+      // Surface pi's stderr on a failed non-zero-exit run so remote/CI failures are attributable
+      // (auth errors, provider 5xx, timeouts) instead of the generic "model may have timed out".
+      const stderrs = [piRes, run.r2].filter((r) => r && r.status !== 0 && (r.stderr ?? "").trim());
+      for (const r of stderrs) {
+        const tail = tailLines(r.stderr, 10).map((l) => `  │ ${l}`).join("\n");
+        if (tail) console.log(`  ┆ pi stderr (exit=${r.status}):
+${tail}`);
+      }
     }
     console.log("");
   }
